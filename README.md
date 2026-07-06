@@ -27,8 +27,61 @@ The tests check that the naive and chunked paths agree numerically (float64,
 `atol/rtol` down to `1e-9`) across several chunk sizes, and a toy sanity check
 that online updates actually memorize repeated key/value pairs.
 
+## Phase 2: MAC (Memory As Context)
+
+`src/titans/mac.py` adds `TitansMACBlock`, the **Memory As Context** architecture
+(§4.1, Eqs 19-25). A sequence `[B, N, d]` is split into fixed segments of size
+`C`; the neural-memory carry `(state, S)` (weights **and** momentum) is threaded
+across segments *sequentially*, while parallelism lives *inside* each segment.
+Per segment `i`:
+
+1. **Historical retrieval** from the memory carried from earlier segments:
+   `h_i = retrieve(state, q_proj(S_i))`.
+2. Build the context window `[persistent tokens; h_i; S_i]` (`persistent.py`:
+   learnable `PersistentMemory` tokens).
+3. **Causal self-attention** over that window (`attention.py`,
+   `CausalSelfAttention`), with the §4.4 details: SiLU on Q/K/V projections,
+   L2-normalised (cosine) Q·K, and a depthwise-separable **causal** conv after
+   each projection.
+4. Take the last `C` positions as the segment's attention output `y_i`.
+5. **Update the long-term memory using `y_i`** via the new retrieval-free
+   `NeuralMemory.update(y_i, state, S, chunk_size)` — the memory learns from what
+   attention selected.
+6. **Output** = gate of `y_i` with a fresh retrieval `r_i` from the just-updated
+   memory, then a final projection; a residual wraps the whole block.
+
+Supporting change in `memory.py`: a shared chunked-scan helper now backs both the
+Phase-1 `forward_chunked` and the new `update` (which skips retrieval), and the
+momentum state `S` is exposed via `init_memory` / `update` so it can be carried
+across segments. The Phase-1 tests are unchanged and still pass.
+
+```bash
+pytest        # runs Phase 1 (memory equivalence) + Phase 2 (MAC) tests
+```
+
+`tests/test_mac.py` checks output shape (several configs), **causality** (a change
+at/after a segment boundary leaves every earlier output bit-identical — the key
+correctness test), gradient flow to every outer parameter (the functional inner
+loop does not detach the outer graph), and a small toy trainability check.
+
+### Under-specified points (documented design choices)
+
+* **`N % C == 0` is required** — no padding logic this phase; a clear `ValueError`
+  is raised otherwise.
+* **Update/output gate**: the paper only says "normalization and gating with a
+  linear layer". We RMSNorm each branch and combine with a learnable per-channel
+  sigmoid gate `o = norm(y)·σ(W_r norm(r)) + norm(r)·σ(W_y norm(y))`, then a final
+  linear output projection with a block-level residual `x + out_proj(o)`.
+* **Causal-conv kernel size** defaults to 4 ("a small kernel" in the paper).
+* **Memory update chunk size** defaults to the segment size `C` (one parallel
+  chunk per segment).
+* **Not validated against an official reference** — none is public. Correctness
+  here means *internally consistent, causal, and faithful to the paper's
+  described mechanism*, not numerically matching a ground truth.
+
 ## Status
 
-This is **Phase 1** of a multi-phase implementation: the neural memory core
-only. The MAC / MAG / MAL attention architecture, sequence segmentation, and
-persistent memory tokens are future work (Phase 2).
+**Phase 1** (neural memory core) and **Phase 2** (a single, well-tested MAC block)
+are done. Not yet built: a full multi-layer model / training script, the MAG and
+MAL variants, per-channel (vs scalar) memory gates, and a true parallel scan for
+the momentum recurrence (currently a Python scan across chunks).

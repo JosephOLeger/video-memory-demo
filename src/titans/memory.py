@@ -192,9 +192,94 @@ class NeuralMemory(nn.Module):
     def retrieve(self, state: Params, q: torch.Tensor) -> torch.Tensor:
         """Forward pass of the memory at a given weight state (no update).
 
-        ``q`` has shape ``[B, d]``; weights in ``state`` have a leading ``B`` dim.
+        ``q`` has shape ``[B, d]`` (a single query per batch element) or
+        ``[B, T, d]`` (a whole segment of queries). ``mlp_forward`` handles the
+        extra ``T`` dim inside each vmapped example, so both shapes work and the
+        output mirrors ``q``'s shape. Weights in ``state`` carry a leading ``B``.
+
+        This decouples the query stream from the update stream: ``state`` may have
+        been produced by *other* tokens than the ones in ``q`` (used by MAC).
         """
         return vmap(mlp_forward, in_dims=(0, 0, None))(state, q, self.num_layers)
+
+    # ------------------------------------------------------------- carry state
+    def init_momentum(self, state: Params) -> Params:
+        """Zero momentum state ``S`` matching the shapes of ``state``."""
+        return {key: torch.zeros_like(w) for key, w in state.items()}
+
+    def init_memory(self, batch: int) -> Tuple[Params, Params]:
+        """Fresh ``(state, S)`` carry for a new sequence (weights ``M_0``, ``S=0``).
+
+        MAC threads this ``(state, S)`` pair across segments of a long sequence,
+        so both the weights *and* the momentum must be carried, not just weights.
+        """
+        state = self.memory.init_state(batch)
+        return state, self.init_momentum(state)
+
+    def _scan_chunked(
+        self,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        alpha: torch.Tensor,
+        eta: torch.Tensor,
+        theta: torch.Tensor,
+        state: Params,
+        S: Params,
+        chunk_size: int,
+        q: Optional[torch.Tensor] = None,
+    ) -> Tuple[Params, Params, Optional[list]]:
+        """Shared chunked update recurrence (Section 3.2).
+
+        Computes, per chunk, all inner gradients at the chunk-start weights in one
+        nested-``vmap`` call, then scans the momentum / weight-decay recurrence
+        across the chunk. If ``q`` is given, retrieves ``M_t(q_t)`` at every step
+        and returns the list of retrievals; otherwise skips retrieval entirely
+        (the ``update``-only path, saving the wasted forward passes).
+        """
+        grad_fn = self._grad_fn()
+        # inner vmap: tokens in the chunk (params shared = chunk start);
+        # outer vmap: the batch dimension B.
+        chunk_grad = vmap(vmap(grad_fn, in_dims=(None, 0, 0)), in_dims=(0, 0, 0))
+
+        N = k.shape[1]
+        ys: Optional[list] = [] if q is not None else None
+        for start in range(0, N, chunk_size):
+            end = min(start + chunk_size, N)
+            G = chunk_grad(state, k[:, start:end], v[:, start:end])
+            for j in range(end - start):
+                t = start + j
+                g = {key: G[key][:, j] for key in state}
+                state, S = self._step(
+                    state, S, g, alpha[:, t], eta[:, t], theta[:, t]
+                )
+                if ys is not None:
+                    ys.append(self.retrieve(state, q[:, t]))
+        return state, S, ys
+
+    def update(
+        self,
+        x: torch.Tensor,
+        state: Params,
+        S: Params,
+        chunk_size: int,
+    ) -> Tuple[Params, Params]:
+        """Evolve the memory on an input stream ``x`` *without* retrieving.
+
+        Runs the same §3.2 chunked update recurrence as :meth:`forward_chunked`
+        but computes no per-token retrievals -- the caller (MAC) only wants the
+        evolved carry ``(state, S)``. ``x`` has shape ``[B, T, d]``; ``state`` and
+        ``S`` are the incoming carry and are *not* re-initialised, so this can be
+        called once per segment to thread memory across a long sequence.
+        """
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be >= 1")
+        if x.dim() != 3:
+            raise ValueError("update expects x of shape [B, T, d]")
+        k, v, _, alpha, eta, theta = self._project(x)
+        state, S, _ = self._scan_chunked(
+            k, v, alpha, eta, theta, state, S, chunk_size, q=None
+        )
+        return state, S
 
     # ------------------------------------------------------------- reference
     def forward_naive_sequential(
@@ -257,31 +342,11 @@ class NeuralMemory(nn.Module):
         x = x.reshape(B, N, d)
 
         k, v, q, alpha, eta, theta = self._project(x)
-        grad_fn = self._grad_fn()
-        # inner vmap: over tokens in the chunk (params shared = chunk start).
-        # outer vmap: over the batch dimension B.
-        chunk_grad = vmap(
-            vmap(grad_fn, in_dims=(None, 0, 0)),
-            in_dims=(0, 0, 0),
+
+        state, S = self.init_memory(B)
+        state, _, ys = self._scan_chunked(
+            k, v, alpha, eta, theta, state, S, chunk_size, q=q
         )
-
-        state = self.memory.init_state(B)
-        S = {key: torch.zeros_like(w) for key, w in state.items()}
-
-        ys = []
-        for start in range(0, N, chunk_size):
-            end = min(start + chunk_size, N)
-            kc = k[:, start:end]  # [B, b, d]
-            vc = v[:, start:end]
-            # G[key]: [B, b, *param_shape] -- all grads at the chunk-start state.
-            G = chunk_grad(state, kc, vc)
-            for j in range(end - start):
-                t = start + j
-                g = {key: G[key][:, j] for key in state}
-                state, S = self._step(
-                    state, S, g, alpha[:, t], eta[:, t], theta[:, t]
-                )
-                ys.append(self.retrieve(state, q[:, t]))
 
         Y = torch.stack(ys, dim=1)
         Y = Y.reshape(*orig_shape[:-1], self.dim)
