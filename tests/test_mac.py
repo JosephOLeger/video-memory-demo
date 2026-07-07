@@ -56,6 +56,27 @@ def test_output_shape(B, N, C, d, heads, Np):
         assert S[key].shape[0] == B
 
 
+def test_many_segments_stay_finite():
+    """Threading memory across many segments must not blow up to NaN/Inf.
+
+    Regression guard: the online memory update accumulates momentum across
+    segments; without the RMS-normalised memory output ``M(q)`` and the
+    associative loss grow ~geometrically per segment and overflow to NaN once the
+    sequence spans enough segments (surfaced first on 8-segment video latents).
+    A single-precision forward over 16 segments must stay finite.
+    """
+    torch.manual_seed(0)
+    B, C, d, num_seg = 2, 8, 32, 16
+    block = make_block(dim=d, num_heads=4, segment_size=C,
+                       num_persistent_tokens=2, memory_hidden_dim=d,
+                       memory_num_layers=2, seed=0, double=False)
+    x = torch.randn(B, C * num_seg, d)  # float32, like real training
+    out, state, S = block(x)
+    assert torch.isfinite(out).all(), "block output is not finite over many segments"
+    for key in state:
+        assert torch.isfinite(state[key]).all(), f"memory state {key} not finite"
+
+
 def test_requires_divisible_length():
     block = make_block(dim=8, segment_size=4)
     x = torch.randn(2, 10, 8, dtype=torch.float64)  # 10 % 4 != 0

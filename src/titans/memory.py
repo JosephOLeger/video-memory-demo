@@ -61,13 +61,24 @@ def mlp_forward(params: Params, x: torch.Tensor, num_layers: int) -> torch.Tenso
     ``params`` holds ``w{i}`` of shape ``[out, in]`` and ``b{i}`` of shape
     ``[out]``. ``x`` has shape ``[in]``. SiLU is applied between layers.
     Designed to be composed with ``torch.func.grad`` / ``torch.func.vmap``.
+
+    The output is RMS-normalised (parameter-free). Without it the online weight
+    update is unstable when the memory is threaded across many segments: the
+    momentum recurrence lets ``M``'s weights -- and hence ``M(q)`` and the
+    associative loss ``||M(k)-v||^2`` that drives the update -- grow roughly
+    geometrically per segment, overflowing to ``NaN`` (visible only once the
+    sequence spans enough segments). Normalising the *function* bounds both the
+    retrieval and the loss, so the gradient can no longer feed runaway growth.
     """
     h = x
     for i in range(num_layers):
         h = h @ params[f"w{i}"].transpose(-1, -2) + params[f"b{i}"]
         if i < num_layers - 1:
             h = F.silu(h)
-    return h
+    # Parameter-free RMSNorm: keeps M's output on a bounded scale regardless of
+    # how large the online-updated weights become.
+    rms = torch.sqrt(h.pow(2).mean(dim=-1, keepdim=True) + 1e-6)
+    return h / rms
 
 
 class NeuralMemoryMLP(nn.Module):

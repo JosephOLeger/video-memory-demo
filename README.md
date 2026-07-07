@@ -107,12 +107,29 @@ then the world model trains on the cache:
   each a spatial mean-pool of its 256 patches.
 * `precompute_latents.py` — frames → aggregate → clips → processor → encoder →
   concatenate clip latents → cache `.pt`.
+* `data.py` — **Kinetics-mini** loader: lists the `nateraw/kinetics-mini` `.mp4`
+  files (train/val, 5 classes × 10 clips), downloads them, and decodes frames
+  with `decord` into `[F, H, W, C]` tensors. `precompute_kinetics(...)` ties this
+  to the encoder in one call.
 * `train.py` — `load_latents` + per-channel `standardize_latents` (raw encoder
   features are large-magnitude and drive the memory's inner loop to `NaN`
-  otherwise). On cached real latents the L1 drops cleanly with no divergence.
+  otherwise). On cached real Kinetics latents the L1 drops cleanly with no
+  divergence.
 
-Not yet built: the actual **Kinetics-mini** dataset loader (only synthetic video
-tested so far), longer-context clips concatenated across time to really showcase
+The encoder runs on **CUDA** automatically when available (~17× faster than CPU:
+~2.9 s vs ~49 s per 64-frame clip on an RTX 5070); latents are moved to CPU
+before caching so the cache is portable.
+
+**Memory stability fix** (`memory.py`): `mlp_forward` now RMS-normalises the
+memory MLP output. Threading the online memory across many segments otherwise
+lets `M`'s weights — and thus `M(q)` and the associative loss driving the update
+— grow ~geometrically per segment and overflow to `NaN` (only visible once a
+sequence spans ~8+ segments, i.e. the long-context regime this project targets).
+Normalising the memory *function* bounds both retrieval and loss. Guarded by
+`test_many_segments_stay_finite`; the Phase-1 equivalence tests still hold since
+both code paths share `mlp_forward`.
+
+Not yet built: longer-context clips concatenated across time to really showcase
 Titans' long-memory advantage (Phase 4), the MAG and MAL variants, per-channel
 (vs scalar) memory gates, and a true parallel scan for the momentum recurrence
 (currently a Python scan across chunks).
