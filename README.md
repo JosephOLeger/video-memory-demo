@@ -81,7 +81,20 @@ loop does not detach the outer graph), and a small toy trainability check.
 
 ## Status
 
-**Phase 1** (neural memory core) and **Phase 2** (a single, well-tested MAC block)
-are done. Not yet built: a full multi-layer model / training script, the MAG and
-MAL variants, per-channel (vs scalar) memory gates, and a true parallel scan for
-the momentum recurrence (currently a Python scan across chunks).
+**Phase 1** (neural memory core), **Phase 2** (a single, well-tested MAC block)
+and **Phase 3** (a small world model) are done.
+
+Phase 3 lives in `src/titans/worldmodel/`: a `WorldModel` that stacks MAC blocks
+to predict the next latent `Z_{t+1}` from past latents `Z_1..t`, trained with an
+L1 loss. The core runs on plain latent tensors with no extra dependencies; an
+optional lazily-loaded `VJEPA2Encoder` bridges real video clips to those latents.
+A self-contained demo (synthetic latents, no downloads) confirms trainability:
+
+```bash
+python -m titans.worldmodel.train   # prints L1 dropping ~0.53 -> 0.03
+```
+
+Not yet built: real video / dataset wiring (Kinetics-mini), longer-context clips
+to actually showcase Titans' long-memory advantage (Phase 4), the MAG and MAL
+variants, per-channel (vs scalar) memory gates, and a true parallel scan for the
+momentum recurrence (currently a Python scan across chunks).
