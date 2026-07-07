@@ -63,8 +63,8 @@ def video_to_latents(
     for clip in clips:  # [clip_len, H, W, C]
         arr = clip.round().clamp(0, 255).to(torch.uint8).numpy()
         pv = processor(arr, return_tensors="pt")["pixel_values_videos"]
-        z = encoder(pv)  # [1, T', d]
-        per_clip.append(z[0])  # [T', d]
+        z = encoder(pv)  # [1, T', d] (on the encoder's device)
+        per_clip.append(z[0].cpu())  # [T', d] -- keep the cache CPU-portable
     return torch.cat(per_clip, dim=0)  # [K * T', d]
 
 
@@ -108,6 +108,36 @@ def precompute(
         out_path,
     )
     return latents
+
+
+def precompute_kinetics(
+    out_path: str | Path,
+    *,
+    split: str = "train",
+    classes: list[str] | None = None,
+    per_class: int = 2,
+    num_frames: int = 256,
+    model_name: str | None = None,
+    agg_window: int = 2,
+    agg_stride: int = 2,
+    clip_len: int = CLIP_LEN,
+) -> torch.Tensor:
+    """Fetch Kinetics-mini clips, encode them, and cache the stacked latents.
+
+    Thin wrapper tying :func:`titans.worldmodel.data.kinetics_frames` (download +
+    decode) to :func:`precompute`. Every clip is decoded to the same
+    ``num_frames``, so the latents stack into ``[num_videos, T_total, latent_dim]``.
+    """
+    from .data import kinetics_frames
+
+    videos = kinetics_frames(
+        split=split, classes=classes, per_class=per_class, num_frames=num_frames
+    )
+    return precompute(
+        videos, out_path,
+        model_name=model_name,
+        agg_window=agg_window, agg_stride=agg_stride, clip_len=clip_len,
+    )
 
 
 def _synthetic_videos(n: int = 2, frames: int = 128, size: int = 64) -> list:

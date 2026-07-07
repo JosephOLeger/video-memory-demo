@@ -36,9 +36,12 @@ class VJEPA2Encoder(nn.Module):
     loading, :attr:`latent_dim` and :attr:`spatial_patches` describe the encoder.
     """
 
-    def __init__(self, model_name: str = DEFAULT_MODEL):
+    def __init__(self, model_name: str = DEFAULT_MODEL, device: str | None = None):
         super().__init__()
         self.model_name = model_name
+        # Default to CUDA when available -- the frozen ViT-L is the heavy step and
+        # runs ~10-20x faster on GPU than CPU.
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self._backbone: nn.Module | None = None
         self.spatial_patches: int | None = None
         self.latent_dim: int | None = None
@@ -53,7 +56,7 @@ class VJEPA2Encoder(nn.Module):
                     "vision deps) or use synthetic latents instead."
                 ) from exc
             backbone = VJEPA2Model.from_pretrained(self.model_name)
-            backbone.eval()
+            backbone.eval().to(self.device)
             for p in backbone.parameters():
                 p.requires_grad_(False)
             cfg = backbone.config

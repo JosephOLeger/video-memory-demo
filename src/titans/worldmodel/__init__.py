@@ -12,7 +12,8 @@ from .model import WorldModel
 from .train import load_latents, next_step_loss, synthetic_latents, train_demo
 from .encoder import VJEPA2Encoder
 from .frames import aggregate_frames, split_into_clips
-from .precompute_latents import precompute, video_to_latents
+from .precompute_latents import precompute, precompute_kinetics, video_to_latents
+from .data import kinetics_frames, list_clips, load_video_frames
 
 __all__ = [
     "WorldModel",
@@ -24,5 +25,9 @@ __all__ = [
     "aggregate_frames",
     "split_into_clips",
     "precompute",
+    "precompute_kinetics",
     "video_to_latents",
+    "kinetics_frames",
+    "list_clips",
+    "load_video_frames",
 ]
