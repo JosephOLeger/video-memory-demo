@@ -15,10 +15,37 @@ trainable end to end.
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Optional
+
 import torch
 import torch.nn.functional as F
 
 from .model import WorldModel
+
+
+def load_latents(path: str | Path) -> torch.Tensor:
+    """Load a precomputed latent tensor ``[num_videos, T, latent_dim]`` from disk.
+
+    Accepts either a bare tensor or the dict saved by
+    :func:`titans.worldmodel.precompute_latents.precompute`.
+    """
+    obj = torch.load(path, weights_only=False)
+    return obj["latents"] if isinstance(obj, dict) else obj
+
+
+def standardize_latents(z: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
+    """Per-channel standardisation (mean 0, unit variance) of latents ``[B, T, d]``.
+
+    Frozen encoder features (V-JEPA-2 here) come out with large, uneven per-channel
+    magnitudes; feeding them raw makes the memory's inner-loop update explode to
+    ``NaN``. Centring/scaling each of the ``d`` channels over the ``(B, T)`` samples
+    keeps both the outer optimiser and the test-time memory update well-behaved,
+    and leaves the L1 next-step objective in a sane, comparable range.
+    """
+    mean = z.mean(dim=(0, 1), keepdim=True)
+    std = z.std(dim=(0, 1), keepdim=True)
+    return (z - mean) / (std + eps)
 
 
 def next_step_loss(model: WorldModel, z: torch.Tensor) -> torch.Tensor:
@@ -58,19 +85,30 @@ def train_demo(
     segment_size: int = 8,
     lr: float = 1e-3,
     seed: int = 0,
+    latents: Optional[torch.Tensor] = None,
+    standardize: bool = True,
 ) -> WorldModel:
-    """Train on one fixed batch of synthetic latents; print loss periodically.
+    """Train on one fixed batch of latents; print loss periodically.
 
-    Overfitting a single batch is intentional here: it is the quickest sanity
-    check that gradients flow and the model can fit next-step structure. Returns
-    the trained model.
+    By default the batch is synthetic (``synthetic_latents``); pass ``latents``
+    ``[B, T, latent_dim]`` (e.g. from :func:`load_latents`) to train on real
+    precomputed V-JEPA-2 features instead, in which case ``latent_dim`` and
+    ``seq_len`` are taken from the tensor. Real latents are per-channel
+    standardised by default (``standardize``) -- raw encoder features otherwise
+    drive the memory's inner loop to ``NaN``. Overfitting one batch is
+    intentional: it is the quickest sanity check that gradients flow and the model
+    can fit next-step structure. Returns the trained model.
     """
     torch.manual_seed(seed)
     gen = torch.Generator().manual_seed(seed)
 
-    z = synthetic_latents(
-        batch=4, steps=seq_len, latent_dim=latent_dim, generator=gen
-    )
+    if latents is not None:
+        z = standardize_latents(latents) if standardize else latents
+        latent_dim = z.shape[-1]
+    else:
+        z = synthetic_latents(
+            batch=4, steps=seq_len, latent_dim=latent_dim, generator=gen
+        )
     model = WorldModel(
         latent_dim=latent_dim,
         dim=dim,

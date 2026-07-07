@@ -9,13 +9,20 @@
 """
 
 from .model import WorldModel
-from .train import next_step_loss, synthetic_latents, train_demo
+from .train import load_latents, next_step_loss, synthetic_latents, train_demo
 from .encoder import VJEPA2Encoder
+from .frames import aggregate_frames, split_into_clips
+from .precompute_latents import precompute, video_to_latents
 
 __all__ = [
     "WorldModel",
     "next_step_loss",
     "synthetic_latents",
     "train_demo",
+    "load_latents",
     "VJEPA2Encoder",
+    "aggregate_frames",
+    "split_into_clips",
+    "precompute",
+    "video_to_latents",
 ]

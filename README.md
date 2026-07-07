@@ -94,7 +94,25 @@ A self-contained demo (synthetic latents, no downloads) confirms trainability:
 python -m titans.worldmodel.train   # prints L1 dropping ~0.53 -> 0.03
 ```
 
-Not yet built: real video / dataset wiring (Kinetics-mini), longer-context clips
-to actually showcase Titans' long-memory advantage (Phase 4), the MAG and MAL
-variants, per-channel (vs scalar) memory gates, and a true parallel scan for the
-momentum recurrence (currently a Python scan across chunks).
+The **real V-JEPA-2 chain** is wired and verified end to end (on synthetic video,
+no dataset yet). Latents are precomputed once with the frozen encoder and cached,
+then the world model trains on the cache:
+
+* `frames.py` — temporal aggregation: average consecutive frames over a sliding
+  `window` moved by a `stride` (a stride > 1 lets a fixed clip span a longer
+  real-time window → longer effective videos), then chunk into fixed-size clips.
+* `encoder.py` — frozen `facebook/vjepa2-vitl-fpc64-256` (the `fpc16` repos are
+  SSv2 classifiers, not the base encoder). A clip `[B, 64, 3, 256, 256]` → `[B,
+  32, 1024]`: 32 temporal groups (derived from the token grid, not hard-coded),
+  each a spatial mean-pool of its 256 patches.
+* `precompute_latents.py` — frames → aggregate → clips → processor → encoder →
+  concatenate clip latents → cache `.pt`.
+* `train.py` — `load_latents` + per-channel `standardize_latents` (raw encoder
+  features are large-magnitude and drive the memory's inner loop to `NaN`
+  otherwise). On cached real latents the L1 drops cleanly with no divergence.
+
+Not yet built: the actual **Kinetics-mini** dataset loader (only synthetic video
+tested so far), longer-context clips concatenated across time to really showcase
+Titans' long-memory advantage (Phase 4), the MAG and MAL variants, per-channel
+(vs scalar) memory gates, and a true parallel scan for the momentum recurrence
+(currently a Python scan across chunks).
