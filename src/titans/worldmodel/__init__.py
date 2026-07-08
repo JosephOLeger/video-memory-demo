@@ -20,6 +20,7 @@ from .precompute_latents import (
 )
 from .data import kinetics_frames, list_clips, load_video_frames
 from .ablation import run_ablation, format_report
+from .harness import run_config, compare_variants, format_comparison, persistence_baseline_l1
 
 __all__ = [
     "WorldModel",
@@ -39,4 +40,8 @@ __all__ = [
     "load_video_frames",
     "run_ablation",
     "format_report",
+    "run_config",
+    "compare_variants",
+    "format_comparison",
+    "persistence_baseline_l1",
 ]
