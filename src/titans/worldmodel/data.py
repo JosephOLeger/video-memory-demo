@@ -63,23 +63,25 @@ def load_video_frames(
 ) -> torch.Tensor:
     """Decode an ``.mp4`` to a frame tensor ``[F, H, W, C]`` (uint8).
 
-    If ``num_frames`` is given, the first ``num_frames`` frames are kept (a clear
-    error if the video is shorter), so every video yields the same length and the
-    resulting latents stack cleanly. ``H``/``W`` may differ between videos -- the
-    V-JEPA-2 processor resizes to a fixed crop downstream.
+    If ``num_frames`` is given, exactly that many frames are returned, chosen by
+    **uniform temporal sampling** across the whole clip. This is robust to the
+    variable clip lengths in Kinetics-mini (some clips are shorter than others):
+    longer clips are subsampled, and clips shorter than ``num_frames`` simply
+    repeat a few frames rather than raising. Every video therefore yields the
+    same length, so the resulting latents stack cleanly. ``H``/``W`` may differ
+    between videos -- the V-JEPA-2 processor resizes to a fixed crop downstream.
     """
     import decord
 
     decord.bridge.set_bridge("torch")
     vr = decord.VideoReader(local_path)
     total = len(vr)
-    if num_frames is not None:
-        if total < num_frames:
-            raise ValueError(
-                f"{local_path} has {total} frames, fewer than num_frames={num_frames}"
-            )
-        total = num_frames
-    return vr.get_batch(range(total))  # [F, H, W, C] uint8
+    if num_frames is None:
+        idx = list(range(total))
+    else:
+        # Uniform sample across [0, total-1]; handles total <, ==, or > num_frames.
+        idx = torch.linspace(0, total - 1, num_frames).round().long().tolist()
+    return vr.get_batch(idx)  # [num_frames, H, W, C] uint8
 
 
 def kinetics_frames(
