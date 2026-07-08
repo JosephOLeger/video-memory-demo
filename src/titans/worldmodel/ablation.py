@@ -134,6 +134,60 @@ def run_ablation(
     }
 
 
+def _set_reset(model: WorldModel, value: bool) -> None:
+    for b in model.blocks:
+        b.reset_memory_each_segment = value
+
+
+def run_inference_ablation(
+    train_path: str | Path,
+    val_path: str | Path,
+    *,
+    steps: int = 300,
+    seed: int = 0,
+    segment_size: int = 8,
+    **model_kwargs,
+) -> dict:
+    """Isolate the *inference-time* long-range benefit with one trained model.
+
+    Unlike :func:`run_ablation` (which trains threaded and control separately and
+    so conflates "memory helps at position t" with "training with memory yields
+    better weights"), this trains a single threaded model and evaluates *the same
+    weights* twice -- with memory threaded vs reset each segment. Segment 0 is
+    then identical by construction, so any gap that grows with position is purely
+    the accumulated memory paying off at inference.
+    """
+    train_raw = load_latents(train_path)
+    val_raw = load_latents(val_path)
+    mean, std = train_stats(train_raw)
+    train_z = _standardize(train_raw, mean, std)
+    val_z = _standardize(val_raw, mean, std)
+
+    model = train_model(train_z, reset_control=False, steps=steps, seed=seed,
+                        segment_size=segment_size, **model_kwargs)
+
+    _set_reset(model, False)
+    l1_threaded = per_position_l1(model, val_z)
+    _set_reset(model, True)
+    l1_control = per_position_l1(model, val_z)
+    _set_reset(model, False)
+
+    T1 = l1_threaded.shape[0]
+    seg_idx = torch.arange(T1) // segment_size
+    buckets = []
+    for s in range(int(seg_idx.max()) + 1):
+        m = seg_idx == s
+        buckets.append((s, l1_control[m].mean().item(), l1_threaded[m].mean().item()))
+
+    return {
+        "l1_threaded": l1_threaded,
+        "l1_control": l1_control,
+        "final_threaded": l1_threaded.mean().item(),
+        "final_control": l1_control.mean().item(),
+        "by_segment": buckets,
+    }
+
+
 def format_report(res: dict) -> str:
     """Human-readable table: control vs threaded L1 per segment, and the gap."""
     lines = ["seg |  control |  threaded |   gap (ctrl-thr)  |  rel%",
