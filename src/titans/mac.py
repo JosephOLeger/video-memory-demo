@@ -62,6 +62,7 @@ class TitansMACBlock(nn.Module):
         memory_chunk_size: Optional[int] = None,
         conv_kernel_size: int = 4,
         theta_scale: float = 1.0,
+        memory_window_size: int = 1,
         use_memory: bool = True,
         reset_memory_each_segment: bool = False,
     ):
@@ -87,6 +88,7 @@ class TitansMACBlock(nn.Module):
             hidden_dim=memory_hidden_dim,
             num_layers=memory_num_layers,
             theta_scale=theta_scale,
+            window_size=memory_window_size,
         )
         self.persistent = PersistentMemory(dim, num_persistent_tokens)
         self.attn = CausalSelfAttention(dim, num_heads, conv_kernel_size)

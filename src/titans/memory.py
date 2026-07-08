@@ -126,6 +126,14 @@ class NeuralMemory(nn.Module):
     hidden_dim: hidden width of the memory MLP.
     num_layers: depth ``L_M`` of the memory MLP (>= 2).
     theta_scale: multiplies the softplus output for ``theta_t`` (inner lr).
+    window_size: ATLAS *Omega rule* window ``c`` (arXiv:2505.23735). With ``c=1``
+        (default) the inner update optimises the loss of the current token only
+        -- the original Titans/Delta rule. With ``c>1`` each update instead
+        optimises a decayed sum over the last ``c`` tokens
+        ``sum_{i=t-c+1}^{t} gamma_i * ||M(k_i) - v_i||^2`` (Eq 9), so the memory
+        memorises a local *context* rather than individual tokens. Because the
+        gradient is linear, this is just a gated sliding-window sum of the
+        per-token gradients we already compute -- no extra backward passes.
     """
 
     def __init__(
@@ -134,11 +142,15 @@ class NeuralMemory(nn.Module):
         hidden_dim: Optional[int] = None,
         num_layers: int = 2,
         theta_scale: float = 1.0,
+        window_size: int = 1,
     ):
         super().__init__()
         hidden_dim = hidden_dim or dim
         self.dim = dim
         self.theta_scale = theta_scale
+        if window_size < 1:
+            raise ValueError("window_size (Omega c) must be >= 1")
+        self.window_size = window_size
 
         self.memory = NeuralMemoryMLP(dim, hidden_dim, num_layers)
         self.num_layers = num_layers
@@ -152,6 +164,10 @@ class NeuralMemory(nn.Module):
         self.alpha_head = nn.Linear(dim, 1)  # forget gate  -> sigmoid
         self.eta_head = nn.Linear(dim, 1)    # momentum decay -> sigmoid
         self.theta_head = nn.Linear(dim, 1)  # inner lr -> softplus
+        # Omega per-token pruning gate gamma_i (only needed for c>1). Created
+        # conditionally so c=1 stays bit-identical to the original Titans memory.
+        if window_size > 1:
+            self.gamma_head = nn.Linear(dim, 1)  # context gate -> sigmoid
 
     # ------------------------------------------------------------------ utils
     def _loss(self, params: Params, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -238,20 +254,30 @@ class NeuralMemory(nn.Module):
         S: Params,
         chunk_size: int,
         q: Optional[torch.Tensor] = None,
+        gamma: Optional[torch.Tensor] = None,
     ) -> Tuple[Params, Params, Optional[list]]:
-        """Shared chunked update recurrence (Section 3.2).
+        """Shared chunked update recurrence (Section 3.2; ATLAS Omega for c>1).
 
         Computes, per chunk, all inner gradients at the chunk-start weights in one
         nested-``vmap`` call, then scans the momentum / weight-decay recurrence
         across the chunk. If ``q`` is given, retrieves ``M_t(q_t)`` at every step
         and returns the list of retrievals; otherwise skips retrieval entirely
         (the ``update``-only path, saving the wasted forward passes).
+
+        For the Omega rule (``self.window_size = c > 1``) the gradient used at
+        step ``t`` is the gated sliding-window sum
+        ``sum_{i=t-c+1}^{t} gamma_i * grad_i`` -- valid because the gradient of a
+        sum equals the sum of gradients, and every ``grad_i`` is already computed
+        at the chunk-start weights. ``gamma`` holds the per-token gates ``[B, N]``.
+        The window is clamped at chunk boundaries (a documented approximation);
+        long-range flow across chunks still happens through the memory state.
         """
         grad_fn = self._grad_fn()
         # inner vmap: tokens in the chunk (params shared = chunk start);
         # outer vmap: the batch dimension B.
         chunk_grad = vmap(vmap(grad_fn, in_dims=(None, 0, 0)), in_dims=(0, 0, 0))
 
+        c = self.window_size
         N = k.shape[1]
         ys: Optional[list] = [] if q is not None else None
         for start in range(0, N, chunk_size):
@@ -259,7 +285,22 @@ class NeuralMemory(nn.Module):
             G = chunk_grad(state, k[:, start:end], v[:, start:end])
             for j in range(end - start):
                 t = start + j
-                g = {key: G[key][:, j] for key in state}
+                if c == 1:
+                    g = {key: G[key][:, j] for key in state}
+                else:
+                    # Omega: decayed sum of per-token grads over the window,
+                    # clamped to the current chunk (local indices lo..j).
+                    lo = max(0, j - c + 1)
+                    g = {}
+                    for key in state:
+                        Gk = G[key]
+                        acc = None
+                        for i in range(lo, j + 1):
+                            gi = Gk[:, i]
+                            if gamma is not None:
+                                gi = self._bcast(gamma[:, start + i], gi) * gi
+                            acc = gi if acc is None else acc + gi
+                        g[key] = acc
                 state, S = self._step(
                     state, S, g, alpha[:, t], eta[:, t], theta[:, t]
                 )
@@ -287,8 +328,13 @@ class NeuralMemory(nn.Module):
         if x.dim() != 3:
             raise ValueError("update expects x of shape [B, T, d]")
         k, v, _, alpha, eta, theta = self._project(x)
+        gamma = (
+            torch.sigmoid(self.gamma_head(x)).squeeze(-1)
+            if self.window_size > 1
+            else None
+        )
         state, S, _ = self._scan_chunked(
-            k, v, alpha, eta, theta, state, S, chunk_size, q=None
+            k, v, alpha, eta, theta, state, S, chunk_size, q=None, gamma=gamma
         )
         return state, S
 
