@@ -58,14 +58,70 @@ def video_to_latents(
     """
     supers = aggregate_frames(frames, agg_window, agg_stride)  # [S, H, W, C]
     clips = split_into_clips(supers, clip_len)                 # [K, clip_len, H, W, C]
-
-    per_clip = []
-    for clip in clips:  # [clip_len, H, W, C]
-        arr = clip.round().clamp(0, 255).to(torch.uint8).numpy()
-        pv = processor(arr, return_tensors="pt")["pixel_values_videos"]
-        z = encoder(pv)  # [1, T', d] (on the encoder's device)
-        per_clip.append(z[0].cpu())  # [T', d] -- keep the cache CPU-portable
+    per_clip = [_encode_clip(clip, encoder, processor) for clip in clips]
     return torch.cat(per_clip, dim=0)  # [K * T', d]
+
+
+def _encode_clip(clip: torch.Tensor, encoder: VJEPA2Encoder, processor) -> torch.Tensor:
+    """Normalise one clip ``[clip_len, H, W, C]`` and encode it to ``[T', d]`` (CPU)."""
+    arr = clip.round().clamp(0, 255).to(torch.uint8).numpy()
+    pv = processor(arr, return_tensors="pt")["pixel_values_videos"]
+    return encoder(pv)[0].cpu()  # [T', d] -- CPU-portable cache
+
+
+def video_to_latents_sliding(
+    frames: torch.Tensor,
+    encoder: VJEPA2Encoder,
+    processor,
+    *,
+    clip_len: int = CLIP_LEN,
+    stride_frames: int = 32,
+) -> torch.Tensor:
+    """Encode one video as a *continuous* latent stream via overlapping windows.
+
+    V-JEPA encodes each clip independently, so concatenating adjacent clips
+    (:func:`video_to_latents`) hard-cuts the latent sequence every clip -- a
+    long-memory model gets no continuity to exploit across those seams. Instead we
+    slide a ``clip_len``-frame window by ``stride_frames`` (with overlap) and keep
+    only the *central* band of each window's latents: the positions that had full
+    temporal context on both sides. Adjacent kept bands tile the video
+    contiguously (``keep = stride_frames / tubelet`` latents per step), so the
+    result is a smooth, continuous sequence -- each latent well-contextualised,
+    seams softened by overlap.
+
+    Smaller ``stride_frames`` = more overlap = more context per latent = smoother,
+    at more encoder passes. ``stride_frames == clip_len`` recovers the
+    discontinuous non-overlapping behaviour.
+    """
+    F = frames.shape[0]
+    starts = list(range(0, max(F - clip_len, 0) + 1, stride_frames)) or [0]
+
+    bands = []
+    for wi, s in enumerate(starts):
+        clip = frames[s : s + clip_len]
+        if clip.shape[0] < clip_len:  # pad the final short window by repeating
+            pad = clip_len - clip.shape[0]
+            clip = torch.cat([clip, clip[-1:].repeat(pad, 1, 1, 1)], dim=0)
+        z = _encode_clip(clip, encoder, processor)  # [T', d]
+        Tp = z.shape[0]
+        tubelet = clip_len // Tp
+        if stride_frames % tubelet != 0:
+            raise ValueError(
+                f"stride_frames={stride_frames} must be a multiple of tubelet={tubelet}"
+            )
+        keep = stride_frames // tubelet
+        if keep > Tp:
+            raise ValueError(
+                f"stride_frames={stride_frames} too large: keep={keep} > "
+                f"latents/clip={Tp}; use a smaller stride so windows overlap"
+            )
+        margin = (Tp - keep) // 2
+        # Keep the central band; extend to the very edges on the first/last window
+        # so the whole video is covered.
+        lo = 0 if wi == 0 else margin
+        hi = Tp if wi == len(starts) - 1 else margin + keep
+        bands.append(z[lo:hi])
+    return torch.cat(bands, dim=0)  # [T_total, d]
 
 
 def precompute(
@@ -76,23 +132,35 @@ def precompute(
     agg_window: int = 2,
     agg_stride: int = 2,
     clip_len: int = CLIP_LEN,
+    sliding_stride: int | None = None,
 ) -> torch.Tensor:
     """Encode a set of raw videos and save a stacked latent tensor to ``out_path``.
 
-    All videos must yield the same number of latents (same frame count / agg
-    params) so they stack into ``[num_videos, T_total, latent_dim]``. The saved
-    file is a dict with the latents plus the settings used to produce them.
+    With ``sliding_stride`` set, videos are encoded as *continuous* latent streams
+    via overlapping windows (:func:`video_to_latents_sliding`); otherwise the
+    non-overlapping aggregate-and-chunk path (:func:`video_to_latents`) is used.
+    All videos must yield the same number of latents so they stack into
+    ``[num_videos, T_total, latent_dim]``. The saved file is a dict with the
+    latents plus the settings used to produce them.
     """
     encoder = VJEPA2Encoder(model_name) if model_name else VJEPA2Encoder()
     processor = load_processor(encoder.model_name)
 
-    seqs = [
-        video_to_latents(
-            v, encoder, processor,
-            agg_window=agg_window, agg_stride=agg_stride, clip_len=clip_len,
-        )
-        for v in videos
-    ]
+    if sliding_stride is not None:
+        seqs = [
+            video_to_latents_sliding(
+                v, encoder, processor, clip_len=clip_len, stride_frames=sliding_stride,
+            )
+            for v in videos
+        ]
+    else:
+        seqs = [
+            video_to_latents(
+                v, encoder, processor,
+                agg_window=agg_window, agg_stride=agg_stride, clip_len=clip_len,
+            )
+            for v in videos
+        ]
     latents = torch.stack(seqs, dim=0)  # [num_videos, T_total, d]
 
     out_path = Path(out_path)
@@ -104,6 +172,7 @@ def precompute(
             "agg_window": agg_window,
             "agg_stride": agg_stride,
             "clip_len": clip_len,
+            "sliding_stride": sliding_stride,
         },
         out_path,
     )
@@ -121,12 +190,15 @@ def precompute_kinetics(
     agg_window: int = 2,
     agg_stride: int = 2,
     clip_len: int = CLIP_LEN,
+    sliding_stride: int | None = None,
 ) -> torch.Tensor:
     """Fetch Kinetics-mini clips, encode them, and cache the stacked latents.
 
     Thin wrapper tying :func:`titans.worldmodel.data.kinetics_frames` (download +
     decode) to :func:`precompute`. Every clip is decoded to the same
     ``num_frames``, so the latents stack into ``[num_videos, T_total, latent_dim]``.
+    Pass ``sliding_stride`` to encode continuous latent streams (overlapping
+    windows) instead of the discontinuous aggregate-and-chunk default.
     """
     from .data import kinetics_frames
 
@@ -137,6 +209,7 @@ def precompute_kinetics(
         videos, out_path,
         model_name=model_name,
         agg_window=agg_window, agg_stride=agg_stride, clip_len=clip_len,
+        sliding_stride=sliding_stride,
     )
 
 

@@ -12,7 +12,12 @@ from .model import WorldModel
 from .train import load_latents, next_step_loss, synthetic_latents, train_demo
 from .encoder import VJEPA2Encoder
 from .frames import aggregate_frames, split_into_clips
-from .precompute_latents import precompute, precompute_kinetics, video_to_latents
+from .precompute_latents import (
+    precompute,
+    precompute_kinetics,
+    video_to_latents,
+    video_to_latents_sliding,
+)
 from .data import kinetics_frames, list_clips, load_video_frames
 from .ablation import run_ablation, format_report
 
@@ -28,6 +33,7 @@ __all__ = [
     "precompute",
     "precompute_kinetics",
     "video_to_latents",
+    "video_to_latents_sliding",
     "kinetics_frames",
     "list_clips",
     "load_video_frames",
