@@ -14,6 +14,7 @@ from .encoder import VJEPA2Encoder
 from .frames import aggregate_frames, split_into_clips
 from .precompute_latents import precompute, precompute_kinetics, video_to_latents
 from .data import kinetics_frames, list_clips, load_video_frames
+from .ablation import run_ablation, format_report
 
 __all__ = [
     "WorldModel",
@@ -30,4 +31,6 @@ __all__ = [
     "kinetics_frames",
     "list_clips",
     "load_video_frames",
+    "run_ablation",
+    "format_report",
 ]

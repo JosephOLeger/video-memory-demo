@@ -43,3 +43,24 @@ def test_memory_ablation_changes_output():
     of, oa = full(z), ablated(z)
     assert torch.isfinite(of).all() and torch.isfinite(oa).all()
     assert not torch.allclose(of, oa), "ablation had no effect on the output"
+
+
+def test_reset_control_is_parameter_matched():
+    """The reset-each-segment control must have identical params yet differ.
+
+    This is the fair long-term-memory ablation: same architecture and weights,
+    but the memory carries nothing across segments -- so any output difference
+    from the threaded model is the long-range memory's doing, not extra capacity.
+    """
+    z = _latents(B=2, T=32, d=16)
+    torch.manual_seed(0)
+    threaded = WorldModel(latent_dim=16, dim=16, depth=2, segment_size=8)
+    torch.manual_seed(0)
+    control = WorldModel(latent_dim=16, dim=16, depth=2, segment_size=8,
+                         reset_memory_each_segment=True)
+
+    for a, b in zip(threaded.parameters(), control.parameters()):
+        assert torch.equal(a, b), "control is not weight-identical to threaded"
+    assert not torch.allclose(threaded(z), control(z)), (
+        "resetting memory each segment had no effect -- no cross-segment info?"
+    )

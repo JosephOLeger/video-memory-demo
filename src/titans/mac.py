@@ -63,15 +63,22 @@ class TitansMACBlock(nn.Module):
         conv_kernel_size: int = 4,
         theta_scale: float = 1.0,
         use_memory: bool = True,
+        reset_memory_each_segment: bool = False,
     ):
         super().__init__()
         self.dim = dim
         # Ablation switch: when False the long-term neural memory branch is
         # disabled -- no historical retrieval (Eq 21), no memory update / output
         # retrieval (Eq 24-25). Only core causal attention over
-        # [persistent ; segment] (Eq 22-23) remains, so comparing use_memory
-        # True vs False isolates exactly the long-term memory's contribution.
+        # [persistent ; segment] (Eq 22-23) remains.
         self.use_memory = use_memory
+        # Parameter-matched control: keep the *entire* memory branch (identical
+        # params), but re-initialise its state at every segment so it carries no
+        # information across segments. Since attention is confined to one segment
+        # window, the threaded memory is the block's only long-range pathway --
+        # so "threaded" vs "reset-each-segment" isolates the long-term memory's
+        # contribution with zero parameter difference (unlike ``use_memory``).
+        self.reset_memory_each_segment = reset_memory_each_segment
         self.segment_size = segment_size
         self.memory_chunk_size = memory_chunk_size or segment_size
 
@@ -135,6 +142,11 @@ class TitansMACBlock(nn.Module):
                 y_full = self.attn(torch.cat([p, seg], dim=1))
                 outs.append(y_full[:, -C:, :])
                 continue
+
+            if self.reset_memory_each_segment:
+                # Parameter-matched control: wipe the carry so nothing crosses
+                # segment boundaries (memory becomes purely within-segment).
+                state, S = self.memory.init_memory(B)
 
             # 1. Historical retrieval from the memory carried from earlier segs.
             q_hist = self.memory.q_proj(seg)  # [B, C, d]
