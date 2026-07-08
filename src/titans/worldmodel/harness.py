@@ -45,22 +45,38 @@ def train_eval_once(
     steps: int = 400,
     lr: float = 1e-3,
     device: str = DEVICE,
+    batch_size: int | None = None,
     **model_kwargs,
-) -> float:
-    """Train one WorldModel (given seed/config) on GPU and return val next-step L1."""
+) -> dict:
+    """Train one WorldModel (given seed/config) and return train & val next-step L1.
+
+    ``batch_size`` mini-batches the training videos each step (default: full
+    batch). Mini-batching both bounds VRAM (needed for larger ``dim``) and adds
+    SGD noise that helps generalisation in the data-limited regime. Returns
+    ``{"train_l1", "val_l1"}`` -- the gap between them tells overfitting (data-
+    limited) from underfitting (architecture/optimisation).
+    """
     torch.manual_seed(seed)
     model = WorldModel(latent_dim=train_z.shape[-1], **model_kwargs).to(device)
     tz, vz = train_z.to(device), val_z.to(device)
+    B = tz.shape[0]
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     model.train()
     for _ in range(steps):
+        if batch_size is not None and batch_size < B:
+            idx = torch.randperm(B, device=device)[:batch_size]
+            batch = tz[idx]
+        else:
+            batch = tz
         opt.zero_grad()
-        loss = F.l1_loss(model(tz)[:, :-1], tz[:, 1:])
+        loss = F.l1_loss(model(batch)[:, :-1], batch[:, 1:])
         loss.backward()
         opt.step()
     model.eval()
-    with torch.no_grad():
-        return F.l1_loss(model(vz)[:, :-1], vz[:, 1:]).item()
+    with torch.no_grad():  # no_grad forward is light -> full-set eval fits even at large dim
+        train_l1 = F.l1_loss(model(tz)[:, :-1], tz[:, 1:]).item()
+        val_l1 = F.l1_loss(model(vz)[:, :-1], vz[:, 1:]).item()
+    return {"train_l1": train_l1, "val_l1": val_l1}
 
 
 def run_config(
@@ -72,13 +88,15 @@ def run_config(
     lr: float = 1e-3,
     device: str = DEVICE,
     standardize: bool = True,
+    batch_size: int | None = None,
     **model_kwargs,
 ) -> dict:
-    """Train one config across ``seeds`` and report mean/std val L1 + baseline.
+    """Train one config across ``seeds`` and report mean/std train & val L1.
 
     Standardisation stats come from train only (applied to both), so there is no
-    val leakage. Returns a dict with per-seed L1s, mean/std, the persistence
-    baseline, and the config used.
+    val leakage. Returns per-seed train/val L1s, their mean/std, the persistence
+    baseline, and the config used. ``val_mean - train_mean`` is the
+    generalisation gap.
     """
     train_raw, val_raw = load_latents(train_path), load_latents(val_path)
     if standardize:
@@ -90,16 +108,20 @@ def run_config(
     baseline = persistence_baseline_l1(val_z)
     per_seed = [
         train_eval_once(train_z, val_z, seed=s, steps=steps, lr=lr,
-                        device=device, **model_kwargs)
+                        device=device, batch_size=batch_size, **model_kwargs)
         for s in seeds
     ]
-    t = torch.tensor(per_seed)
+    tr = torch.tensor([r["train_l1"] for r in per_seed])
+    va = torch.tensor([r["val_l1"] for r in per_seed])
     return {
-        "val_l1_mean": t.mean().item(),
-        "val_l1_std": t.std(unbiased=False).item(),
+        "val_l1_mean": va.mean().item(),
+        "val_l1_std": va.std(unbiased=False).item(),
+        "train_l1_mean": tr.mean().item(),
+        "train_l1_std": tr.std(unbiased=False).item(),
+        "gen_gap": va.mean().item() - tr.mean().item(),
         "per_seed": per_seed,
         "baseline_l1": baseline,
-        "beats_baseline": t.mean().item() < baseline,
+        "beats_baseline": va.mean().item() < baseline,
         "config": model_kwargs,
         "device": device,
         "n_seeds": len(per_seed),
@@ -126,19 +148,22 @@ def compare_variants(
 
 
 def format_comparison(results: dict) -> str:
-    """Table of variant -> val L1 mean±std, vs the (shared) persistence baseline."""
+    """Table of variant -> train & val L1, gen gap, vs the persistence baseline."""
     baseline = next(iter(results.values()))["baseline_l1"]
     dev = next(iter(results.values()))["device"]
     n = next(iter(results.values()))["n_seeds"]
     lines = [
-        f"device={dev}  seeds={n}  persistence baseline L1={baseline:.4f}",
-        "variant                    |  val L1 (mean±std)  | vs baseline",
-        "---------------------------+---------------------+------------",
+        f"device={dev}  seeds={n}  persistence baseline (val) L1={baseline:.4f}",
+        "variant              |  train L1  |   val L1 (mean±std)  | gap  | vs base",
+        "---------------------+------------+----------------------+------+--------",
     ]
     for name, r in sorted(results.items(), key=lambda kv: kv[1]["val_l1_mean"]):
         delta = 100 * (baseline - r["val_l1_mean"]) / baseline
+        beat = " *" if r["beats_baseline"] else ""
         lines.append(
-            f"{name:26.26s} | {r['val_l1_mean']:.4f} ± {r['val_l1_std']:.4f}    "
-            f"| {delta:+5.1f}%"
+            f"{name:20.20s} | {r['train_l1_mean']:.4f}    | "
+            f"{r['val_l1_mean']:.4f} ± {r['val_l1_std']:.4f}    | "
+            f"{r['gen_gap']:+.3f}| {delta:+5.1f}%{beat}"
         )
+    lines.append("(* beats baseline; gap = val - train, large gap => data-limited/overfit)")
     return "\n".join(lines)
