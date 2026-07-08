@@ -58,14 +58,27 @@ class WorldModel(nn.Module):
         self.out_norm = nn.RMSNorm(dim)
         self.out_proj = nn.Linear(dim, latent_dim)
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
+    def forward(self, z: torch.Tensor, carry=None, return_carry: bool = False):
         """Map latents ``z`` ``[B, T, latent_dim]`` to per-step next-latent guesses.
 
-        Returns a tensor of the same shape where position ``t`` is the predicted
-        ``z[:, t + 1]``. Each block manages its own memory carry internally (fresh
-        per call); state is not threaded across calls in this phase.
+        Position ``t`` of the output predicts ``z[:, t + 1]``. Within a call the
+        memory recurrence ``M_0 -> M_1 -> ...`` already threads across segments
+        (paper Eq 21-25); ``carry`` lets that same continuous recurrence continue
+        *across* calls, so a sequence too long for one forward can be processed in
+        consecutive chunks (truncated BPTT) without resetting the memory.
+
+        ``carry`` is a per-block list of ``(state, S)`` from a previous call (or
+        ``None`` to start fresh). With ``return_carry=True`` the updated per-block
+        carry is returned alongside the prediction as ``(pred, carry)``.
         """
+        if carry is None:
+            carry = [(None, None)] * len(self.blocks)
+
         h = self.in_proj(z)
-        for block in self.blocks:
-            h, _, _ = block(h)  # each block returns (out, state, S); carry unused
-        return self.out_proj(self.out_norm(h))
+        new_carry = []
+        for block, (state, S) in zip(self.blocks, carry):
+            h, state, S = block(h, state, S)
+            new_carry.append((state, S))
+
+        pred = self.out_proj(self.out_norm(h))
+        return (pred, new_carry) if return_carry else pred

@@ -62,9 +62,16 @@ class TitansMACBlock(nn.Module):
         memory_chunk_size: Optional[int] = None,
         conv_kernel_size: int = 4,
         theta_scale: float = 1.0,
+        use_memory: bool = True,
     ):
         super().__init__()
         self.dim = dim
+        # Ablation switch: when False the long-term neural memory branch is
+        # disabled -- no historical retrieval (Eq 21), no memory update / output
+        # retrieval (Eq 24-25). Only core causal attention over
+        # [persistent ; segment] (Eq 22-23) remains, so comparing use_memory
+        # True vs False isolates exactly the long-term memory's contribution.
+        self.use_memory = use_memory
         self.segment_size = segment_size
         self.memory_chunk_size = memory_chunk_size or segment_size
 
@@ -120,13 +127,20 @@ class TitansMACBlock(nn.Module):
         outs = []
         for i in range(N // C):
             seg = x[:, i * C : (i + 1) * C, :]  # [B, C, d]
+            p = self.persistent(B)  # [B, N_p, d]
+
+            if not self.use_memory:
+                # Ablated: core attention over [persistent; segment] only,
+                # output = the segment's attention (no memory branch).
+                y_full = self.attn(torch.cat([p, seg], dim=1))
+                outs.append(y_full[:, -C:, :])
+                continue
 
             # 1. Historical retrieval from the memory carried from earlier segs.
             q_hist = self.memory.q_proj(seg)  # [B, C, d]
             h_i = self.memory.retrieve(state, q_hist)  # [B, C, d]
 
             # 2. Local context: [persistent; retrieved history; segment].
-            p = self.persistent(B)  # [B, N_p, d]
             tilde = torch.cat([p, h_i, seg], dim=1)  # [B, N_p + C + C, d]
 
             # 3. Causal attention over the context window.
