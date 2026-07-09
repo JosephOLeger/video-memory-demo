@@ -213,6 +213,31 @@ def precompute_kinetics(
     )
 
 
+def precompute_egolife(
+    out_path: str | Path,
+    *,
+    persons: list[str],
+    per_person: int,
+    num_frames: int = 128,
+    model_name: str | None = None,
+    clip_len: int = CLIP_LEN,
+    sliding_stride: int | None = 32,
+) -> torch.Tensor:
+    """Fetch EgoLife segments for the given persons, encode, and cache latents.
+
+    Person-disjoint train/val split lives in the caller's choice of ``persons``
+    (see :data:`titans.worldmodel.egolife.TRAIN_PERSONS` / ``VAL_PERSONS``).
+    Defaults to continuous sliding-window encoding.
+    """
+    from .egolife import egolife_frames
+
+    videos = egolife_frames(persons=persons, per_person=per_person, num_frames=num_frames)
+    return precompute(
+        videos, out_path, model_name=model_name,
+        clip_len=clip_len, sliding_stride=sliding_stride,
+    )
+
+
 def _synthetic_videos(n: int = 2, frames: int = 128, size: int = 64) -> list:
     """A few fake raw videos ``[F, H, W, C]`` in [0,255], for the smoke test."""
     g = torch.Generator().manual_seed(0)

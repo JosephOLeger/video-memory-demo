@@ -15,6 +15,7 @@ from .frames import aggregate_frames, split_into_clips
 from .precompute_latents import (
     precompute,
     precompute_kinetics,
+    precompute_egolife,
     video_to_latents,
     video_to_latents_sliding,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "split_into_clips",
     "precompute",
     "precompute_kinetics",
+    "precompute_egolife",
     "video_to_latents",
     "video_to_latents_sliding",
     "kinetics_frames",
