@@ -302,6 +302,31 @@ memory threaded across segments:
   lag.
 * `needle` — a single marked (payload) token buried in random filler; query at the
   end retrieves the payload (needle-in-haystack).
+* `selective_copy` — MAD-style selective copying: content tokens scattered at
+  random positions among BLANK filler; after a SEP, reproduce only the content
+  tokens in order. Random positions make positional copying useless, so this
+  probes content-addressed selection (contrast `copy_task`, a fixed-lag shift).
+* `fuzzy_recall` — MAD-style fuzzy recall: associative recall where every real key
+  is shadowed by a near-duplicate lure key (its adjacent id) carrying a *different*
+  value, so retrieval must be robust to same-neighbourhood interference, not just
+  exact-match lookup. (Embeddings are learned, so adjacency is a soft near-duplicate
+  cue; the dominant added difficulty is interference — documented in the docstring.)
+
+### Difficulty sweep: 3 memory-update configs at a matched budget (`sweep.py`)
+
+`src/titans/membench/sweep.py` compares three ways the neural memory carries its
+momentum, all sharing the *same* memory-MLP geometry so the parameter budget is
+matched: **baseline** (scalar momentum `S_t`), **uncoupled** (cascade with the
+coupling betas forced to 0 — verified *bit-identical* to baseline, since with zero
+diffusion only reservoir 0 is ever populated and the recurrence collapses onto the
+scalar rule), and **coupled** (the full data-dependent, non-commuting selective
+cascade). Configs baseline/uncoupled have identical parameter counts; coupled adds
+exactly one small `cascade.beta_head = Linear(dim, K−1)` — a small, disclosed delta,
+not hidden. `run_sweep` trains a small matched-budget model per (task, difficulty,
+config) cell over MQAR (`associative_recall`), `selective_copy`, and `fuzzy_recall`,
+and dumps a JSON of per-cell held-out accuracy to `results/`. Run with
+`python -m titans.membench.sweep` (add `--smoke` for the tiny harness-check scale;
+`tests/test_sweep.py` covers that). No plotting — raw numbers only.
 
 `model.py`'s `RecallModel` is a minimal token model (embedding + learned
 positions + stacked `TitansMACBlock`s + linear classifier head) built purely to
