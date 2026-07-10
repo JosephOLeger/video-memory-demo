@@ -79,6 +79,62 @@ loop does not detach the outer graph), and a small toy trainability check.
   here means *internally consistent, causal, and faithful to the paper's
   described mechanism*, not numerically matching a ground truth.
 
+## Metaplastic momentum cascade (`metaplastic.py`) — standalone, not yet wired in
+
+`src/titans/metaplastic.py` explores replacing Titans' single momentum scalar
+`S_t` (one decay `η_t` controls both reactivity *and* retention — the
+plasticity-stability tradeoff) by a **K-reservoir cascade** inspired by
+biological synaptic metaplasticity (Fusi/Abbott/Drew 2005; Benna & Fusi 2016).
+Each scalar momentum entry becomes a length-`K` vector `u=(u¹,…,uᴷ)`; only `u¹`
+sees the gradient, and consecutive reservoirs exchange mass by diffusion:
+`u_t = B·u_{t-1} + e₁·∇ℓ_t` with `B` tridiagonal (`b_k = β₁·g^-(k-1)`).
+`read(u)=u¹` is the "visible" momentum that would later feed
+`M_t=(1−α_t)M_{t-1}+read(u_t)`. The recurrence is a `cascade_step`/`cascade_scan`
+pure-function pair (sequential Python scan for now — consistent with the existing
+single-momentum scan; the split is the seam where a Mamba-style parallel
+associative scan could drop in). **Status: standalone + fully tested; NOT yet
+wired into `NeuralMemory`/`TitansMACBlock`** (a later pass).
+
+Two coupling modes: a **fixed geometric** `B` (mode 1), and a **selective** `B_t`
+(mode 2) where a learned `Linear(dim, K−1)`+sigmoid head gates the couplings *per
+edge*. A single global scalar gate would give `B_t=I+s_t·D` for a fixed `D` — all
+such `B_t` commute and reduce to a fixed bank of `K` exponential filters, no more
+expressive than the fixed cascade; **per-edge** gating reshapes the diffusion so
+the `B_t` genuinely don't commute (event-triggered consolidation). This is a
+deliberate deviation from a literal "per-token scalar", documented in the module.
+
+**Stability of `B` (checked, not assumed).** `B` is symmetric and row-stochastic
+⇒ doubly stochastic ⇒ all eigenvalues in `(−1, 1]` with the top one exactly `1`
+(conserved diffusion mass). For the defaults `K=6, β₁=0.5, g=2` the spectrum is
+`[0.40, 0.77, 0.90, 0.96, 0.99, 1.00]` (spectral radius 1, all positive — far
+from the `−1` boundary). So, unlike the geometric per-segment blow-up fixed in
+`memory.py`, there is **no** eigenvalue > 1; the only caveat is the eigenvalue
+exactly 1 — `u¹` has no self-decay, so under sustained same-sign gradients the
+conserved total grows at most *linearly* in sequence length (the memory's own
+`(1−α_t)` forget gate would supply the missing leak downstream).
+
+**Diagnostics** (`tests/test_metaplastic.py`, run with `pytest -s`):
+
+* *Exact regression* — the hand-worked `K=2, β=0.3`, unit gradient at `t=1`:
+  `u¹ = 1, 0.70, 0.58, 0.532, 0.5128 → 0.5` reproduced to `atol=1e-6` (vs a plain
+  θ=0.7 exponential that keeps decaying `1, 0.7, 0.49, 0.343, 0.24`).
+* *Impulse response, `K=6`* vs a single exponential matched to the same *initial*
+  decay (`λ = 1−b₂ = 0.75`). The cascade retains far more of a one-shot memory:
+
+  | t   | cascade `u¹` | exp `0.75ᵗ` | ratio     |
+  |-----|--------------|-------------|-----------|
+  | 10  | 0.389        | 5.6e-2      | 6.9×      |
+  | 100 | 0.208        | 3.2e-13     | 6.5e11×   |
+  | 500 | 0.167        | 3.4e-63     | 4.9e61×   |
+
+  `u¹` relaxes toward the equilibrium `1/K ≈ 0.167` (mass redistribution), never
+  to 0. Over the intermediate window `t∈[2,30)` the *excess above equilibrium*
+  `u¹−1/K` is **power-law-like**: log-log slope ≈ −0.52 with `R²=0.994`, vs the
+  matched exponential's `R²=0.895` (visibly curved on log-log). For finite `K`
+  the very-long tail eventually crosses over to the single slowest eigenvalue
+  (0.989), so it is power-law over the window set by the number of reservoirs,
+  then a slow exponential — the Benna-Fusi finite-cascade picture.
+
 ## Status
 
 **Phase 1** (neural memory core), **Phase 2** (a single, well-tested MAC block),
