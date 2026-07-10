@@ -52,6 +52,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.func import grad, vmap
 
+from .metaplastic import MetaplasticCascade, cascade_step
+
 Params = Dict[str, torch.Tensor]
 
 
@@ -134,6 +136,34 @@ class NeuralMemory(nn.Module):
         memorises a local *context* rather than individual tokens. Because the
         gradient is linear, this is just a gated sliding-window sum of the
         per-token gradients we already compute -- no extra backward passes.
+    use_cascade_momentum: opt-in flag (default ``False`` -> bit-identical to the
+        original scalar-momentum Titans). When ``True`` the single momentum scalar
+        ``S_t`` per weight is replaced by a length-``K`` metaplastic cascade state
+        ``U_t`` (:class:`~titans.metaplastic.MetaplasticCascade`); the visible
+        momentum fed into ``M_t = (1-alpha_t) M_{t-1} + S_t`` becomes
+        ``read(U_t) = U_t^(1)``. See :meth:`_step`.
+    cascade_reservoirs, cascade_beta1, cascade_g, cascade_selective: forwarded to
+        :class:`~titans.metaplastic.MetaplasticCascade` (``K``, geometric coupling
+        hyperparameters, and the data-dependent per-edge gate). Ignored unless
+        ``use_cascade_momentum`` is set.
+
+    Cascade design choices (documented per the project convention):
+
+    * **``eta_t``'s new role.** In the scalar rule ``eta_t`` decays the whole
+      momentum before the fresh surprise is added (``S_t = eta_t S_{t-1} - ...``).
+      Reservoir 1 of the cascade has *no* self-decay (see ``metaplastic.py``), so
+      a run of same-sign gradients can grow it linearly. We keep ``eta_t`` as a
+      per-token multiplicative leak applied to the *entire* cascade state before
+      the diffusion step: ``U_t = B_t (eta_t U_{t-1}) + e_1 (-theta_t grad_t)``.
+      This (a) restores the missing leak, (b) preserves ``eta_t``'s data-dependent
+      plasticity-control semantics, and (c) makes ``K=1`` collapse *exactly* onto
+      the scalar recurrence, so the cascade is a strict generalisation.
+    * **Selective gate input.** When ``cascade_selective`` is set the per-edge
+      couplings ``B_t`` are gated by the *token* ``x_t`` (the same ``[B, dim]``
+      representation feeding ``alpha_head``/``eta_head``), not by the per-key
+      gradient: the surprise-driven consolidation the selective mode models is a
+      property of the event (the token), shared across all weight entries, so one
+      gate vector per token broadcasts over every parameter tensor.
     """
 
     def __init__(
@@ -143,6 +173,11 @@ class NeuralMemory(nn.Module):
         num_layers: int = 2,
         theta_scale: float = 1.0,
         window_size: int = 1,
+        use_cascade_momentum: bool = False,
+        cascade_reservoirs: int = 4,
+        cascade_beta1: float = 0.5,
+        cascade_g: float = 2.0,
+        cascade_selective: bool = False,
     ):
         super().__init__()
         hidden_dim = hidden_dim or dim
@@ -151,6 +186,17 @@ class NeuralMemory(nn.Module):
         if window_size < 1:
             raise ValueError("window_size (Omega c) must be >= 1")
         self.window_size = window_size
+
+        # Opt-in metaplastic cascade momentum (default off -> scalar Titans).
+        self.use_cascade_momentum = use_cascade_momentum
+        if use_cascade_momentum:
+            self.cascade = MetaplasticCascade(
+                cascade_reservoirs,
+                beta1=cascade_beta1,
+                g=cascade_g,
+                dim=dim if cascade_selective else None,
+                selective=cascade_selective,
+            )
 
         self.memory = NeuralMemoryMLP(dim, hidden_dim, num_layers)
         self.num_layers = num_layers
@@ -206,14 +252,41 @@ class NeuralMemory(nn.Module):
         alpha_t: torch.Tensor,
         eta_t: torch.Tensor,
         theta_t: torch.Tensor,
+        x_t: Optional[torch.Tensor] = None,
     ) -> Tuple[Params, Params]:
-        """One momentum + weight-decay update (shared by both code paths)."""
+        """One momentum + weight-decay update (shared by both code paths).
+
+        In cascade mode ``S`` carries the ``[..., K]`` reservoir state ``U`` and
+        ``x_t`` (the token ``[B, dim]``) supplies the selective per-edge gate;
+        otherwise the plain scalar recurrence runs unchanged.
+        """
         new_S: Params = {}
         new_state: Params = {}
+        if self.use_cascade_momentum and self.cascade.selective:
+            betas_t = self.cascade.selective_betas(x_t)  # [B, K-1]
+        else:
+            betas_t = None
         for key, w in state.items():
             gk = g[key]
-            new_S[key] = self._bcast(eta_t, gk) * S[key] - self._bcast(theta_t, gk) * gk
-            new_state[key] = self._bcast(1.0 - alpha_t, w) * w + new_S[key]
+            if self.use_cascade_momentum:
+                # Inject the surprise term into reservoir 1, decay the whole
+                # cascade by eta_t (see class docstring), diffuse, then read u^(1).
+                injected = -self._bcast(theta_t, gk) * gk
+                u_prev = self._bcast(eta_t, S[key]) * S[key]
+                if betas_t is not None:
+                    b = betas_t.view(
+                        betas_t.shape[0], *([1] * (w.dim() - 1)), betas_t.shape[-1]
+                    )
+                else:
+                    b = self.cascade.base_betas
+                new_S[key] = cascade_step(u_prev, injected, b)
+                s_read = self.cascade.read(new_S[key])
+                new_state[key] = self._bcast(1.0 - alpha_t, w) * w + s_read
+            else:
+                new_S[key] = (
+                    self._bcast(eta_t, gk) * S[key] - self._bcast(theta_t, gk) * gk
+                )
+                new_state[key] = self._bcast(1.0 - alpha_t, w) * w + new_S[key]
         return new_state, new_S
 
     def retrieve(self, state: Params, q: torch.Tensor) -> torch.Tensor:
@@ -231,7 +304,12 @@ class NeuralMemory(nn.Module):
 
     # ------------------------------------------------------------- carry state
     def init_momentum(self, state: Params) -> Params:
-        """Zero momentum state ``S`` matching the shapes of ``state``."""
+        """Zero momentum state ``S`` matching the shapes of ``state``.
+
+        In cascade mode each leaf gains a trailing reservoir axis of size ``K``.
+        """
+        if self.use_cascade_momentum:
+            return {key: self.cascade.init_state(w) for key, w in state.items()}
         return {key: torch.zeros_like(w) for key, w in state.items()}
 
     def init_memory(self, batch: int) -> Tuple[Params, Params]:
@@ -255,6 +333,7 @@ class NeuralMemory(nn.Module):
         chunk_size: int,
         q: Optional[torch.Tensor] = None,
         gamma: Optional[torch.Tensor] = None,
+        x: Optional[torch.Tensor] = None,
     ) -> Tuple[Params, Params, Optional[list]]:
         """Shared chunked update recurrence (Section 3.2; ATLAS Omega for c>1).
 
@@ -301,8 +380,9 @@ class NeuralMemory(nn.Module):
                                 gi = self._bcast(gamma[:, start + i], gi) * gi
                             acc = gi if acc is None else acc + gi
                         g[key] = acc
+                x_t = x[:, t] if x is not None else None
                 state, S = self._step(
-                    state, S, g, alpha[:, t], eta[:, t], theta[:, t]
+                    state, S, g, alpha[:, t], eta[:, t], theta[:, t], x_t=x_t
                 )
                 if ys is not None:
                     ys.append(self.retrieve(state, q[:, t]))
@@ -334,7 +414,7 @@ class NeuralMemory(nn.Module):
             else None
         )
         state, S, _ = self._scan_chunked(
-            k, v, alpha, eta, theta, state, S, chunk_size, q=None, gamma=gamma
+            k, v, alpha, eta, theta, state, S, chunk_size, q=None, gamma=gamma, x=x
         )
         return state, S
 
@@ -363,7 +443,7 @@ class NeuralMemory(nn.Module):
         batched_grad = vmap(grad_fn, in_dims=(0, 0, 0))  # over batch B
 
         state = self.memory.init_state(B)
-        S = {key: torch.zeros_like(w) for key, w in state.items()}
+        S = self.init_momentum(state)
         anchor = state  # weights at which gradients are evaluated
 
         ys = []
@@ -372,7 +452,9 @@ class NeuralMemory(nn.Module):
                 anchor = state  # freeze at chunk start
             grad_state = state if chunk_size is None else anchor
             g = batched_grad(grad_state, k[:, t], v[:, t])
-            state, S = self._step(state, S, g, alpha[:, t], eta[:, t], theta[:, t])
+            state, S = self._step(
+                state, S, g, alpha[:, t], eta[:, t], theta[:, t], x_t=x[:, t]
+            )
             ys.append(self.retrieve(state, q[:, t]))
 
         Y = torch.stack(ys, dim=1)
@@ -402,7 +484,7 @@ class NeuralMemory(nn.Module):
 
         state, S = self.init_memory(B)
         state, _, ys = self._scan_chunked(
-            k, v, alpha, eta, theta, state, S, chunk_size, q=q
+            k, v, alpha, eta, theta, state, S, chunk_size, q=q, x=x
         )
 
         Y = torch.stack(ys, dim=1)

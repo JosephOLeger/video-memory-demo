@@ -65,6 +65,11 @@ class TitansMACBlock(nn.Module):
         memory_window_size: int = 1,
         use_memory: bool = True,
         reset_memory_each_segment: bool = False,
+        memory_use_cascade: bool = False,
+        cascade_reservoirs: int = 4,
+        cascade_beta1: float = 0.5,
+        cascade_g: float = 2.0,
+        cascade_selective: bool = False,
     ):
         super().__init__()
         self.dim = dim
@@ -89,6 +94,11 @@ class TitansMACBlock(nn.Module):
             num_layers=memory_num_layers,
             theta_scale=theta_scale,
             window_size=memory_window_size,
+            use_cascade_momentum=memory_use_cascade,
+            cascade_reservoirs=cascade_reservoirs,
+            cascade_beta1=cascade_beta1,
+            cascade_g=cascade_g,
+            cascade_selective=cascade_selective,
         )
         self.persistent = PersistentMemory(dim, num_persistent_tokens)
         self.attn = CausalSelfAttention(dim, num_heads, conv_kernel_size)
