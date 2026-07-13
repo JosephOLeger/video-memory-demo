@@ -9,12 +9,16 @@ power-law diagnostic (K=6) whose numbers are reproduced in the README/report.
 import numpy as np
 import torch
 
+import pytest
+
 from titans.metaplastic import (
     MetaplasticCascade,
     build_tridiagonal_B,
     cascade_scan,
     cascade_step,
     geometric_betas,
+    geometric_decays,
+    independent_step,
     read,
     spectral_radius,
 )
@@ -89,6 +93,54 @@ def test_mass_conservation_and_equilibrium():
         u = cascade_step(u, torch.tensor(0.0), cas.betas())
     assert abs(u.sum().item() - total0) < 1e-5  # mass conserved (no leak; fp32)
     assert abs(read(u).item() - 1.0 / K) < 1e-4  # equilibrium redistribution
+
+
+def test_independent_topology_is_k_exponential_filters():
+    """Independent (diagonal-B) topology == K uncoupled exponential filters, each
+    fed the *same* gradient, readout = mean. Direct semantics check, mirroring
+    ``test_hand_worked_k2_regression`` but for the null-hypothesis config.
+    """
+    K = 4
+    decays = geometric_decays(K, beta1=0.5, g=2.0)
+    # geometric decays: lambda_k = 1 - 0.5 * 2^-k.
+    assert torch.allclose(
+        decays, torch.tensor([0.5, 0.75, 0.875, 0.9375], dtype=decays.dtype)
+    )
+    assert ((decays > 0) & (decays < 1)).all()  # all in (0,1) -> stable filters
+
+    torch.manual_seed(0)
+    T = 25
+    grads = torch.randn(T, dtype=torch.float64)
+
+    # run independent_step
+    u = torch.zeros(K, dtype=torch.float64)
+    got = []
+    for t in range(T):
+        u = independent_step(u, grads[t], decays)
+        got.append(u.clone())
+    got = torch.stack(got)  # [T, K]
+
+    # explicit reference: K separate scalar exponential filters, same gradient.
+    ref = torch.zeros(T, K, dtype=torch.float64)
+    for k in range(K):
+        f = 0.0
+        for t in range(T):
+            f = decays[k].item() * f + grads[t].item()
+            ref[t, k] = f
+    assert torch.allclose(got, ref)  # bit-identical to the hand-built filter bank
+
+    # readout is the mean over reservoirs (not reservoir 0, not the sum).
+    cas = MetaplasticCascade(K, beta1=0.5, g=2.0, topology="independent")
+    assert torch.allclose(cas.readout(got), got.mean(dim=-1))
+    # and mean != reservoir-0 read for a nontrivial state (so it's genuinely a mix)
+    assert not torch.allclose(cas.readout(got), read(got))
+
+
+def test_independent_topology_rejects_selective():
+    """Independent topology has no coupling to gate -> selective must be refused."""
+    with pytest.raises(ValueError):
+        MetaplasticCascade(4, beta1=0.5, g=2.0, dim=8, selective=True,
+                           topology="independent")
 
 
 def test_selective_B_varies_and_is_noncommuting():

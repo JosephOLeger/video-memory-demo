@@ -50,6 +50,38 @@ def test_k1_cascade_matches_scalar():
     assert torch.allclose(y_s, y_c, rtol=1e-10, atol=1e-10)
 
 
+def test_uncoupled_independent_differs_from_baseline():
+    """The corrected 'uncoupled' config (K independent exponential filters via
+    ``cascade_topology='independent'``) is genuinely different from baseline --
+    unlike the earlier flawed ``cascade_beta1=0.0`` chain, which was bit-identical.
+
+    (a) independent topology NOT bit-identical to baseline (it mixes K timescales);
+    (b) the old ``beta1=0`` chain IS bit-identical to baseline (documents the bug
+        this config replaces: 1 live filter + K-1 dead reservoirs).
+    """
+    torch.manual_seed(1)
+    x = torch.randn(2, 16, 8, dtype=torch.float64)
+
+    base = make_memory(seed=42)
+    y_base, _ = base.forward_chunked(x, chunk_size=4)
+
+    indep = make_memory(
+        seed=42, use_cascade_momentum=True, cascade_reservoirs=4,
+        cascade_topology="independent",
+    )
+    y_indep, _ = indep.forward_chunked(x, chunk_size=4)
+    # (a) genuinely different from baseline (this was the whole point of the fix).
+    assert not torch.allclose(y_base, y_indep, rtol=1e-6, atol=1e-6)
+
+    # (b) the old bug (zero coupling on the chain) collapses onto baseline exactly.
+    old_bug = make_memory(
+        seed=42, use_cascade_momentum=True, cascade_reservoirs=4,
+        cascade_beta1=0.0, cascade_selective=False,
+    )
+    y_old, _ = old_bug.forward_chunked(x, chunk_size=4)
+    assert torch.allclose(y_base, y_old, rtol=1e-10, atol=1e-10)
+
+
 def test_cascade_runs_no_nan_both_paths():
     """With the flag on, both update() and the naive loop run cleanly."""
     for selective in (False, True):
@@ -80,20 +112,24 @@ def test_cascade_chunked_vs_naive_agree():
     """chunked vs naive-sequential still agree when the cascade is enabled.
 
     Mirrors test_memory_equivalence.test_naive_chunked_equivalence. Selective
-    mode is included because its per-token betas are shared by both paths.
+    mode and the independent (diagonal-B) topology are both included because each
+    is exercised by the sweep and must agree across the two update code paths.
     """
-    for selective in (False, True):
+    for kwargs in (
+        dict(cascade_selective=False),
+        dict(cascade_selective=True),
+        dict(cascade_topology="independent"),
+    ):
         torch.manual_seed(5)
         mem = make_memory(
-            seed=5, use_cascade_momentum=True, cascade_reservoirs=4,
-            cascade_selective=selective,
+            seed=5, use_cascade_momentum=True, cascade_reservoirs=4, **kwargs
         )
         x = torch.randn(2, 16, 8, dtype=torch.float64)
         for chunk_size in (4, 8, 16):
             y_ref, s_ref = mem.forward_naive_sequential(x, chunk_size=chunk_size)
             y_chk, s_chk = mem.forward_chunked(x, chunk_size=chunk_size)
             assert torch.allclose(y_ref, y_chk, rtol=1e-8, atol=1e-8), (
-                f"selective={selective} chunk={chunk_size} "
+                f"cfg={kwargs} chunk={chunk_size} "
                 f"max|diff|={(y_ref - y_chk).abs().max().item():.3e}"
             )
             for key in s_ref:

@@ -32,8 +32,9 @@ def test_sweep_smoke_runs():
         assert r["num_params"] > 0
         assert r["chance"] > 0.0
 
-    # baseline and uncoupled (betas==0) collapse to the same recurrence -> the
-    # coupled config's beta_head is the only param-count difference.
+    # baseline and uncoupled (independent topology) have identical param counts --
+    # the filter bank adds only non-trained buffers -- so the coupled config's
+    # beta_head is the only param-count difference.
     by = {(r["task"], r["difficulty"], r["config"]): r for r in records}
     for (task, dval, cfg), r in by.items():
         if cfg == "baseline":

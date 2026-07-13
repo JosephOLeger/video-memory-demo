@@ -15,6 +15,8 @@ from .metaplastic import (
     cascade_scan,
     cascade_step,
     geometric_betas,
+    geometric_decays,
+    independent_step,
 )
 from .persistent import PersistentMemory
 
@@ -28,7 +30,9 @@ __all__ = [
     "TitansMACBlock",
     "MetaplasticCascade",
     "geometric_betas",
+    "geometric_decays",
     "build_tridiagonal_B",
     "cascade_step",
     "cascade_scan",
+    "independent_step",
 ]

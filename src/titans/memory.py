@@ -52,7 +52,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.func import grad, vmap
 
-from .metaplastic import MetaplasticCascade, cascade_step
+from .metaplastic import MetaplasticCascade, cascade_step, independent_step
 
 Params = Dict[str, torch.Tensor]
 
@@ -142,10 +142,15 @@ class NeuralMemory(nn.Module):
         ``U_t`` (:class:`~titans.metaplastic.MetaplasticCascade`); the visible
         momentum fed into ``M_t = (1-alpha_t) M_{t-1} + S_t`` becomes
         ``read(U_t) = U_t^(1)``. See :meth:`_step`.
-    cascade_reservoirs, cascade_beta1, cascade_g, cascade_selective: forwarded to
+    cascade_reservoirs, cascade_beta1, cascade_g, cascade_selective,
+    cascade_topology: forwarded to
         :class:`~titans.metaplastic.MetaplasticCascade` (``K``, geometric coupling
-        hyperparameters, and the data-dependent per-edge gate). Ignored unless
-        ``use_cascade_momentum`` is set.
+        hyperparameters, the data-dependent per-edge gate, and the chain-vs-
+        independent topology). Ignored unless ``use_cascade_momentum`` is set.
+        ``cascade_topology="independent"`` gives the diagonal-``B`` null hypothesis:
+        ``K`` uncoupled exponential filters (gradient into all reservoirs, readout
+        = mean), used by the sweep's ``uncoupled`` config to test whether the
+        cascade's *coupling* -- not merely having K filters -- adds anything.
 
     Cascade design choices (documented per the project convention):
 
@@ -178,6 +183,7 @@ class NeuralMemory(nn.Module):
         cascade_beta1: float = 0.5,
         cascade_g: float = 2.0,
         cascade_selective: bool = False,
+        cascade_topology: str = "chain",
     ):
         super().__init__()
         hidden_dim = hidden_dim or dim
@@ -196,6 +202,7 @@ class NeuralMemory(nn.Module):
                 g=cascade_g,
                 dim=dim if cascade_selective else None,
                 selective=cascade_selective,
+                topology=cascade_topology,
             )
 
         self.memory = NeuralMemoryMLP(dim, hidden_dim, num_layers)
@@ -269,18 +276,27 @@ class NeuralMemory(nn.Module):
         for key, w in state.items():
             gk = g[key]
             if self.use_cascade_momentum:
-                # Inject the surprise term into reservoir 1, decay the whole
-                # cascade by eta_t (see class docstring), diffuse, then read u^(1).
+                # Surprise term and the per-token eta_t leak applied to the whole
+                # reservoir state (see class docstring); topology decides how the
+                # gradient is injected/mixed, then readout() feeds S_t.
                 injected = -self._bcast(theta_t, gk) * gk
                 u_prev = self._bcast(eta_t, S[key]) * S[key]
-                if betas_t is not None:
-                    b = betas_t.view(
-                        betas_t.shape[0], *([1] * (w.dim() - 1)), betas_t.shape[-1]
+                if self.cascade.topology == "independent":
+                    # Diagonal B: same gradient into every reservoir, each with its
+                    # own fixed decay, no cross-reservoir mixing.
+                    new_S[key] = independent_step(
+                        u_prev, injected, self.cascade.decays
                     )
                 else:
-                    b = self.cascade.base_betas
-                new_S[key] = cascade_step(u_prev, injected, b)
-                s_read = self.cascade.read(new_S[key])
+                    # Chain: gradient into reservoir 0 only, tridiagonal diffusion.
+                    if betas_t is not None:
+                        b = betas_t.view(
+                            betas_t.shape[0], *([1] * (w.dim() - 1)), betas_t.shape[-1]
+                        )
+                    else:
+                        b = self.cascade.base_betas
+                    new_S[key] = cascade_step(u_prev, injected, b)
+                s_read = self.cascade.readout(new_S[key])
                 new_state[key] = self._bcast(1.0 - alpha_t, w) * w + s_read
             else:
                 new_S[key] = (

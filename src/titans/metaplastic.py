@@ -36,6 +36,18 @@ weight of shape ``[B, d_out, d_in]``, the cascade state ``U`` has shape
 as a vector of length ``K-1`` (edge ``e`` connects reservoirs ``e`` and ``e+1``,
 0-indexed) broadcastable over the leading (weight/batch) dims.
 
+Topology
+--------
+The default cascade is a **chain**: gradient injected into reservoir 0 only,
+tridiagonal (nearest-neighbour) diffusion between depths. An alternative
+``topology="independent"`` realises the degenerate **diagonal-``B``** case
+directly (see :func:`independent_step` / :func:`geometric_decays`): ``K``
+uncoupled exponential filters, the gradient injected into *all* of them, readout
+= mean over reservoirs. This is the honest "would any K-way mixture of
+exponential filters do as well?" null hypothesis for the coupled cascade -- the
+provably-less-expressive filter bank named under mode 1 below, but built
+explicitly rather than emerging from a fixed chain.
+
 Coupling modes
 --------------
 1. **Fixed geometric** ``B`` (:func:`geometric_betas`): ``b_k = beta1 * g^-(k-1)``
@@ -44,6 +56,8 @@ Coupling modes
    diagonalisable ``B = P Lambda P^-1`` and is therefore exactly a fixed linear
    combination of ``K`` independent exponential-momentum filters -- no more
    expressive than several ordinary Titans momentums mixed by a learned readout.
+   ``topology="independent"`` is exactly this filter bank in its already-diagonal
+   form (``B = diag(decays)``, ``decays`` from :func:`geometric_decays`).
 2. **Data-dependent / selective** ``B_t`` (:class:`MetaplasticCascade` with
    ``selective=True``): a learned ``Linear(dim, K-1)`` + sigmoid head on the
    token ``x_t`` (same linear+sigmoid style as ``alpha_head``/``eta_head`` in
@@ -118,6 +132,37 @@ def geometric_betas(
     return beta1 * g ** (-ks)
 
 
+def geometric_decays(
+    num_reservoirs: int,
+    beta1: float = 0.5,
+    g: float = 2.0,
+    *,
+    dtype: torch.dtype = torch.float64,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """Per-reservoir self-decays for the **independent** (diagonal-``B``) topology.
+
+    Returns a length-``K`` vector ``lambda_k = 1 - beta1 * g^-k`` for
+    ``k = 0..K-1`` (so ``lambda_0 = 1 - beta1``, then geometrically approaching 1
+    as depth grows): ``[1-beta1, 1-beta1/g, 1-beta1/g^2, ...]``. These are the
+    fixed decay rates of ``K`` *independent* exponential-momentum filters -- the
+    diagonal-``B`` degenerate case documented under "Coupling modes / fixed
+    coupling" in the module docstring, used as the sweep's null hypothesis
+    ("would any K-way mixture of exponential filters do as well as the coupled
+    cascade?"). Reuses the same ``(beta1, g)`` geometric spacing as the chain's
+    edge couplings so the two configs share one hyperparameter family; concretely
+    these mirror the *eigenvalues* of the fixed tridiagonal ``B`` (a fixed cascade
+    is exactly such a filter bank -- see the note on mode 1). With ``beta1=0.5,
+    g=2`` and ``K=4`` this is ``[0.5, 0.75, 0.875, 0.9375]``, all in ``(0, 1)``.
+    """
+    if num_reservoirs < 1:
+        raise ValueError("num_reservoirs (K) must be >= 1")
+    if g <= 1.0:
+        raise ValueError("geometric spacing factor g must be > 1")
+    ks = torch.arange(0, num_reservoirs, dtype=dtype, device=device)  # 0..K-1
+    return 1.0 - beta1 * g ** (-ks)
+
+
 def build_tridiagonal_B(betas: torch.Tensor) -> torch.Tensor:
     """Assemble the ``K x K`` diffusion matrix ``B`` from edge couplings.
 
@@ -183,6 +228,30 @@ def cascade_step(
     return u_prev + inflow_from_right + inflow_from_left + inj
 
 
+def independent_step(
+    u_prev: torch.Tensor,
+    grad_t: torch.Tensor,
+    decays: torch.Tensor,
+) -> torch.Tensor:
+    """One step of ``K`` *independent* exponential filters (diagonal ``B``).
+
+    ``u_t^(k) = decays_k * u_{t-1}^(k) + grad_t`` for every ``k`` -- i.e. the
+    same injected ``grad_t`` reaches **all** reservoirs (not just reservoir 0),
+    each leaks at its own fixed rate ``decays_k``, and *no* mass is exchanged
+    between reservoirs (``B = diag(decays)`` is diagonal, not tridiagonal). This
+    is the genuine "K independent momentums" null hypothesis: a fixed bank of
+    exponential filters with no coupling. Contrast :func:`cascade_step`, where the
+    gradient hits only reservoir 0 and off-diagonal diffusion is what spreads it.
+
+    Parameters
+    ----------
+    u_prev : ``[..., K]`` previous filter-bank state.
+    grad_t : ``[...]`` gradient injected identically into every reservoir.
+    decays : ``[..., K]`` (or broadcastable ``[K]``) per-reservoir self-decays.
+    """
+    return decays * u_prev + grad_t.unsqueeze(-1)
+
+
 def cascade_scan(
     u_init: torch.Tensor,
     grads: torch.Tensor,
@@ -245,11 +314,18 @@ class MetaplasticCascade(nn.Module):
         token produces per-token, per-edge gates in ``(0, 1)`` that scale the base
         couplings edge-by-edge, making ``B_t`` data-dependent *and non-commuting*
         (mode 2 in the module docstring). If False, ``B`` is the fixed geometric
-        matrix (mode 1).
+        matrix (mode 1). Only valid for ``topology="chain"``.
+    topology : ``"chain"`` (default) is the tridiagonal diffusion cascade
+        (gradient into reservoir 0, mass exchanged between neighbours, readout =
+        reservoir 0). ``"independent"`` is the diagonal-``B`` null hypothesis: ``K``
+        uncoupled exponential filters (:func:`geometric_decays`), the gradient
+        injected into *all* of them, readout = mean over reservoirs (see
+        :func:`independent_step`). Independent mode has no coupling to gate, so it
+        forbids ``selective``.
 
-    The base couplings are stored as a non-trained buffer so a fixed cascade has
-    no learnable parameters, mirroring how the geometric spacing is a plain
-    hyperparameter of the biological model.
+    The base couplings / decays are stored as non-trained buffers so a fixed
+    cascade has no learnable parameters, mirroring how the geometric spacing is a
+    plain hyperparameter of the biological model.
     """
 
     def __init__(
@@ -259,14 +335,25 @@ class MetaplasticCascade(nn.Module):
         g: float = 2.0,
         dim: Optional[int] = None,
         selective: bool = False,
+        topology: str = "chain",
     ):
         super().__init__()
         if num_reservoirs < 1:
             raise ValueError("num_reservoirs (K) must be >= 1")
+        if topology not in ("chain", "independent"):
+            raise ValueError("topology must be 'chain' or 'independent'")
+        if topology == "independent" and selective:
+            raise ValueError(
+                "topology='independent' has no coupling to gate -> selective=False"
+            )
         self.num_reservoirs = num_reservoirs
         self.selective = selective
+        self.topology = topology
         base = geometric_betas(num_reservoirs, beta1, g, dtype=torch.get_default_dtype())
         self.register_buffer("base_betas", base)  # [K-1]
+        # Diagonal-B decays for the independent topology (unused by the chain).
+        decays = geometric_decays(num_reservoirs, beta1, g, dtype=torch.get_default_dtype())
+        self.register_buffer("decays", decays)  # [K]
 
         if selective:
             if dim is None:
@@ -336,4 +423,19 @@ class MetaplasticCascade(nn.Module):
     @staticmethod
     def read(u: torch.Tensor) -> torch.Tensor:
         """Visible momentum (reservoir 1); see module-level :func:`read`."""
+        return read(u)
+
+    def readout(self, u: torch.Tensor) -> torch.Tensor:
+        """Topology-aware visible momentum fed into the memory's weight-decay rule.
+
+        Chain: reservoir 0 (:func:`read`). Independent: **mean** over the ``K``
+        filters. The mean (not sum) keeps the readout on the same scale as a single
+        Titans momentum: each filter receives the identical injected surprise
+        ``-theta_t grad``, so summing K of them would inflate the effective inner
+        learning rate ~K-fold vs ``baseline`` and confound the matched comparison;
+        averaging leaves the readout magnitude comparable to one exponential filter
+        while still mixing K distinct decay timescales.
+        """
+        if self.topology == "independent":
+            return u.mean(dim=-1)
         return read(u)
