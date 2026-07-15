@@ -1,20 +1,24 @@
 """Precompute frozen V-JEPA-2 latents for raw videos and cache them to disk.
 
-This is the end-to-end glue between real video and the world model:
+The end-to-end glue between real video and the world model, as a *continuous*
+latent stream:
 
     raw frames [F, H, W, C]
-      -> aggregate_frames(window, stride)     temporal average-pool (longer span)
-      -> split_into_clips(clip_len=64)         fixed-size clips for the encoder
-      -> VJEPA2VideoProcessor                  resize 256 + normalise -> pixel_values
-      -> VJEPA2Encoder (frozen)                -> T' latents per clip
-      -> concatenate clips along time          -> [K * T', latent_dim] per video
+      -> video_to_latents_sliding(clip_len, stride_frames)   overlapping windows
+      -> VJEPA2VideoProcessor                                 resize 256 + normalise
+      -> VJEPA2Encoder (frozen)                               -> T' latents / window
+      -> keep each window's central band, tiled contiguously  -> [T_total, latent_dim]
 
-Because the encoder is frozen and heavy, we run it *once* and cache the latents;
-the world model then trains fast on the cached tensors (see
-:func:`titans.worldmodel.train.train_demo`, which loads a cache when given one).
+Because the encoder is frozen and heavy, we run it *once* and cache the latents; the
+world model then trains fast on the cached tensors.
 
-Runnable smoke test (uses the real encoder but synthetic videos, so no dataset
-download -- only the ~1.2 GB encoder is fetched, then cached)::
+Note on why we slide rather than temporally average: V-JEPA-2 is a motion-aware video
+encoder, so averaging frames *before* the encoder (an earlier approach) destroys the
+very temporal signal it reads. Instead we feed real frames and get continuity by
+overlapping the encoder windows and keeping their well-contextualised central bands.
+
+Runnable smoke test (real encoder, synthetic videos, no dataset download -- only the
+~1.2 GB encoder is fetched, then cached)::
 
     python -m titans.worldmodel.precompute_latents
 """
@@ -27,7 +31,6 @@ from typing import Iterable
 import torch
 
 from .encoder import VJEPA2Encoder
-from .frames import aggregate_frames, split_into_clips
 
 CLIP_LEN = 64  # V-JEPA-2 fpc64 native clip length (frames_per_clip)
 
@@ -37,29 +40,6 @@ def load_processor(model_name: str):
     from transformers import AutoVideoProcessor
 
     return AutoVideoProcessor.from_pretrained(model_name)
-
-
-def video_to_latents(
-    frames: torch.Tensor,
-    encoder: VJEPA2Encoder,
-    processor,
-    *,
-    agg_window: int,
-    agg_stride: int,
-    clip_len: int = CLIP_LEN,
-) -> torch.Tensor:
-    """Encode one raw video ``[F, H, W, C]`` to a latent sequence ``[T_total, d]``.
-
-    Consecutive frames are averaged over a sliding ``agg_window`` moved by
-    ``agg_stride`` (longer effective span), the result is chunked into
-    ``clip_len``-frame clips, each clip is normalised by ``processor`` and encoded,
-    and the clips' latents are concatenated along time: ``T_total = K * T'`` where
-    ``K`` is the number of clips and ``T'`` the encoder's temporal groups per clip.
-    """
-    supers = aggregate_frames(frames, agg_window, agg_stride)  # [S, H, W, C]
-    clips = split_into_clips(supers, clip_len)                 # [K, clip_len, H, W, C]
-    per_clip = [_encode_clip(clip, encoder, processor) for clip in clips]
-    return torch.cat(per_clip, dim=0)  # [K * T', d]
 
 
 def _encode_clip(clip: torch.Tensor, encoder: VJEPA2Encoder, processor) -> torch.Tensor:
@@ -79,19 +59,17 @@ def video_to_latents_sliding(
 ) -> torch.Tensor:
     """Encode one video as a *continuous* latent stream via overlapping windows.
 
-    V-JEPA encodes each clip independently, so concatenating adjacent clips
-    (:func:`video_to_latents`) hard-cuts the latent sequence every clip -- a
-    long-memory model gets no continuity to exploit across those seams. Instead we
-    slide a ``clip_len``-frame window by ``stride_frames`` (with overlap) and keep
-    only the *central* band of each window's latents: the positions that had full
-    temporal context on both sides. Adjacent kept bands tile the video
-    contiguously (``keep = stride_frames / tubelet`` latents per step), so the
-    result is a smooth, continuous sequence -- each latent well-contextualised,
-    seams softened by overlap.
+    V-JEPA encodes each clip independently, so a long-memory model gets no continuity
+    to exploit across clip seams. Instead we slide a ``clip_len``-frame window by
+    ``stride_frames`` (with overlap) and keep only the *central* band of each window's
+    latents: the positions that had full temporal context on both sides. Adjacent kept
+    bands tile the video contiguously (``keep = stride_frames / tubelet`` latents per
+    step), so the result is a smooth, continuous sequence -- each latent
+    well-contextualised, seams softened by overlap.
 
-    Smaller ``stride_frames`` = more overlap = more context per latent = smoother,
-    at more encoder passes. ``stride_frames == clip_len`` recovers the
-    discontinuous non-overlapping behaviour.
+    Smaller ``stride_frames`` = more overlap = more context per latent = smoother, at
+    more encoder passes. ``stride_frames == clip_len`` recovers the discontinuous
+    non-overlapping behaviour.
     """
     F = frames.shape[0]
     starts = list(range(0, max(F - clip_len, 0) + 1, stride_frames)) or [0]
@@ -116,8 +94,8 @@ def video_to_latents_sliding(
                 f"latents/clip={Tp}; use a smaller stride so windows overlap"
             )
         margin = (Tp - keep) // 2
-        # Keep the central band; extend to the very edges on the first/last window
-        # so the whole video is covered.
+        # Keep the central band; extend to the very edges on the first/last window so
+        # the whole video is covered.
         lo = 0 if wi == 0 else margin
         hi = Tp if wi == len(starts) - 1 else margin + keep
         bands.append(z[lo:hi])
@@ -129,38 +107,24 @@ def precompute(
     out_path: str | Path,
     *,
     model_name: str | None = None,
-    agg_window: int = 2,
-    agg_stride: int = 2,
     clip_len: int = CLIP_LEN,
-    sliding_stride: int | None = None,
+    sliding_stride: int = 32,
 ) -> torch.Tensor:
-    """Encode a set of raw videos and save a stacked latent tensor to ``out_path``.
+    """Encode a set of raw videos as continuous latent streams and save them.
 
-    With ``sliding_stride`` set, videos are encoded as *continuous* latent streams
-    via overlapping windows (:func:`video_to_latents_sliding`); otherwise the
-    non-overlapping aggregate-and-chunk path (:func:`video_to_latents`) is used.
-    All videos must yield the same number of latents so they stack into
-    ``[num_videos, T_total, latent_dim]``. The saved file is a dict with the
-    latents plus the settings used to produce them.
+    Every video is encoded via :func:`video_to_latents_sliding`; all must yield the
+    same number of latents so they stack into ``[num_videos, T_total, latent_dim]``.
+    The saved file is a dict with the latents plus the settings used to produce them.
     """
     encoder = VJEPA2Encoder(model_name) if model_name else VJEPA2Encoder()
     processor = load_processor(encoder.model_name)
 
-    if sliding_stride is not None:
-        seqs = [
-            video_to_latents_sliding(
-                v, encoder, processor, clip_len=clip_len, stride_frames=sliding_stride,
-            )
-            for v in videos
-        ]
-    else:
-        seqs = [
-            video_to_latents(
-                v, encoder, processor,
-                agg_window=agg_window, agg_stride=agg_stride, clip_len=clip_len,
-            )
-            for v in videos
-        ]
+    seqs = [
+        video_to_latents_sliding(
+            v, encoder, processor, clip_len=clip_len, stride_frames=sliding_stride
+        )
+        for v in videos
+    ]
     latents = torch.stack(seqs, dim=0)  # [num_videos, T_total, d]
 
     out_path = Path(out_path)
@@ -169,48 +133,12 @@ def precompute(
         {
             "latents": latents,
             "model_name": encoder.model_name,
-            "agg_window": agg_window,
-            "agg_stride": agg_stride,
             "clip_len": clip_len,
             "sliding_stride": sliding_stride,
         },
         out_path,
     )
     return latents
-
-
-def precompute_kinetics(
-    out_path: str | Path,
-    *,
-    split: str = "train",
-    classes: list[str] | None = None,
-    per_class: int = 2,
-    num_frames: int = 256,
-    model_name: str | None = None,
-    agg_window: int = 2,
-    agg_stride: int = 2,
-    clip_len: int = CLIP_LEN,
-    sliding_stride: int | None = None,
-) -> torch.Tensor:
-    """Fetch Kinetics-mini clips, encode them, and cache the stacked latents.
-
-    Thin wrapper tying :func:`titans.worldmodel.data.kinetics_frames` (download +
-    decode) to :func:`precompute`. Every clip is decoded to the same
-    ``num_frames``, so the latents stack into ``[num_videos, T_total, latent_dim]``.
-    Pass ``sliding_stride`` to encode continuous latent streams (overlapping
-    windows) instead of the discontinuous aggregate-and-chunk default.
-    """
-    from .data import kinetics_frames
-
-    videos = kinetics_frames(
-        split=split, classes=classes, per_class=per_class, num_frames=num_frames
-    )
-    return precompute(
-        videos, out_path,
-        model_name=model_name,
-        agg_window=agg_window, agg_stride=agg_stride, clip_len=clip_len,
-        sliding_stride=sliding_stride,
-    )
 
 
 def precompute_egolife(
@@ -221,13 +149,12 @@ def precompute_egolife(
     num_frames: int = 128,
     model_name: str | None = None,
     clip_len: int = CLIP_LEN,
-    sliding_stride: int | None = 32,
+    sliding_stride: int = 32,
 ) -> torch.Tensor:
     """Fetch EgoLife segments for the given persons, encode, and cache latents.
 
-    Person-disjoint train/val split lives in the caller's choice of ``persons``
-    (see :data:`titans.worldmodel.egolife.TRAIN_PERSONS` / ``VAL_PERSONS``).
-    Defaults to continuous sliding-window encoding.
+    Person-disjoint train/val split lives in the caller's choice of ``persons`` (see
+    :data:`titans.worldmodel.egolife.TRAIN_PERSONS` / ``VAL_PERSONS``).
     """
     from .egolife import egolife_frames
 
@@ -248,5 +175,5 @@ def _synthetic_videos(n: int = 2, frames: int = 128, size: int = 64) -> list:
 
 if __name__ == "__main__":
     out = Path("cache/latents_demo.pt")
-    latents = precompute(_synthetic_videos(), out, agg_window=2, agg_stride=2)
+    latents = precompute(_synthetic_videos(), out, sliding_stride=32)
     print(f"cached latents {tuple(latents.shape)} -> {out}")

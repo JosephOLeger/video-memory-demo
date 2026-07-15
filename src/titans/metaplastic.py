@@ -1,4 +1,4 @@
-"""Metaplastic K-reservoir momentum cascade (standalone -- not yet wired in).
+"""Metaplastic K-reservoir momentum cascade (opt-in momentum for NeuralMemory).
 
 Motivation
 ----------
@@ -290,8 +290,10 @@ def cascade_scan(
 def read(u: torch.Tensor) -> torch.Tensor:
     """The visible momentum: reservoir 1, i.e. what ``S_t`` used to be.
 
-    This is what plugs into ``M_t = (1 - alpha_t) M_{t-1} + read(u_t)`` when the
-    cascade later replaces the scalar momentum (not wired up this pass).
+    This is what plugs into ``M_t = (1 - alpha_t) M_{t-1} + read(u_t)`` in the chain
+    topology, opt-in via ``NeuralMemory(use_cascade_momentum=True)`` (see
+    :meth:`NeuralMemory._step`). The ``independent`` topology reads the mean instead
+    (:meth:`MetaplasticCascade.readout`).
     """
     return u[..., 0]
 
@@ -336,6 +338,7 @@ class MetaplasticCascade(nn.Module):
         dim: Optional[int] = None,
         selective: bool = False,
         topology: str = "chain",
+        readout: Optional[str] = None,
     ):
         super().__init__()
         if num_reservoirs < 1:
@@ -349,6 +352,17 @@ class MetaplasticCascade(nn.Module):
         self.num_reservoirs = num_reservoirs
         self.selective = selective
         self.topology = topology
+        # Readout: which reservoir(s) feed the visible momentum. Default preserves
+        # prior behaviour (chain -> shallowest u^1; independent -> mean). ``deep`` /
+        # ``mean`` / ``sum`` / ``learned`` expose the *slow* reservoirs, whose long
+        # retention is otherwise invisible when only u^1 is read.
+        if readout is None:
+            readout = "mean" if topology == "independent" else "shallow"
+        if readout not in ("shallow", "mean", "sum", "deep", "learned"):
+            raise ValueError(f"unknown readout mode {readout!r}")
+        self.readout_mode = readout
+        if readout == "learned":
+            self.readout_w = nn.Parameter(torch.zeros(num_reservoirs))
         base = geometric_betas(num_reservoirs, beta1, g, dtype=torch.get_default_dtype())
         self.register_buffer("base_betas", base)  # [K-1]
         # Diagonal-B decays for the independent topology (unused by the chain).
@@ -426,16 +440,23 @@ class MetaplasticCascade(nn.Module):
         return read(u)
 
     def readout(self, u: torch.Tensor) -> torch.Tensor:
-        """Topology-aware visible momentum fed into the memory's weight-decay rule.
+        """Visible momentum fed into the memory's weight-decay rule.
 
-        Chain: reservoir 0 (:func:`read`). Independent: **mean** over the ``K``
-        filters. The mean (not sum) keeps the readout on the same scale as a single
-        Titans momentum: each filter receives the identical injected surprise
-        ``-theta_t grad``, so summing K of them would inflate the effective inner
-        learning rate ~K-fold vs ``baseline`` and confound the matched comparison;
-        averaging leaves the readout magnitude comparable to one exponential filter
-        while still mixing K distinct decay timescales.
+        ``readout_mode`` selects which reservoir(s) are read: ``shallow`` = u^1
+        (fastest; the original Titans-like momentum), ``deep`` = u^K (slowest),
+        ``mean``/``sum`` = pool all K, ``learned`` = softmax-weighted combination
+        (lets training expose the slow reservoirs). ``mean``/``learned`` keep the
+        readout on a single-filter scale; ``sum`` inflates it ~K-fold (rescale the
+        inner lr accordingly).
         """
-        if self.topology == "independent":
+        mode = self.readout_mode
+        if mode == "shallow":
+            return u[..., 0]
+        if mode == "deep":
+            return u[..., -1]
+        if mode == "mean":
             return u.mean(dim=-1)
-        return read(u)
+        if mode == "sum":
+            return u.sum(dim=-1)
+        w = torch.softmax(self.readout_w, dim=0)  # learned
+        return (u * w).sum(dim=-1)

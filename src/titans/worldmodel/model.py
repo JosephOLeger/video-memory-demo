@@ -58,7 +58,8 @@ class WorldModel(nn.Module):
         self.out_norm = nn.RMSNorm(dim)
         self.out_proj = nn.Linear(dim, latent_dim)
 
-    def forward(self, z: torch.Tensor, carry=None, return_carry: bool = False):
+    def forward(self, z: torch.Tensor, carry=None, return_carry: bool = False,
+                return_features: bool = False):
         """Map latents ``z`` ``[B, T, latent_dim]`` to per-step next-latent guesses.
 
         Position ``t`` of the output predicts ``z[:, t + 1]``. Within a call the
@@ -70,6 +71,12 @@ class WorldModel(nn.Module):
         ``carry`` is a per-block list of ``(state, S)`` from a previous call (or
         ``None`` to start fresh). With ``return_carry=True`` the updated per-block
         carry is returned alongside the prediction as ``(pred, carry)``.
+
+        With ``return_features=True`` the pre-output-projection features
+        ``[B, T, dim]`` are returned instead of the latent prediction, so an
+        alternative output head (e.g. the GMM/MDN head in :mod:`titans.worldmodel.gmm`)
+        can consume them in place of the linear ``out_proj``. The default path is
+        unchanged.
         """
         if carry is None:
             carry = [(None, None)] * len(self.blocks)
@@ -80,5 +87,6 @@ class WorldModel(nn.Module):
             h, state, S = block(h, state, S)
             new_carry.append((state, S))
 
-        pred = self.out_proj(self.out_norm(h))
-        return (pred, new_carry) if return_carry else pred
+        feat = self.out_norm(h)
+        out = feat if return_features else self.out_proj(feat)
+        return (out, new_carry) if return_carry else out

@@ -79,7 +79,7 @@ loop does not detach the outer graph), and a small toy trainability check.
   here means *internally consistent, causal, and faithful to the paper's
   described mechanism*, not numerically matching a ground truth.
 
-## Metaplastic momentum cascade (`metaplastic.py`) — standalone, not yet wired in
+## Metaplastic momentum cascade (`metaplastic.py`) — opt-in momentum for the neural memory
 
 `src/titans/metaplastic.py` explores replacing Titans' single momentum scalar
 `S_t` (one decay `η_t` controls both reactivity *and* retention — the
@@ -88,12 +88,17 @@ biological synaptic metaplasticity (Fusi/Abbott/Drew 2005; Benna & Fusi 2016).
 Each scalar momentum entry becomes a length-`K` vector `u=(u¹,…,uᴷ)`; only `u¹`
 sees the gradient, and consecutive reservoirs exchange mass by diffusion:
 `u_t = B·u_{t-1} + e₁·∇ℓ_t` with `B` tridiagonal (`b_k = β₁·g^-(k-1)`).
-`read(u)=u¹` is the "visible" momentum that would later feed
-`M_t=(1−α_t)M_{t-1}+read(u_t)`. The recurrence is a `cascade_step`/`cascade_scan`
-pure-function pair (sequential Python scan for now — consistent with the existing
-single-momentum scan; the split is the seam where a Mamba-style parallel
-associative scan could drop in). **Status: standalone + fully tested; NOT yet
-wired into `NeuralMemory`/`TitansMACBlock`** (a later pass).
+`read(u)=u¹` is the "visible" momentum fed into `M_t=(1−α_t)M_{t-1}+read(u_t)`. The
+recurrence is a `cascade_step`/`cascade_scan` pure-function pair (sequential Python
+scan for now — consistent with the existing single-momentum scan; the split is the
+seam where a Mamba-style parallel associative scan could drop in). **Status: wired
+into `NeuralMemory`/`TitansMACBlock` as an opt-in** — `use_cascade_momentum=True` /
+`memory_use_cascade=True`, **default off** so it stays bit-identical to scalar Titans
+when unused. When on, `η_t` becomes a per-token leak on the *whole* cascade state
+(`U_t = B_t·(η_t·U_{t-1}) + e₁·(−θ_t∇ℓ)`), so `K=1` collapses exactly onto the scalar
+rule. It is exercised today by the `membench` sweep (`coupled`/`uncoupled` configs)
+and covered by `tests/test_cascade_memory.py`; it is **not yet activated in the video
+world model** (`worldmodel/` never sets the flag).
 
 Two coupling modes: a **fixed geometric** `B` (mode 1), and a **selective** `B_t`
 (mode 2) where a learned `Linear(dim, K−1)`+sigmoid head gates the couplings *per
@@ -155,29 +160,27 @@ A self-contained demo (synthetic latents, no downloads) confirms trainability:
 python -m titans.worldmodel.train   # prints L1 dropping ~0.53 -> 0.03
 ```
 
-The **real V-JEPA-2 chain** is wired and verified end to end, including a real run
-against actual Kinetics-mini clips (a cached latent tensor from that run,
-`cache/kinetics.pt`, sits on disk locally — `.pt` files are gitignored, so it is
-not committed and no loss log from that run survives in the repo). Latents are
-precomputed once with the frozen encoder and cached, then the world model trains
-on the cache:
+The **real V-JEPA-2 chain** is wired and verified end to end against actual video
+(EgoLife egocentric clips, decoded on the fly). Latents are precomputed once with
+the frozen encoder and cached (`.pt`, gitignored), then the world model trains on
+the cache:
 
-* `frames.py` — temporal aggregation: average consecutive frames over a sliding
-  `window` moved by a `stride` (a stride > 1 lets a fixed clip span a longer
-  real-time window → longer effective videos), then chunk into fixed-size clips.
 * `encoder.py` — frozen `facebook/vjepa2-vitl-fpc64-256` (the `fpc16` repos are
   SSv2 classifiers, not the base encoder). A clip `[B, 64, 3, 256, 256]` → `[B,
   32, 1024]`: 32 temporal groups (derived from the token grid, not hard-coded),
   each a spatial mean-pool of its 256 patches.
-* `precompute_latents.py` — frames → aggregate → clips → processor → encoder →
-  concatenate clip latents → cache `.pt`.
-* `data.py` — **Kinetics-mini** loader: lists the `nateraw/kinetics-mini` `.mp4`
-  files (train/val, 5 classes × 10 clips), downloads them, and decodes frames
-  with `decord` into `[F, H, W, C]` tensors. `precompute_kinetics(...)` ties this
-  to the encoder in one call.
+* `precompute_latents.py` — `video_to_latents_sliding`: slide a `clip_len`-frame
+  window by `stride_frames` (with overlap), encode each window, and keep its
+  central band, so adjacent bands tile the video into one **continuous** latent
+  stream → cache `.pt`. We feed *real* frames, not a pre-encoder temporal average:
+  V-JEPA-2 is motion-aware, so averaging frames before it would destroy the signal
+  it reads (an earlier `frames.py` aggregate-and-chunk path, now removed).
+* `data.py` — `load_video_frames`: decode any `.mp4` to `[F, H, W, C]` with
+  `decord` (uniform temporal subsampling to a fixed length). Source-agnostic;
+  dataset listing/download lives with each source (see `egolife.py`).
 * `train.py` — `load_latents` + per-channel `standardize_latents` (raw encoder
   features are large-magnitude and drive the memory's inner loop to `NaN`
-  otherwise). On cached real Kinetics latents the L1 drops cleanly with no
+  otherwise). On cached real video latents the L1 drops cleanly with no
   divergence.
 
 The encoder runs on **CUDA** automatically when available (~17× faster than CPU:
@@ -268,11 +271,11 @@ capacity (⬜ not built), and the second-order Muon/Newton-Schulz inner optimise
 
 ## EgoLife loader (longer, more diverse video)
 
-`src/titans/worldmodel/egolife.py` adds `lmms-lab/EgoLife` as a second video
-source, alongside Kinetics-mini: continuous first-person life-logging (6 people ×
-7 days), cut into ~30 s / 600-frame / 20 fps segments
+`src/titans/worldmodel/egolife.py` uses `lmms-lab/EgoLife` as the video source:
+continuous first-person life-logging (6 people × 7 days), cut into ~30 s /
+600-frame / 20 fps segments
 (`<person>/<day>/<...>.mp4`). That's 3× longer per segment and far more temporally
-continuous than Kinetics-mini's short action clips — a better fit for a
+continuous than short action clips — a better fit for a
 long-memory model — and a bigger, more diverse pool against overfitting. The
 train/val split is **by person** (`TRAIN_PERSONS` = 4 people, `VAL_PERSONS` = 2
 people, disjoint — no identity leakage); within a person, segments are sampled
@@ -316,11 +319,12 @@ memory threaded across segments:
 
 `src/titans/membench/sweep.py` compares three ways the neural memory carries its
 momentum, all sharing the *same* memory-MLP geometry so the parameter budget is
-matched: **baseline** (scalar momentum `S_t`), **uncoupled** (cascade with the
-coupling betas forced to 0 — verified *bit-identical* to baseline, since with zero
-diffusion only reservoir 0 is ever populated and the recurrence collapses onto the
-scalar rule), and **coupled** (the full data-dependent, non-commuting selective
-cascade). Configs baseline/uncoupled have identical parameter counts; coupled adds
+matched: **baseline** (scalar momentum `S_t`), **uncoupled** (the genuine
+`K`-independent-filter null hypothesis — `cascade_topology="independent"`: `K`
+uncoupled exponential filters, the gradient injected into all of them, readout =
+mean; so it is *not* bit-identical to baseline but isolates what the cascade's
+*coupling* buys over merely having `K` filters), and **coupled** (the full
+data-dependent, non-commuting selective cascade). Configs baseline/uncoupled have identical parameter counts; coupled adds
 exactly one small `cascade.beta_head = Linear(dim, K−1)` — a small, disclosed delta,
 not hidden. `run_sweep` trains a small matched-budget model per (task, difficulty,
 config) cell over MQAR (`associative_recall`), `selective_copy`, and `fuzzy_recall`,

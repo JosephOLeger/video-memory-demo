@@ -20,7 +20,7 @@ early-to-late information is the memory threaded across segments.
 
 from .tasks import associative_recall, copy_task, needle
 from .model import RecallModel
-from .run import train_recall, accuracy_by_distance
+from .run import train_recall, train_recall_converge, accuracy_by_distance
 
 __all__ = [
     "associative_recall",
@@ -28,5 +28,6 @@ __all__ = [
     "needle",
     "RecallModel",
     "train_recall",
+    "train_recall_converge",
     "accuracy_by_distance",
 ]

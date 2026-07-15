@@ -71,6 +71,9 @@ class TitansMACBlock(nn.Module):
         cascade_g: float = 2.0,
         cascade_selective: bool = False,
         cascade_topology: str = "chain",
+        cascade_readout: Optional[str] = None,
+        cascade_leak: str = "full",
+        cascade_slow_decay: float = 0.99,
     ):
         super().__init__()
         self.dim = dim
@@ -101,6 +104,9 @@ class TitansMACBlock(nn.Module):
             cascade_g=cascade_g,
             cascade_selective=cascade_selective,
             cascade_topology=cascade_topology,
+            cascade_readout=cascade_readout,
+            cascade_leak=cascade_leak,
+            cascade_slow_decay=cascade_slow_decay,
         )
         self.persistent = PersistentMemory(dim, num_persistent_tokens)
         self.attn = CausalSelfAttention(dim, num_heads, conv_kernel_size)

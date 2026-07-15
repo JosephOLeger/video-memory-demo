@@ -48,3 +48,36 @@ def test_sweep_main_writes_json(tmp_path):
     payload = json.loads(out.read_text())
     assert "records" in payload and "configs" in payload
     assert len(payload["records"]) > 0
+
+
+def test_sweep_converge_smoke_runs():
+    # Convergence mode at tiny scale: same 3 configs, but each cell stops on the
+    # plateau/ceiling rule instead of a fixed step budget. Just checks the harness
+    # and the extra bookkeeping fields are well-formed, not architecture quality.
+    records = run_sweep(smoke=True, converge=True, log=False)
+    assert {r["config"] for r in records} == set(CONFIGS)
+    for r in records:
+        assert r["converge"] is True
+        assert r["stopped"] in {"ceiling", "plateau", "max_steps"}
+        assert 0 <= r["converge_steps"] <= 6  # smoke cap
+        assert r["steps"] == r["converge_steps"]
+        assert 0.0 <= r["best_acc"] <= 1.0
+        # trajectory starts at the step-0 (random-init) eval.
+        assert r["trajectory"][0][0] == 0
+
+
+def test_sweep_resume_skips_done_cells(tmp_path):
+    # A checkpoint that already contains one cell should cause resume=True to skip
+    # exactly that cell and re-train the rest.
+    out = tmp_path / "resume.json"
+    run_sweep(smoke=True, converge=True, log=False,
+              tasks={"mqar"}, configs={"baseline"}, checkpoint_path=out)
+    first = json.loads(out.read_text())["records"]
+    assert len(first) == 1
+
+    fresh = run_sweep(smoke=True, converge=True, log=False,
+                      tasks={"mqar"}, checkpoint_path=out, resume=True)
+    # baseline already on disk -> skipped (not returned); the other configs run.
+    assert {r["config"] for r in fresh} == set(CONFIGS) - {"baseline"}
+    merged = json.loads(out.read_text())["records"]
+    assert {r["config"] for r in merged} == set(CONFIGS)

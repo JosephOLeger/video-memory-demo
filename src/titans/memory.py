@@ -184,6 +184,9 @@ class NeuralMemory(nn.Module):
         cascade_g: float = 2.0,
         cascade_selective: bool = False,
         cascade_topology: str = "chain",
+        cascade_readout: Optional[str] = None,
+        cascade_leak: str = "full",
+        cascade_slow_decay: float = 0.99,
     ):
         super().__init__()
         hidden_dim = hidden_dim or dim
@@ -195,6 +198,12 @@ class NeuralMemory(nn.Module):
 
         # Opt-in metaplastic cascade momentum (default off -> scalar Titans).
         self.use_cascade_momentum = use_cascade_momentum
+        if cascade_leak not in ("full", "shallow", "none", "slow", "surprise"):
+            raise ValueError(
+                "cascade_leak must be 'full', 'shallow', 'none', 'slow' or 'surprise'"
+            )
+        self.cascade_leak = cascade_leak
+        self.cascade_slow_decay = cascade_slow_decay
         if use_cascade_momentum:
             self.cascade = MetaplasticCascade(
                 cascade_reservoirs,
@@ -203,6 +212,7 @@ class NeuralMemory(nn.Module):
                 dim=dim if cascade_selective else None,
                 selective=cascade_selective,
                 topology=cascade_topology,
+                readout=cascade_readout,
             )
 
         self.memory = NeuralMemoryMLP(dim, hidden_dim, num_layers)
@@ -276,11 +286,31 @@ class NeuralMemory(nn.Module):
         for key, w in state.items():
             gk = g[key]
             if self.use_cascade_momentum:
-                # Surprise term and the per-token eta_t leak applied to the whole
-                # reservoir state (see class docstring); topology decides how the
-                # gradient is injected/mixed, then readout() feeds S_t.
+                # Surprise term and the per-token eta_t leak; ``cascade_leak``
+                # decides where the leak applies ("full" = whole state, the original;
+                # "shallow" = only reservoir 0, so the slow reservoirs are NOT drained
+                # and can provide long retention; "none" = no leak, the downstream
+                # (1-alpha) forget gate supplies the only decay). topology decides how
+                # the gradient is injected/mixed, then readout() feeds S_t.
                 injected = -self._bcast(theta_t, gk) * gk
-                u_prev = self._bcast(eta_t, S[key]) * S[key]
+                eta_b = self._bcast(eta_t, S[key])
+                if self.cascade_leak == "full":
+                    u_prev = eta_b * S[key]
+                elif self.cascade_leak == "none":
+                    u_prev = S[key]
+                elif self.cascade_leak == "slow":
+                    # gentle fixed decay: retains long without ever saturating.
+                    u_prev = self.cascade_slow_decay * S[key]
+                elif self.cascade_leak == "surprise":
+                    # event-driven: leak the old state in proportion to the CURRENT
+                    # surprise (theta_t). Boring tokens (theta~0) barely leak; a
+                    # surprising token displaces old memory -> turnover paced by
+                    # events, not by every step (Benna-Fusi-like, avoids saturation).
+                    u_prev = torch.exp(-self._bcast(theta_t, S[key])) * S[key]
+                else:  # "shallow": leak reservoir 0 only (functional, no in-place)
+                    r0 = eta_b * torch.ones_like(S[key][..., :1])
+                    rest = torch.ones_like(S[key][..., 1:])
+                    u_prev = torch.cat([r0, rest], dim=-1) * S[key]
                 if self.cascade.topology == "independent":
                     # Diagonal B: same gradient into every reservoir, each with its
                     # own fixed decay, no cross-reservoir mixing.

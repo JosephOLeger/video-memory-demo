@@ -53,8 +53,21 @@ from typing import Callable, Optional
 
 import torch
 
-from .run import train_recall
+from .run import train_recall, train_recall_converge
 from .tasks import associative_recall, fuzzy_recall, selective_copy
+
+# Per-task-family safety cap on the convergence budget (see the diagnostic:
+# ``results/baseline_diagnostic.py``). MQAR converges fastest (~6k steps at lr=1e-3
+# for the easy cell) so 10k leaves headroom for the harder num_pairs; selective_copy
+# needed ~11.5k for baseline and fuzzy_recall carries extra interference, so both get
+# 15k. These are ceilings, not targets -- the plateau/ceiling rule normally stops
+# well before them; a cell that hits its cap is reported as ``stopped="max_steps"``
+# (possibly still improving) rather than silently truncated.
+CONVERGE_MAX_STEPS: dict[str, int] = {
+    "mqar": 10_000,
+    "selective_copy": 15_000,
+    "fuzzy_recall": 15_000,
+}
 
 # ------------------------------------------------------------------- configs
 # Each entry is the extra block_kwargs handed to the MAC block / memory.
@@ -143,6 +156,33 @@ def _count_params(model) -> int:
     return sum(p.numel() for p in model.parameters())
 
 
+def _rec_key(r: dict) -> tuple:
+    return (r["task"], r["difficulty"], r["config"])
+
+
+def _load_records(path: Optional[Path]) -> list[dict]:
+    """Read the ``records`` list from an existing checkpoint file (``[]`` if none)."""
+    if path is None or not Path(path).exists():
+        return []
+    try:
+        return json.loads(Path(path).read_text()).get("records", [])
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def _merge_write(path: Path, records: list[dict]) -> None:
+    """Merge ``records`` into any existing checkpoint (keyed by task/difficulty/config)
+    and write back, so independent invocations sharing one ``--out`` accumulate
+    instead of clobbering each other. Idempotent: re-writing the same cell replaces it.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    merged = {_rec_key(r): r for r in _load_records(path)}
+    for r in records:
+        merged[_rec_key(r)] = r
+    payload = dict(configs={k: v for k, v in CONFIGS.items()}, records=list(merged.values()))
+    path.write_text(json.dumps(payload, indent=2))
+
+
 def run_sweep(
     *,
     smoke: bool = False,
@@ -157,47 +197,95 @@ def run_sweep(
     seed: int = 0,
     log: bool = True,
     tasks: Optional[set] = None,
+    configs: Optional[set] = None,
     checkpoint_path: Optional[Path] = None,
+    converge: bool = False,
+    eval_every: int = 500,
+    min_steps: int = 2000,
+    ceil: float = 0.98,
+    ceil_patience: int = 3,
+    plateau_patience: int = 12,
+    max_steps: Optional[dict] = None,
+    resume: bool = False,
 ) -> list[dict]:
     """Train a matched-budget model for every (task, difficulty, config) cell.
 
-    Returns a flat list of records with the final held-out accuracy, chance level,
-    parameter count, and train loss per cell. Keeps everything small (CPU-feasible)
-    -- see the module docstring for the scientific setup.
+    Returns a flat list of records with the held-out accuracy, chance level,
+    parameter count, and train loss per cell -- see the module docstring for the
+    scientific setup.
 
-    ``tasks``, if given, restricts the grid to task names in the set (e.g.
-    ``{"mqar"}``) -- lets a long sweep be split into wall-clock-bounded chunks.
-    ``checkpoint_path``, if given, (re-)writes the accumulated records (in the same
-    ``{"configs":..., "records":...}`` shape as the final output) to that path
-    after *every* cell, so a killed/timed-out run doesn't lose already-completed
-    cells.
+    Two training modes:
+
+    * ``converge=False`` (default): fixed ``steps`` budget (the original behaviour,
+      used by the smoke test).
+    * ``converge=True``: train each cell to a plateau/ceiling using the diagnostic's
+      rule (:func:`~titans.membench.run.train_recall_converge`), the *same* rule and
+      params applied identically to every config so the comparison stays fair. The
+      per-task-family step cap comes from ``CONVERGE_MAX_STEPS`` unless overridden via
+      ``max_steps`` (a ``{task: cap}`` dict). ``eval_every``/``min_steps``/``ceil``/
+      ``ceil_patience``/``plateau_patience`` are the shared stopping-rule knobs.
+
+    ``tasks`` / ``configs``, if given, restrict the grid to those task names /
+    config names -- lets a long sweep be split into wall-clock-bounded chunks.
+    ``checkpoint_path``, if given, merges the accumulated records into that path
+    after *every* cell (see :func:`_merge_write`), so a killed/timed-out run doesn't
+    lose already-completed cells. ``resume=True`` additionally skips any cell already
+    present in ``checkpoint_path`` -- so re-launching after a kill only trains the
+    missing cells.
     """
     if smoke:
         steps = 3
         dim = 16
         memory_hidden_dim = 16
         eval_seeds = range(10_000, 10_002)
+        if converge:
+            eval_every = 3
+            min_steps = 0
+            plateau_patience = 1
+
+    caps = dict(CONVERGE_MAX_STEPS)
+    if max_steps:
+        caps.update(max_steps)
+    if smoke and converge:
+        caps = {k: 6 for k in caps}
 
     cells = _task_grid(smoke)
     if tasks is not None:
         cells = [c for c in cells if c[0] in tasks]
+    cfg_names = [c for c in CONFIGS if configs is None or c in configs]
+
+    done = {_rec_key(r) for r in _load_records(checkpoint_path)} if resume else set()
+
     records: list[dict] = []
     t0 = time.time()
     for task, dlabel, dval, task_fn, meta in cells:
-        for cfg_name, cfg_kw in CONFIGS.items():
+        cap = caps.get(task, 10_000)
+        for cfg_name in cfg_names:
+            cfg_kw = CONFIGS[cfg_name]
+            if (task, dval, cfg_name) in done:
+                if log:
+                    print(f"[{time.time()-t0:6.1f}s] skip (already done) "
+                          f"{task} {dlabel}={dval} {cfg_name}", flush=True)
+                continue
             torch.manual_seed(seed)  # identical init across configs (matched start)
-            res = train_recall(
-                task_fn,
-                steps=steps,
-                lr=lr,
-                dim=dim,
-                depth=depth,
-                segment_size=segment_size,
-                memory_hidden_dim=memory_hidden_dim,
-                memory_num_layers=memory_num_layers,
-                eval_seeds=eval_seeds,
-                **cfg_kw,
-            )
+            if converge:
+                res = train_recall_converge(
+                    task_fn, lr=lr, dim=dim, depth=depth, segment_size=segment_size,
+                    memory_hidden_dim=memory_hidden_dim,
+                    memory_num_layers=memory_num_layers, eval_seeds=eval_seeds,
+                    eval_every=eval_every, max_steps=cap, min_steps=min_steps,
+                    ceil=ceil, ceil_patience=ceil_patience,
+                    plateau_patience=plateau_patience, **cfg_kw,
+                )
+                cell_steps = res["final_step"]
+            else:
+                res = train_recall(
+                    task_fn, steps=steps, lr=lr, dim=dim, depth=depth,
+                    segment_size=segment_size, memory_hidden_dim=memory_hidden_dim,
+                    memory_num_layers=memory_num_layers, eval_seeds=eval_seeds,
+                    **cfg_kw,
+                )
+                cell_steps = steps
             rec = dict(
                 task=task,
                 difficulty_label=dlabel,
@@ -208,23 +296,34 @@ def run_sweep(
                 chance=res["chance"],
                 train_loss=res["train_loss"],
                 num_params=_count_params(res["model"]),
-                steps=steps,
+                steps=cell_steps,
                 dim=dim,
                 memory_hidden_dim=memory_hidden_dim,
                 meta=meta,
             )
+            if converge:
+                rec.update(
+                    converge=True,
+                    lr=lr,
+                    stopped=res["stopped"],
+                    best_acc=res["best"],
+                    best_step=res["best_step"],
+                    converge_steps=res["final_step"],
+                    max_steps_cap=cap,
+                    trajectory=res["trajectory"],
+                )
             records.append(rec)
             if log:
+                extra = (f" stopped={rec['stopped']}@{rec['converge_steps']} "
+                         f"best={rec['best_acc']:.3f}") if converge else ""
                 print(
                     f"[{time.time()-t0:6.1f}s] {task:14s} {dlabel}={dval:<3d} "
                     f"{cfg_name:9s} acc={rec['acc_mean']:.3f} "
-                    f"(chance {rec['chance']:.3f}) params={rec['num_params']}",
+                    f"(chance {rec['chance']:.3f}) params={rec['num_params']}{extra}",
                     flush=True,
                 )
             if checkpoint_path is not None:
-                checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-                payload = dict(configs={k: v for k, v in CONFIGS.items()}, records=records)
-                checkpoint_path.write_text(json.dumps(payload, indent=2))
+                _merge_write(checkpoint_path, records)
     return records
 
 
@@ -239,9 +338,30 @@ def main(argv=None):
              "for splitting a long sweep into wall-clock-bounded chunks",
     )
     ap.add_argument(
+        "--configs", type=str, default=None,
+        help="comma-separated config names to restrict to (e.g. 'coupled'), for "
+             "splitting a long converged sweep into per-config chunks",
+    )
+    ap.add_argument(
+        "--converge", action="store_true",
+        help="train each cell to a plateau/ceiling (diagnostic rule) instead of a "
+             "fixed --steps budget; the same rule is applied to every config",
+    )
+    ap.add_argument("--eval-every", type=int, default=500)
+    ap.add_argument("--min-steps", type=int, default=2000)
+    ap.add_argument("--ceil", type=float, default=0.98)
+    ap.add_argument("--ceil-patience", type=int, default=3)
+    ap.add_argument("--plateau-patience", type=int, default=12)
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument(
         "--checkpoint", action="store_true",
-        help="write --out after every cell (not just at the end), so a killed run "
-             "keeps its completed cells",
+        help="merge-write --out after every cell (not just at the end), so a killed "
+             "run keeps its completed cells",
+    )
+    ap.add_argument(
+        "--resume", action="store_true",
+        help="skip cells already present in --out (re-launch after a kill only trains "
+             "the missing cells); implies reading the existing --out",
     )
     args = ap.parse_args(argv)
 
@@ -255,17 +375,20 @@ def main(argv=None):
     out.parent.mkdir(parents=True, exist_ok=True)
 
     tasks = set(args.tasks.split(",")) if args.tasks else None
+    configs = set(args.configs.split(",")) if args.configs else None
+    # For a converged run we always want incremental persistence + resume safety.
+    checkpoint = args.checkpoint or args.resume or args.converge
     records = run_sweep(
-        smoke=args.smoke, steps=args.steps, tasks=tasks,
-        checkpoint_path=out if args.checkpoint else None,
+        smoke=args.smoke, steps=args.steps, lr=args.lr, tasks=tasks, configs=configs,
+        checkpoint_path=out if checkpoint else None,
+        converge=args.converge, eval_every=args.eval_every, min_steps=args.min_steps,
+        ceil=args.ceil, ceil_patience=args.ceil_patience,
+        plateau_patience=args.plateau_patience, resume=args.resume,
     )
 
-    payload = dict(
-        configs={k: v for k, v in CONFIGS.items()},
-        records=records,
-    )
-    out.write_text(json.dumps(payload, indent=2))
-    print(f"\nwrote {len(records)} records -> {out}")
+    # Merge (not clobber): preserves cells written by other chunked invocations.
+    _merge_write(out, records)
+    print(f"\nwrote/merged {len(records)} records -> {out}")
     return out
 
 

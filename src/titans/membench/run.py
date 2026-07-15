@@ -86,6 +86,117 @@ def train_recall(
     }
 
 
+def train_recall_converge(
+    task_fn: TaskFn,
+    *,
+    lr: float = 1e-3,
+    device: str = DEVICE,
+    dim: int = 64,
+    depth: int = 2,
+    segment_size: int = 8,
+    num_heads: int = 1,
+    max_len: int = 1024,
+    eval_seeds=range(10_000, 10_020),
+    eval_every: int = 500,
+    max_steps: int = 8000,
+    min_steps: int = 2000,
+    ceil: float = 0.98,
+    ceil_patience: int = 3,
+    plateau_patience: int = 12,
+    log_every: int = 0,
+    **block_kwargs,
+) -> dict:
+    """Train a :class:`RecallModel` until held-out accuracy converges.
+
+    Same model geometry / ``block_kwargs`` contract as :func:`train_recall`, but
+    the fixed step budget is replaced by the convergence rule from the baseline
+    diagnostic (``results/baseline_diagnostic.py``): eval held-out accuracy every
+    ``eval_every`` steps and stop early when accuracy is at ``ceil`` for
+    ``ceil_patience`` consecutive evals (``stopped="ceiling"``), or has not beaten
+    its running best for ``plateau_patience`` evals once past ``min_steps``
+    (``stopped="plateau"``); otherwise run to ``max_steps`` (``stopped="max_steps"``).
+
+    The caller is responsible for seeding (``torch.manual_seed``) *before* calling
+    so that matched-init comparisons hold; this mirrors :func:`train_recall`. The
+    same rule/params must be handed to every config for a fair comparison.
+
+    Returns the same keys as :func:`train_recall` (``acc_mean``/``acc_std`` are the
+    *final* held-out eval, at the stopping point) plus ``best``/``best_step``,
+    ``stopped``, ``final_step``, and the full ``trajectory`` of
+    ``(step, train_loss, eval_acc_mean, eval_acc_std)``.
+    """
+    sample = task_fn(0)
+    model = RecallModel(sample.vocab_size, dim=dim, depth=depth,
+                        segment_size=segment_size, num_heads=num_heads,
+                        max_len=max_len, **block_kwargs).to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    chance = 1.0 / sample.answer_classes
+
+    def _eval() -> tuple[float, float]:
+        model.eval()
+        accs = []
+        with torch.no_grad():
+            for s in eval_seeds:
+                b = task_fn(s)
+                logits = model(b.x.to(device))
+                _, acc = _masked(logits, b.y.to(device), b.mask.to(device))
+                accs.append(acc.item())
+        model.train()
+        t = torch.tensor(accs)
+        return t.mean().item(), t.std(unbiased=False).item()
+
+    traj: list[tuple] = []
+    m, sd = _eval()  # step 0 (random init)
+    traj.append((0, float("nan"), m, sd))
+
+    best, best_step, ceil_hits = 0.0, 0, 0
+    last_loss = float("nan")
+    stopped, final_step = "max_steps", 0
+    model.train()
+    for step in range(1, max_steps + 1):
+        b = task_fn(step)
+        logits = model(b.x.to(device))
+        loss, _ = _masked(logits, b.y.to(device), b.mask.to(device))
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+        last_loss = loss.item()
+        final_step = step
+        if log_every and (step % log_every == 0):
+            print(f"  step {step:5d}  train loss {last_loss:.4f}", flush=True)
+
+        if step % eval_every == 0 or step == max_steps:
+            m, sd = _eval()
+            traj.append((step, last_loss, m, sd))
+            if m > best + 1e-4:
+                best, best_step = m, step
+            if m >= ceil:
+                ceil_hits += 1
+                if ceil_hits >= ceil_patience:
+                    stopped = "ceiling"
+                    break
+            else:
+                ceil_hits = 0
+            if step >= min_steps and (step - best_step) >= plateau_patience * eval_every:
+                stopped = "plateau"
+                break
+
+    final_m, final_sd = traj[-1][2], traj[-1][3]
+    return {
+        "acc_mean": final_m,
+        "acc_std": final_sd,
+        "best": best,
+        "best_step": best_step,
+        "stopped": stopped,
+        "final_step": final_step,
+        "chance": chance,
+        "train_loss": last_loss,
+        "trajectory": [list(t) for t in traj],
+        "model": model,
+        "device": device,
+    }
+
+
 @torch.no_grad()
 def accuracy_by_distance(
     model: RecallModel,
