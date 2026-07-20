@@ -171,6 +171,8 @@ class NeuralMemoryMLP(nn.Module):
         hidden_dim: int,
         num_layers: int = 2,
         in_dim: Optional[int] = None,
+        activation: str = "silu",
+        residual: bool = False,
     ):
         super().__init__()
         if num_layers < 2:
@@ -181,6 +183,10 @@ class NeuralMemoryMLP(nn.Module):
         self.in_dim = in_dim or dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
+        # Kept here so :meth:`forward` cannot drift from the functional path that
+        # the inner loop actually runs -- it silently ignored both before.
+        self.activation = activation
+        self.residual = residual
 
         self.params = nn.ParameterDict()
         for i in range(num_layers):
@@ -199,7 +205,7 @@ class NeuralMemoryMLP(nn.Module):
         }
 
     def forward(self, params: Params, x: torch.Tensor) -> torch.Tensor:
-        return mlp_forward(params, x, self.num_layers)
+        return mlp_forward(params, x, self.num_layers, self.activation, self.residual)
 
 
 class NeuralMemory(nn.Module):
@@ -353,7 +359,9 @@ class NeuralMemory(nn.Module):
                 gate_signal=cascade_gate_signal,
             )
 
-        self.memory = NeuralMemoryMLP(dim, hidden_dim, num_layers, in_dim=mem_in_dim)
+        self.memory = NeuralMemoryMLP(dim, hidden_dim, num_layers, in_dim=mem_in_dim,
+                                      activation=memory_activation,
+                                      residual=memory_residual)
         self.num_layers = num_layers
 
         # Outer, ordinarily-trained projections (shared across time).
@@ -371,12 +379,6 @@ class NeuralMemory(nn.Module):
             self.gamma_head = nn.Linear(dim, 1)  # context gate -> sigmoid
 
     # ------------------------------------------------------------------ utils
-    def _loss(self, params: Params, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        pred = mlp_forward(
-            params, k, self.num_layers, self.memory_activation, self.memory_residual
-        )
-        return ((pred - v) ** 2).sum()
-
     def _grad_fn(self):
         num_layers = self.num_layers
         act, res = self.memory_activation, self.memory_residual

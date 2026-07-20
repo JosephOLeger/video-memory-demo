@@ -16,16 +16,35 @@ paths: `forward_naive_sequential` (an explicit for-loop reference using
 reformulation — per-chunk batched gradients via nested `vmap`, then a scanned
 momentum recurrence). Retrieval `y_t = M_t(q_t)` is exposed via `retrieve`.
 
+The repo now also implements **Atlas** (*Learning to Optimally Memorize the
+Context at Test Time*, [arXiv:2505.23735](https://arxiv.org/abs/2505.23735), same
+Google Research team), of which Titans is the degenerate case: window `c=1`,
+identity feature map, first-order inner optimiser. All three of Atlas's
+ingredients are in — the Omega sliding-window rule, the polynomial feature map
+`φ`, and the Muon/Newton-Schulz inner optimiser — so Eq 57-58 is complete. Every
+one is **opt-in and defaults off**, so the Titans paths stay bit-identical and
+earlier results remain comparable. See *Assembling Atlas* below, and
+`docs/atlas_vs_titans.md` for the component-by-component status.
+
+Read the *Memory collapse* section before trusting any memory-health claim: the
+online memory degenerates to a rank-1, query-independent function within one
+segment, this is now well characterised and repairable, and repairing it has so
+far not improved any downstream task.
+
 ## Running the tests
 
 ```bash
 pip install -e '.[test]'   # or: pip install torch pytest
-pytest
+pytest                      # 100 tests
 ```
 
-The tests check that the naive and chunked paths agree numerically (float64,
-`atol/rtol` down to `1e-9`) across several chunk sizes, and a toy sanity check
-that online updates actually memorize repeated key/value pairs.
+Beyond the two paths agreeing numerically (float64, `atol/rtol` down to `1e-9`)
+across several chunk sizes and a toy memorisation check, the suite guards the
+properties that turned out to be easy to break: MAC's causality across segment
+boundaries, `grad-of-sum == sum-of-grads` for the Omega window (with and without
+`φ`), and — after four options were found to be silently inert once assembled —
+that each opt-in flag actually *changes the computation* rather than merely being
+accepted. That last class is the one worth extending when adding a flag.
 
 ## Phase 2: MAC (Memory As Context)
 
@@ -325,12 +344,43 @@ been shown to sit on the critical path.
 **Net picture.** Direction lock-in and magnitude decay are two separate
 pathologies, both real, both reproducible, and both now fixable (NS +
 bias-freeze, best with the temperature). What is *not* established is that
-either one limits any task measured so far. The open question is no longer
-"how do we repair the memory" but **"is the memory used at all, and if so why so
-weakly"** — the decisive experiment being an inference-time ablation
-(`reset_memory_each_segment` on trained weights) to test whether the ~26%
-out-of-window accuracy collapses to chance when the carry is severed. Until that
-is answered, further collapse mitigations are premature.
+either one limits any task measured so far.
+
+### Is the memory on the critical path at all? Yes — measured
+
+The decisive test: train **one** model, then evaluate the *same weights* twice —
+once threaded, once with `reset_memory_each_segment=True` so nothing crosses a
+segment boundary. Three seeds, MQAR 8 pairs, `segment_size=8`:
+
+| | seed 0 | seed 1 | seed 2 |
+|---|---|---|---|
+| out-of-window, threaded | 0.2705 | 0.2735 | 0.2445 |
+| out-of-window, **reset** | **0.0499** | **0.0435** | **0.0649** |
+| in-window (dist 3), threaded | 0.9967 | 0.9902 | 0.5928 |
+| in-window (dist 3), reset | 0.6287 | 0.0358 | 0.1531 |
+
+Chance is 0.0625. **Severing the carry drops out-of-window accuracy to chance on
+all three seeds** — the threaded memory really is what carries the long-range
+signal. So the memory is load-bearing; it is simply weak (0.26 where ATLAS
+reports state-of-the-art on MQAR).
+
+**The control fails, so the attribution is not clean.** In-window accuracy was
+supposed to stay ~0.99 (attention alone can solve those) and instead collapses
+too, catastrophically on seed 1. The cause is a design flaw in the ablation, not
+in the model: `reset_memory_each_segment` also changes `h_i`, the historical
+retrieval fed *into* attention, so from segment 1 onward the whole computation
+changes rather than just the long-range pathway. The direction of the result is
+solid; the magnitude is not attributable. A clean version needs a
+parameter-matched control **trained** with the carry severed, so it co-adapts.
+
+**Reading this against ATLAS.** ATLAS reports strong MQAR ("best performance per
+memory size compared to state-of-the-art models such as DeltaNet") and attributes
+it to polynomial kernels and deep memory. So the right reading of our null
+results is *not* "memory does not help" — it is **"we fixed the wrong thing"**.
+The collapse was a real defect, reproducibly repaired, but it was not the binding
+constraint. ATLAS names the constraint as capacity, and names the components that
+address it — `φ` and deep memory — which is what the `features.py` work above
+builds.
 
 ## Status
 
@@ -454,12 +504,15 @@ extra parameters, that `c>1` stays finite and changes the memory relative to
 `c=1`, the **grad-of-sum == sum-of-grads correctness identity**, and that a
 `WorldModel` with a non-trivial window still trains.
 
+Note the caveat now attached to this section: the plain sum over the window also
+scales the inner step, so a `c>1` run changes two things at once. See *Assembling
+Atlas* for the measurement and for `window_normalize`, which separates them.
+
 `docs/atlas_vs_titans.md` (French) is a fuller ATLAS-vs-Titans summary: Titans is a
 degenerate special case of ATLAS (window `c=1`, identity feature map, first-order
-inner optimiser). It tracks three ATLAS ideas and their status here — the Omega
-rule (✅ implemented, above), polynomial feature maps `φ(k)` for higher memory
-capacity (⬜ not built), and the second-order Muon/Newton-Schulz inner optimiser
-(⬜ not built) — plus the DeepTransformers/SWDT connection (⬜ out of scope).
+inner optimiser). All three ATLAS ideas are now implemented — the Omega rule, the
+polynomial feature map `φ`, and the Muon/Newton-Schulz inner optimiser — alongside
+Table 7's memory recipe; the DeepTransformers/SWDT connection stays out of scope.
 
 ## EgoLife loader (longer, more diverse video)
 
@@ -535,13 +588,105 @@ long-term-memory diagnostic. `tests/test_membench.py` checks task shapes/padding
 that recall tasks have exactly one masked answer per row, and a tiny
 forward+backward pass.
 
+## Assembling Atlas: `φ` + Omega + Muon
+
+With the polynomial feature map (`features.py`) the **Atlas update rule is
+complete** — ATLAS Eq 57-58:
+
+```
+M_t = α_t M_{t-1} + NewtonSchulz5(S_t)
+S_t = θ_t S_{t-1} − Σ_{i=t-c+1}^{t} η_i ∇‖M_{t-1}(φ(k_i)) − v_i‖²
+```
+
+| ATLAS component | where | flag |
+|---|---|---|
+| Omega rule, sliding window `c` | `memory.py` | `memory_window_size=c` |
+| Muon / Newton-Schulz inner optimiser | `memory.py::newton_schulz5` | `memory_orthogonalize_momentum=True` |
+| **polynomial feature map `φ`** | `features.py` | `feature_degree=p` |
+| memory MLP recipe (Table 7) | `memory.py` | `memory_expansion=4`, `memory_activation="gelu"`, `memory_residual=True` |
+
+`φ_p(x) = [x^β]_{|β|≤p}` raises the *effective* key dimension — and with it the
+number of key-value pairs `M` can store (`O(d_k^p)` against `O(d_k)`, ATLAS
+Prop. 2) — at **zero cost to the input projections**, which is the whole point.
+Measured: `w0` goes `16×16 → 16×48` at `p=3` while `k_proj`/`q_proj` are
+untouched; a membench model goes 196k → 279k parameters with the delta sitting
+in the memory block (20.8k → 62.0k), not in attention or I/O.
+
+**Documented deviation — the diagonal subset, not the full basis.** The paper's
+`φ` is every monomial of degree ≤ `p`. That is unusable here: 2145 dimensions at
+`d=64, p=2`, 47905 at `p=3`, and because our `M` is an *MLP* rather than a matrix
+we cannot use the kernel trick to avoid materialising it — the first memory layer
+would destroy the parameter budget `φ` exists to protect. We keep the pure powers
+and drop the cross terms:
+
+```
+φ(x) = concat([c_1·x, c_2·x², …, c_p·x^p]),   dim = p·d,   c_i init 1/√(i!)
+```
+
+so `φ(q)·φ(k) = Σ_i c_i² ⟨q^i, k^i⟩` rather than `Σ_i a_i (qᵀk)^i`. The structure
+of Eq 5 (a learned, gated mixture of increasing degrees) survives; the exact
+kernel identity does not. The tensor-sketch of Kacham et al. (2024a), which ATLAS
+cites, is the faithful alternative — not implemented. Also ours and not the
+paper's: RMS-normalising before taking powers, without which `x^p` is numerically
+explosive for unconstrained keys.
+
+### Four silent defects found by auditing the assembled stack
+
+Every flag above was tested in isolation and worked. Assembled, four did nothing
+at all — and because they failed *silently*, no test caught them. Recorded here
+because the pattern, not the individual bugs, is the lesson:
+
+| defect | symptom | status |
+|---|---|---|
+| `memory_residual` skipped whenever `φ` was on | i.e. in exactly the config ATLAS specifies — the skip demanded equal in/out widths, which `φ` breaks | fixed: adds `φ`'s degree-1 block (the un-mapped key), which degenerates to the paper's formula when `φ` is the identity |
+| `orthogonalize_momentum` scoped to the scalar branch | cascade + Newton-Schulz ran as plain cascade, bit-identical | fixed: NS now applies to the cascade readout, the quantity playing `S_t`'s role in Eq 57 |
+| `window_normalize` never plumbed into `TitansMACBlock` | every experiment configured through the block ran unnormalised | fixed |
+| `NeuralMemoryMLP.forward` hardcoded SiLU / no residual | the module and the functional inner loop could disagree for the same config | fixed; a test now asserts they agree |
+
+**Consequence for a past result.** Eq 58 *sums* `c` gradients, so a wider window
+enlarges the inner step as well as the context — measured `‖ΔM‖_F` = 119 / 190 /
+299 for `c` = 1 / 4 / 8. The July finding *"Omega degrades recall"* (8 pairs
+`56% → 33%`) therefore confounded "more context" with "≈1.6× bigger step" and
+**cannot be read as evidence about Omega**. `window_normalize=True` divides by the
+window's gate mass; measured, it flattens the step to 119 / 112 / 112. Default
+**off**, since the plain sum is what the paper writes.
+
+**Still open, documented not fixed.** The window is truncated at chunk starts: at
+`c=4, chunk=8` the per-position widths are `[1,2,3,4,4,4,4,4]` rather than a
+uniform 4, and since `chunk = segment_size` by default this happens every
+segment. Fixing it needs gradients carried across a chunk boundary, which
+conflicts with evaluating them all at the chunk-start weights.
+
+## Data/parameter proportions: a deliberate, documented deviation
+
+ATLAS trains at **40–88 tokens per parameter** (Table 7: 170M/15B, 340M/15B,
+760M/30B, 1.3B/100B). Our video corpus is `5999 × 64 = 383,936` latents, so that
+band would cap the model at **4.4k–9.6k parameters**. Our models are 143k–1.26M,
+i.e. a real ratio of **0.3–2.7** — 15× to 130× off. Closing it on a 1M-parameter
+model would need ~625,000 segments (~5,200 h of video, ~1,200 h of encoding)
+against the 8,000 we have.
+
+**We accept the deviation.** The consequence is explicit: *loss comparisons
+against the paper are not interpretable; only internal A/B comparisons between
+our own variants are.*
+
+**But the ratio is weak evidence here, and should not be over-read.** It is an
+LLM-scaling heuristic that assumes near-independent tokens. Consecutive video
+latents are massively redundant — 64 latents from one 30 s segment are not 64
+samples. Empirically the heuristic mis-predicts badly: in July, at a ratio of
+**0.01** (10,240 latents, ~1M parameters) the measured train/val gap was **0.043**
+and the model beat the persistence baseline. The honest indicator is the measured
+generalisation gap, not the ratio, and by that measure the world model is not
+data-limited. On `membench` the question is moot — tasks are generated on the fly,
+so 20,000 steps puts a 279k-parameter model at **55 tokens/parameter**, inside
+ATLAS's own band.
+
 ## Not yet built
 
 The MAG and MAL variants from the paper (only MAC is implemented); per-channel
 (vs scalar) memory gates (`alpha`/`eta`/`theta` are one scalar per token, via a
 `Linear(dim, 1)` head, not per-channel); a true parallel scan for the momentum
 recurrence (`_scan_chunked` is currently a Python loop across chunks, not a
-hardware parallel scan); and, from the ATLAS side, polynomial feature maps `φ` on
-keys/queries (for memory capacity beyond what `M(k) ≈ v` allows) and the
-second-order Muon/Newton-Schulz inner optimiser (`docs/atlas_vs_titans.md` tracks
-both as pending).
+hardware parallel scan); and, from the ATLAS side, the tensor-sketch feature map
+that would restore `φ`'s cross terms (`docs/atlas_vs_titans.md` tracks what
+remains).

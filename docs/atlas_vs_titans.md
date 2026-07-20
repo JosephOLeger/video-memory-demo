@@ -93,9 +93,15 @@ ATLAS est une extension, pas une réécriture.
 | Brique ATLAS | État dans le repo |
 |---|---|
 | ② Règle Omega (fenêtre `c`) | ✅ implémentée — `NeuralMemory(window_size=c)`, portes `γ` via `gamma_head`, somme glissante des gradients par-token dans `_scan_chunked`. `c=1` = Titans bit-identique. |
-| ① Feature map `φ` polynomiale | ⬜ à faire — appliquer `φ` sur k/q avant `M`. |
-| ③ Optimiseur Muon (Newton-Schulz) | ⬜ à faire — remplacer le pas momentum de `_step`. |
+| ① Feature map `φ` polynomiale | ✅ implémentée — `titans/features.py::PolynomialFeatureMap`, via `feature_degree=p` (défaut 1 = identité = Titans). `φ` est appliqué aux clés dans `_project` et aux requêtes dans `retrieve`. **Déviation** : sous-ensemble diagonal (puissances pures `x_j^i`), pas la base monomiale complète `[x^β]` — les termes croisés sont abandonnés, car la base complète fait 2145 dims à `d=64,p=2` et notre `M` est un MLP (pas d'astuce du noyau possible). Le tensor-sketch de Kacham et al. 2024a serait l'alternative fidèle. |
+| ③ Optimiseur Muon (Newton-Schulz) | ✅ implémenté — `memory.py::newton_schulz5` (itération quintique), via `orthogonalize_momentum=True`. Appliqué au momentum avant qu'il ne mette à jour les poids 2D, et au readout sur le chemin cascade. |
+| Recette mémoire Table 7 | ✅ implémentée — expansion 4, GELU, résiduel `M(x) = x + W₁σ(W₂x)`, via `memory_expansion` / `memory_activation` / `memory_residual`. Le résiduel est mal typé quand `φ` élargit l'entrée ; on ajoute la tranche de degré 1 (la clé non mappée). |
 | DeepTransformers / SWDT | ⬜ hors scope pour l'instant. |
+
+**L'update rule Atlas (Eq 57-58) est donc complète.** Reste ouvert : la fenêtre Omega
+est tronquée en début de chunk (largeurs `[1,2,3,4,…]` au lieu d'un `c` uniforme), et
+la somme d'Eq 58 gonfle le pas interne avec `c` — `window_normalize=True` (opt-in)
+permet de démêler « plus de contexte » de « pas plus grand ».
 
 **Note d'implémentation (Omega)** : le gradient étant linéaire,
 `∇[Σ γ_i ‖M(k_i)−v_i‖²] = Σ γ_i ∇‖M(k_i)−v_i‖²`. On réutilise donc les gradients

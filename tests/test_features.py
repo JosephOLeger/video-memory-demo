@@ -236,3 +236,32 @@ def test_window_normalize_removes_the_step_size_confound():
     normed = [step_norm(c, True) for c in (1, 4, 8)]
     assert raw[2] > 2 * raw[0], f"unnormalised window should inflate the step: {raw}"
     assert normed[2] < 1.3 * normed[0], f"normalised window should not: {normed}"
+
+
+def test_window_normalize_is_plumbed_through_the_block():
+    """Same defect family as the three above: a NeuralMemory option that never
+    reached TitansMACBlock, so every experiment configured through the block
+    would have silently run unnormalised."""
+    on = TitansMACBlock(dim=16, segment_size=8, memory_window_size=4,
+                        memory_window_normalize=True)
+    off = TitansMACBlock(dim=16, segment_size=8, memory_window_size=4)
+    assert on.memory.window_normalize is True
+    assert off.memory.window_normalize is False
+    out, _, _ = on(torch.randn(2, 16, 16))
+    assert torch.isfinite(out).all()
+
+
+def test_module_forward_matches_the_functional_inner_loop():
+    """NeuralMemoryMLP.forward used to hardcode SiLU/no-residual while the inner
+    loop ran the configured pair, so the module and the functional path could
+    disagree. They must now agree for any configuration."""
+    from titans.memory import mlp_forward
+    mem = NeuralMemory(16, memory_activation="gelu", memory_residual=True,
+                       memory_expansion=4, feature_degree=2)
+    p = {k: v[0] for k, v in mem.memory.init_state(1).items()}
+    x = torch.randn(mem.memory.in_dim)
+    with torch.no_grad():
+        via_module = mem.memory(p, x)
+        via_functional = mlp_forward(p, x, mem.num_layers,
+                                     mem.memory_activation, mem.memory_residual)
+    assert torch.equal(via_module, via_functional)
