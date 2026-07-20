@@ -52,6 +52,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.func import grad, vmap
 
+from .features import PolynomialFeatureMap
 from .metaplastic import MetaplasticCascade, cascade_step, independent_step
 
 Params = Dict[str, torch.Tensor]
@@ -106,12 +107,25 @@ def newton_schulz5(
     return X * G.norm(dim=(-2, -1), keepdim=True)
 
 
-def mlp_forward(params: Params, x: torch.Tensor, num_layers: int) -> torch.Tensor:
+def mlp_forward(
+    params: Params,
+    x: torch.Tensor,
+    num_layers: int,
+    activation: str = "silu",
+    residual: bool = False,
+) -> torch.Tensor:
     """Pure functional forward of the memory MLP for a *single* example.
 
     ``params`` holds ``w{i}`` of shape ``[out, in]`` and ``b{i}`` of shape
-    ``[out]``. ``x`` has shape ``[in]``. SiLU is applied between layers.
-    Designed to be composed with ``torch.func.grad`` / ``torch.func.vmap``.
+    ``[out]``. ``x`` has shape ``[in]``. Designed to be composed with
+    ``torch.func.grad`` / ``torch.func.vmap``.
+
+    ``activation`` selects the between-layer nonlinearity: ``"silu"`` (this
+    project's original) or ``"gelu"`` (what ATLAS specifies, Table 7 caption).
+    ``residual`` adds ATLAS's skip connection ``M(x) = x + W_1 sigma(W_2 x)``;
+    it requires input and output widths to match, so it is silently skipped when
+    a feature map has widened the input (``phi(k)`` has ``p*d`` dims while ``M``
+    outputs ``d``) -- documented in :class:`NeuralMemory`.
 
     The output is RMS-normalised (parameter-free). Without it the online weight
     update is unstable when the memory is threaded across many segments: the
@@ -125,7 +139,9 @@ def mlp_forward(params: Params, x: torch.Tensor, num_layers: int) -> torch.Tenso
     for i in range(num_layers):
         h = h @ params[f"w{i}"].transpose(-1, -2) + params[f"b{i}"]
         if i < num_layers - 1:
-            h = F.silu(h)
+            h = F.gelu(h) if activation == "gelu" else F.silu(h)
+    if residual and h.shape[-1] == x.shape[-1]:
+        h = h + x
     # Parameter-free RMSNorm: keeps M's output on a bounded scale regardless of
     # how large the online-updated weights become.
     rms = torch.sqrt(h.pow(2).mean(dim=-1, keepdim=True) + 1e-6)
@@ -140,17 +156,26 @@ class NeuralMemoryMLP(nn.Module):
     is mutated in place.
     """
 
-    def __init__(self, dim: int, hidden_dim: int, num_layers: int = 2):
+    def __init__(
+        self,
+        dim: int,
+        hidden_dim: int,
+        num_layers: int = 2,
+        in_dim: Optional[int] = None,
+    ):
         super().__init__()
         if num_layers < 2:
             raise ValueError("Titans memory expects a deep MLP (num_layers >= 2).")
         self.dim = dim
+        # ``in_dim`` differs from ``dim`` when a polynomial feature map widens the
+        # keys/queries (ATLAS phi): M maps ``phi(k) in R^{p*d}`` back to ``R^d``.
+        self.in_dim = in_dim or dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
 
         self.params = nn.ParameterDict()
         for i in range(num_layers):
-            in_d = dim if i == 0 else hidden_dim
+            in_d = self.in_dim if i == 0 else hidden_dim
             out_d = dim if i == num_layers - 1 else hidden_dim
             w = torch.empty(out_d, in_d)
             nn.init.kaiming_uniform_(w, a=5 ** 0.5)
@@ -239,11 +264,37 @@ class NeuralMemory(nn.Module):
         cascade_slow_decay: float = 0.99,
         update_bias: bool = True,
         orthogonalize_momentum: bool = False,
+        feature_degree: int = 1,
+        feature_normalize: bool = True,
+        memory_expansion: Optional[int] = None,
+        memory_activation: str = "silu",
+        memory_residual: bool = False,
     ):
         super().__init__()
+        # ATLAS Table 7 specifies the memory MLP as 2 layers, expansion factor 4,
+        # GELU, and a residual M(x) = x + W_1 sigma(W_2 x). All three are opt-in
+        # here so the default stays bit-identical to the previous behaviour
+        # (expansion 1, SiLU, no residual).
+        if memory_expansion is not None:
+            if memory_expansion < 1:
+                raise ValueError("memory_expansion must be >= 1")
+            hidden_dim = dim * memory_expansion
         hidden_dim = hidden_dim or dim
+        if memory_activation not in ("silu", "gelu"):
+            raise ValueError("memory_activation must be 'silu' or 'gelu'")
+        self.memory_activation = memory_activation
+        self.memory_residual = memory_residual
         self.dim = dim
         self.theta_scale = theta_scale
+        # ATLAS phi: polynomial feature map on keys and queries (degree 1 = the
+        # identity map, i.e. plain Titans up to a learned unit-init scale).
+        self.feature_degree = feature_degree
+        self.feature_map = (
+            PolynomialFeatureMap(feature_degree, normalize=feature_normalize)
+            if feature_degree > 1
+            else None
+        )
+        mem_in_dim = dim * feature_degree if feature_degree > 1 else dim
         if window_size < 1:
             raise ValueError("window_size (Omega c) must be >= 1")
         self.window_size = window_size
@@ -288,7 +339,7 @@ class NeuralMemory(nn.Module):
                 gate_signal=cascade_gate_signal,
             )
 
-        self.memory = NeuralMemoryMLP(dim, hidden_dim, num_layers)
+        self.memory = NeuralMemoryMLP(dim, hidden_dim, num_layers, in_dim=mem_in_dim)
         self.num_layers = num_layers
 
         # Outer, ordinarily-trained projections (shared across time).
@@ -307,21 +358,32 @@ class NeuralMemory(nn.Module):
 
     # ------------------------------------------------------------------ utils
     def _loss(self, params: Params, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        pred = mlp_forward(params, k, self.num_layers)
+        pred = mlp_forward(
+            params, k, self.num_layers, self.memory_activation, self.memory_residual
+        )
         return ((pred - v) ** 2).sum()
 
     def _grad_fn(self):
         num_layers = self.num_layers
+        act, res = self.memory_activation, self.memory_residual
 
         def loss(params: Params, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-            pred = mlp_forward(params, k, num_layers)
+            pred = mlp_forward(params, k, num_layers, act, res)
             return ((pred - v) ** 2).sum()
 
         return grad(loss, argnums=0)
 
     def _project(self, x: torch.Tensor):
-        """Return k, v, q ([B,N,d]) and gate scalars alpha, eta, theta ([B,N])."""
+        """Return k, v, q and gate scalars alpha, eta, theta ([B,N]).
+
+        ``k`` is the *feature-mapped* key ``phi(W_K x)`` (ATLAS Eq 56/58), so its
+        width is ``p*d`` when a polynomial map is active; ``v`` and ``q`` keep
+        width ``d`` (``q`` is mapped inside :meth:`retrieve`, since callers hand
+        it a plain ``q_proj`` output).
+        """
         k = self.k_proj(x)
+        if self.feature_map is not None:
+            k = self.feature_map(k)
         v = self.v_proj(x)
         q = self.q_proj(x)
         alpha = torch.sigmoid(self.alpha_head(x)).squeeze(-1)
@@ -444,8 +506,16 @@ class NeuralMemory(nn.Module):
 
         This decouples the query stream from the update stream: ``state`` may have
         been produced by *other* tokens than the ones in ``q`` (used by MAC).
+
+        The polynomial feature map is applied here rather than by the caller:
+        every call site hands in a raw ``q_proj`` output, and ``M`` expects
+        ``phi(q)`` whenever it was built for mapped keys.
         """
-        return vmap(mlp_forward, in_dims=(0, 0, None))(state, q, self.num_layers)
+        if self.feature_map is not None:
+            q = self.feature_map(q)
+        return vmap(mlp_forward, in_dims=(0, 0, None, None, None))(
+            state, q, self.num_layers, self.memory_activation, self.memory_residual
+        )
 
     # ------------------------------------------------------------- carry state
     def init_momentum(self, state: Params) -> Params:

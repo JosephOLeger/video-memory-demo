@@ -45,6 +45,15 @@ class TitansMACBlock(nn.Module):
     segment_size: ``C``; the full sequence length must be a multiple of this.
     num_persistent_tokens: ``N_p`` learnable persistent-memory tokens.
     memory_hidden_dim, memory_num_layers: geometry of the memory MLP ``M``.
+    feature_degree, feature_normalize: ATLAS's polynomial feature map ``phi`` on
+        the memory's keys/queries (``degree=1``, the default, is the identity map
+        = plain Titans). Raises the *effective* key dimension -- and with it the
+        number of key-value pairs ``M`` can store (ATLAS Prop. 2) -- at no cost to
+        the input projections. See :mod:`titans.features`.
+    memory_expansion, memory_activation, memory_residual: ATLAS Table 7's memory
+        MLP recipe (expansion factor 4, GELU, ``M(x) = x + W_1 sigma(W_2 x)``).
+        All default to this project's original (expansion 1, SiLU, no residual)
+        so existing results stay comparable; set them together to match the paper.
     memory_chunk_size: chunk size for the memory's online update within a segment
         (defaults to ``segment_size`` -- the whole segment as one parallel chunk).
     conv_kernel_size: kernel of the attention's causal conv (default 4).
@@ -89,6 +98,11 @@ class TitansMACBlock(nn.Module):
         memory_update_bias: bool = True,
         memory_orthogonalize_momentum: bool = False,
         decouple_memory_update: bool = False,
+        feature_degree: int = 1,
+        feature_normalize: bool = True,
+        memory_expansion: Optional[int] = None,
+        memory_activation: str = "silu",
+        memory_residual: bool = False,
     ):
         super().__init__()
         self.dim = dim
@@ -129,6 +143,11 @@ class TitansMACBlock(nn.Module):
             cascade_slow_decay=cascade_slow_decay,
             update_bias=memory_update_bias,
             orthogonalize_momentum=memory_orthogonalize_momentum,
+            feature_degree=feature_degree,
+            feature_normalize=feature_normalize,
+            memory_expansion=memory_expansion,
+            memory_activation=memory_activation,
+            memory_residual=memory_residual,
         )
         self.persistent = PersistentMemory(dim, num_persistent_tokens)
         self.attn = CausalSelfAttention(
