@@ -166,3 +166,73 @@ def test_mac_feature_degree_changes_output():
     on, _, _ = TitansMACBlock(dim=32, segment_size=8, feature_degree=3)(x)
     assert torch.isfinite(on).all()
     assert not torch.allclose(off, on)
+
+
+# ------------------------------------------------- audit regressions (2026-07-20)
+# Three defects found by auditing the assembled ATLAS stack against the paper.
+# All three failed *silently*: the flag was accepted and did nothing.
+
+def test_residual_applies_even_when_phi_widens_the_input():
+    """ATLAS's M(x) = x + W1 sigma(W2 x) is ill-typed once phi widens the input
+    (p*d in, d out). It used to be skipped outright, so memory_residual=True was a
+    no-op in exactly the configuration ATLAS specifies (phi + residual). It now
+    adds phi's degree-1 block -- the un-mapped key."""
+    from titans.memory import mlp_forward
+    mem = NeuralMemory(16, memory_residual=True, feature_degree=2, memory_expansion=4)
+    assert mem.memory.in_dim == 32 and mem.dim == 16      # widths genuinely differ
+    p = {k: v[0] for k, v in mem.memory.init_state(1).items()}
+    x = torch.randn(mem.memory.in_dim)
+    with torch.no_grad():
+        on = mlp_forward(p, x, mem.num_layers, "gelu", True)
+        off = mlp_forward(p, x, mem.num_layers, "gelu", False)
+    assert not torch.allclose(on, off), "residual must not be a no-op under phi"
+
+
+def test_residual_is_verbatim_when_widths_match():
+    """With no feature map the skip must be the paper's formula exactly."""
+    from titans.memory import mlp_forward
+    mem = NeuralMemory(16, memory_residual=True)
+    p = {k: v[0] for k, v in mem.memory.init_state(1).items()}
+    x = torch.randn(16)
+    with torch.no_grad():
+        on = mlp_forward(p, x, mem.num_layers, "silu", True)
+        off_pre = mlp_forward(p, x, mem.num_layers, "silu", False)
+    # on == rms_norm(pre_norm + x); check the skip moved the output toward x
+    assert not torch.allclose(on, off_pre)
+
+
+def test_newton_schulz_is_applied_on_the_cascade_path():
+    """orthogonalize_momentum used to be scoped to the scalar branch only, so
+    cascade + NS ran as plain cascade with no warning."""
+    torch.manual_seed(2)
+    x = torch.randn(2, 8, 16)
+    outs = {}
+    for tag, kw in [("off", {}), ("on", dict(orthogonalize_momentum=True))]:
+        torch.manual_seed(3)
+        m = NeuralMemory(16, hidden_dim=16, use_cascade_momentum=True, **kw)
+        st, S = m.init_memory(2)
+        with torch.no_grad():
+            st2, _ = m.update(x, st, S, chunk_size=8)
+        outs[tag] = st2["w1"]
+    assert not torch.equal(outs["off"], outs["on"]), "NS must affect the cascade path"
+
+
+def test_window_normalize_removes_the_step_size_confound():
+    """Eq 58 sums c gradients, so a larger window silently means a larger inner
+    step -- 'more context' and 'bigger step' change together. window_normalize
+    divides by the gate mass so only the context varies."""
+    torch.manual_seed(0)
+    x = torch.randn(2, 8, 16)
+
+    def step_norm(c, normalize):
+        torch.manual_seed(1)
+        m = NeuralMemory(16, hidden_dim=16, window_size=c, window_normalize=normalize)
+        st, S = m.init_memory(2)
+        with torch.no_grad():
+            st2, _ = m.update(x, st, S, chunk_size=8)
+            return sum(float((st2[k] - st[k]).norm()) for k in st if k.startswith("w"))
+
+    raw = [step_norm(c, False) for c in (1, 4, 8)]
+    normed = [step_norm(c, True) for c in (1, 4, 8)]
+    assert raw[2] > 2 * raw[0], f"unnormalised window should inflate the step: {raw}"
+    assert normed[2] < 1.3 * normed[0], f"normalised window should not: {normed}"

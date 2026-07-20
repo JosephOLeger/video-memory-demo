@@ -122,10 +122,16 @@ def mlp_forward(
 
     ``activation`` selects the between-layer nonlinearity: ``"silu"`` (this
     project's original) or ``"gelu"`` (what ATLAS specifies, Table 7 caption).
-    ``residual`` adds ATLAS's skip connection ``M(x) = x + W_1 sigma(W_2 x)``;
-    it requires input and output widths to match, so it is silently skipped when
-    a feature map has widened the input (``phi(k)`` has ``p*d`` dims while ``M``
-    outputs ``d``) -- documented in :class:`NeuralMemory`.
+    ``residual`` adds ATLAS's skip connection ``M(x) = x + W_1 sigma(W_2 x)``
+    (Table 7 caption). When a feature map has widened the input, that formula is
+    ill-typed as literally written -- ``phi(k)`` has ``p*d`` dims while ``M`` must
+    output ``d`` to be compared against ``v`` -- and the paper does not say how the
+    two combine. We add the **leading ``d`` slice of the input**, which for our
+    ``phi`` is exactly its degree-1 block ``c_1 * k``, i.e. the un-mapped key: the
+    skip carries the original key, and the higher-degree terms reach the output
+    only through the learned layers. That is the reading that degenerates to the
+    paper's formula when ``phi`` is the identity. Documented as a resolution of an
+    under-specified point, not as the paper's own choice.
 
     The output is RMS-normalised (parameter-free). Without it the online weight
     update is unstable when the memory is threaded across many segments: the
@@ -140,8 +146,11 @@ def mlp_forward(
         h = h @ params[f"w{i}"].transpose(-1, -2) + params[f"b{i}"]
         if i < num_layers - 1:
             h = F.gelu(h) if activation == "gelu" else F.silu(h)
-    if residual and h.shape[-1] == x.shape[-1]:
-        h = h + x
+    if residual and x.shape[-1] >= h.shape[-1]:
+        # Equal widths -> the paper's M(x) = x + W_1 sigma(W_2 x) verbatim.
+        # Wider input (a feature map is active) -> the leading slice, which is
+        # phi's degree-1 block = the original key. See the docstring.
+        h = h + (x if h.shape[-1] == x.shape[-1] else x[..., : h.shape[-1]])
     # Parameter-free RMSNorm: keeps M's output on a bounded scale regardless of
     # how large the online-updated weights become.
     rms = torch.sqrt(h.pow(2).mean(dim=-1, keepdim=True) + 1e-6)
@@ -252,6 +261,7 @@ class NeuralMemory(nn.Module):
         num_layers: int = 2,
         theta_scale: float = 1.0,
         window_size: int = 1,
+        window_normalize: bool = False,
         use_cascade_momentum: bool = False,
         cascade_reservoirs: int = 4,
         cascade_beta1: float = 0.5,
@@ -298,6 +308,10 @@ class NeuralMemory(nn.Module):
         if window_size < 1:
             raise ValueError("window_size (Omega c) must be >= 1")
         self.window_size = window_size
+        # Divide the Omega window sum by its gate mass (see _scan_chunked). Off by
+        # default: Eq 58 writes a plain sum, and turning this on is a deliberate
+        # deviation to separate "more context" from "bigger inner step".
+        self.window_normalize = window_normalize
         # Default True preserves prior behaviour (biases updated online, same as
         # weights). False keeps M's bias terms fixed at their outer-trained value
         # -- see the note in _step: neither Titans nor ATLAS's published M_t
@@ -481,6 +495,14 @@ class NeuralMemory(nn.Module):
                         b = self.cascade.base_betas
                     new_S[key] = cascade_step(u_prev, injected, b)
                 s_read = self.cascade.readout(new_S[key], x_t=x_t)
+                if self.orthogonalize_momentum and w.dim() >= 3:
+                    # ATLAS Eq 57 orthogonalises whatever plays the role of the
+                    # visible momentum before it updates M. On the cascade path
+                    # that is the readout, not S itself (S carries the [.., K]
+                    # reservoir state, which has no weight-matrix structure to
+                    # orthogonalise). Previously this branch ignored the flag
+                    # entirely, so cascade+NS silently ran as plain cascade.
+                    s_read = newton_schulz5(s_read)
                 new_state[key] = self._bcast(1.0 - alpha_t, w) * w + s_read
             else:
                 new_S[key] = (
@@ -586,6 +608,17 @@ class NeuralMemory(nn.Module):
                     # clamped to the current chunk (local indices lo..j).
                     lo = max(0, j - c + 1)
                     g = {}
+                    # Optional: divide by the window's total gate mass, turning
+                    # Eq 58's plain sum into a weighted average. The sum makes the
+                    # effective inner step grow with c (measured: ||Delta M||_F
+                    # 119 -> 190 -> 299 for c = 1, 4, 8), so a c>1 run changes the
+                    # step size *and* the context at once -- the confound suspected
+                    # of causing Omega's measured recall regression in July. Off by
+                    # default: the sum is what the paper writes.
+                    if self.window_normalize and gamma is not None:
+                        mass = sum(gamma[:, start + i] for i in range(lo, j + 1))
+                    else:
+                        mass = None
                     for key in state:
                         Gk = G[key]
                         acc = None
@@ -594,6 +627,10 @@ class NeuralMemory(nn.Module):
                             if gamma is not None:
                                 gi = self._bcast(gamma[:, start + i], gi) * gi
                             acc = gi if acc is None else acc + gi
+                        if mass is not None:
+                            acc = acc / self._bcast(mass + 1e-6, acc)
+                        elif self.window_normalize:
+                            acc = acc / (j - lo + 1)
                         g[key] = acc
                 x_t = x[:, t] if x is not None else None
                 state, S = self._step(
