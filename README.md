@@ -42,7 +42,12 @@ Per segment `i`:
 3. **Causal self-attention** over that window (`attention.py`,
    `CausalSelfAttention`), with the §4.4 details: SiLU on Q/K/V projections,
    L2-normalised (cosine) Q·K, and a depthwise-separable **causal** conv after
-   each projection.
+   each projection. Note the temperature subtlety: normalising Q/K bounds the
+   logits to `[−1, 1]`, and `F.scaled_dot_product_attention` then shrinks them
+   again by its default `1/√head_dim`, leaving the softmax near-uniform.
+   `learned_qk_scale=True` replaces that with a learned per-head temperature
+   (default **off**, so the previous behaviour is bit-identical). See the
+   collapse section for the measurements.
 4. Take the last `C` positions as the segment's attention output `y_i`.
 5. **Update the long-term memory using `y_i`** via the new retrieval-free
    `NeuralMemory.update(y_i, state, S, chunk_size)` — the memory learns from what
@@ -139,6 +144,193 @@ conserved total grows at most *linearly* in sequence length (the memory's own
   the very-long tail eventually crosses over to the single slowest eigenvalue
   (0.989), so it is power-law over the window set by the number of reservoirs,
   then a slow exponential — the Benna-Fusi finite-cascade picture.
+
+## Memory collapse: rank-1 degeneracy, root cause, and mitigations
+
+Motivating question: does the online-updated `M` actually *discriminate by
+query* (`M(k)` genuinely depends on `k`), or does long inner-loop threading
+degrade it into a near-constant function? Empirically, for plain scalar
+momentum: **yes, it degenerates.** Probing a trained `M`'s retrieval on
+several distinct queries (including queries far outside the training
+distribution) gives pairwise cosine similarity `≈ 1.0000` after only a few
+segments — `M(k)` stops depending on `k` at all.
+
+### Diagnosis
+
+* **Symptom, precisely localised.** `mlp_forward`'s final layer is
+  `h = SiLU(k·w0ᵀ+b0)·w1ᵀ + b1`, then RMS-normalised. Splitting `h` into its
+  `k`-dependent term (`signal`) and its additive term (`b1`), the ratio
+  `‖b1‖ / ‖signal‖` grows **geometrically across segments** (observed up to
+  `~10⁴×` within 8 segments) for the plain scalar recurrence — but `b1` is not
+  the culprit *growing*; `w0, b0, w1` all decay toward **exactly zero** under
+  `(1−α_t)` weight decay, `b1` merely decays slower (a single multiplicative
+  factor per step vs. a two-stage multiplicative chain for the `k`-dependent
+  path), so the ratio explodes by the numerator shrinking faster than expected,
+  not the denominator growing.
+* **`w1` itself collapses to (numerical) rank 1**, not just small: its
+  spectrum has one dominant singular value and the rest at hardware-precision
+  noise (`sv_bot ~ 1e-15`–`1e-18`), from essentially the *first* segment of
+  online updating onward — confirmed with a participation-ratio diagnostic
+  `PR(W) = (Σsᵢ²)² / Σsᵢ⁴` (`1.0` = pure rank-1, `dim` = flat/healthy).
+* **This is an inner-loop phenomenon, not an outer-loop one.** `M₀` itself
+  (the outer-trained initial weights, before any online update) is healthy
+  (signal-to-bias ratio `~0.01`, i.e. signal dominates 100×). The collapse
+  develops *during* the online recurrence over a single sequence, and resets
+  every new sequence (state re-initialises to `M₀`).
+* **Not fixed by genuine input diversity.** The same rank-1 collapse occurs
+  whether the input is a smooth synthetic random walk, i.i.d. Gaussian tokens,
+  or a literal constant ("black-screen") sequence — ruling out "the data just
+  happens to be too correlated" as a sufficient explanation on its own.
+
+### Root cause
+
+The per-token gradient of `w1` is an outer product,
+`∇_{w1} ℓ_t = e_t ⊗ h0_t` (error direction ⊗ hidden activation) —
+**rank 1 by construction**, at *every* step, regardless of how diverse the
+underlying video/data is. So the rank of `M` is decided entirely by how many
+*distinct* such outer products actually survive into the momentum sum
+`S_T = Σ_t θ_t (e_t ⊗ h0_t)`. Three measured effects each suppress that count;
+they compound.
+
+> **Superseded hypothesis (kept because it shaped the code).** This section
+> previously blamed a self-referential feedback loop: `h_i = retrieve(state)`
+> feeds `y_i = attn([persistent; h_i; segment])`, which produces the very
+> `k_i, v_i` that update the memory, so the memory contaminates its own training
+> signal — a power-iteration/Oja's-rule attractor. That story motivated
+> `decouple_memory_update`. **It does not survive measurement**: the collapse is
+> already complete after the *first* segment (`PR(w1)` goes `16.17 → 1.000`
+> across one 8-token segment, before any feedback can accumulate), and severing
+> the loop does not restore query-dependence (see the table below). The feedback
+> loop is real, but it is not what sets the rank.
+
+* **Attention is a smoother, and it is what writes to the memory.** The memory's
+  write signal is `y_i`, an *attention output*. Measured on one segment with
+  i.i.d. Gaussian input, mean pairwise cosine across the segment's tokens:
+  `x` `−0.057` → `y` `+0.904` → keys `+0.864` → `h0_t` `+0.818` → `e_t` `+0.830`.
+  The 8 outer products of a segment are therefore near-identical and their sum
+  has `PR = 1.03` out of a possible 8. This is why the collapse is indifferent to
+  the data (random walk, i.i.d., or a constant "black screen" all behave alike) —
+  the correlation is manufactured by the block, not inherited from the input.
+* **The cosine-attention temperature makes that smoothing near-maximal.**
+  `attention.py` L2-normalises Q and K (so `q·k ∈ [−1, 1]`) and then lets
+  `F.scaled_dot_product_attention` apply its default `1/√head_dim` *on top*. At
+  `head_dim=16` that is `1/4`, so logits live in `[−0.25, 0.25]` and the softmax
+  is nearly uniform: measured max attention weight `0.0556`, against `0.0500` for
+  a perfectly uniform distribution over the same 20-token prefix. Attention is
+  doing little more than averaging its window. The QK-normalisation literature
+  (Henry et al. 2020; ViT-22B; Swin-V2) pairs the normalisation with a *learned*
+  temperature for exactly this reason — normalised logits need scaling **up**,
+  not down by `1/√d`. Sweeping the scale `0.25 → 50` moves `cos(y)` `0.90 → 0.17`
+  and the momentum sum's `PR` `1.03 → 2.65`. Addressed by
+  `learned_qk_scale=True` (below).
+* **The momentum recurrence is a geometric sum, so few gradients survive it.**
+  `S_t = η_t S_{t−1} − θ_t g_t` weights a segment's gradients by
+  `(…, η², η, 1)`. With `η_t ≈ 0.515` the normalised weights over an 8-token
+  segment are `0.005, 0.009, 0.018, 0.034, 0.067, 0.129, 0.251, 0.487` — the last
+  token alone carries half the sum, and the **effective number of contributing
+  gradients is 3.09 out of 8** (participation ratio of the weights). Since each
+  is rank 1, this caps the achievable rank near 3 no matter how diverse the data
+  is. The momentum's effective horizon is `1/(1−η) ≈ 2` tokens.
+* **The momentum also swamps the initialisation.** After one segment
+  `‖S‖ = 41` against `‖w1(M₀)‖ = 3.3` — a factor 12 — so `M₁ ≈ S` and the
+  outer-trained weights (healthy, `PR = 16.17`) are simply overwritten. This is
+  why `M₀`'s health is irrelevant to what the recurrence converges to.
+* **Consequence, confirmed experimentally.** A late-sequence "regime shift"
+  (second half of a sequence drawn from a content direction near-orthogonal
+  to the first half) does **not** measurably redirect the already-locked
+  dominant direction — new content is absorbed as noise around the existing
+  attractor rather than treated as an independent signal.
+
+**Measurement caveat.** The gate values and per-segment traces above were
+measured on an *untrained* block (`dim=32`, `segment_size=8`, 16 segments), so
+`α ≈ 0.46`, `η ≈ 0.515`, `θ ≈ 0.68` are the head initialisations
+(`sigmoid(0)`, `softplus(0)`), not learned values. The collapse itself reproduces
+on trained models too (the original probes), but whether training moves `η`
+toward a longer horizon has **not** been checked — and if it does not, the short
+horizon is structural rather than learned. That check is the cheapest open item
+here.
+
+### Mitigations tried, and what they actually fix
+
+| approach | flag(s) | fixes direction lock-in? | fixes magnitude→0 decay? | cost | effect on recall (MQAR) |
+|---|---|---|---|---|---|
+| freeze `M`'s bias online (`b0,b1` stay at their outer-trained value) | `NeuralMemory(update_bias=False)` | no (alone) | no (alone) | free | — |
+| + Newton-Schulz orthogonalisation of the scalar momentum before it updates `w0/w1` | `NeuralMemory(orthogonalize_momentum=True)` (`memory.py::newton_schulz5`, the same quintic iteration Muon/ATLAS's inner optimiser uses) | **yes**, combined with bias-freeze (retrieval diversity cosine `1.00 → −0.03`) | yes (combined) | **~2.8× slower** per step | **no measurable change** (`0.588±0.071` vs `0.575±0.086`, within noise) |
+| metaplastic-cascade momentum with no leak | `TitansMACBlock(memory_use_cascade=True, cascade_leak="none", cascade_readout="mean")` | **no** — direction still drifts away from its start at a slow, roughly constant rate, unaffected by a regime shift | **yes** — state provably reaches a stable nonzero fixed point (bit-identical across segments in a constant-latent probe) | cheap | no measurable change |
+| ATLAS Omega rule, sliding window `c>1` | `TitansMACBlock(memory_window_size=c)` | no | no | cheap | untested here (see `docs/atlas_vs_titans.md`) — rank diagnostic shows no improvement even with i.i.d. per-token content, because `retrieve`'s contamination taints every token *inside* the window too, not just across steps |
+| decouple the update path from `h_i` | `TitansMACBlock(decouple_memory_update=True)` | **partly** — stops the *drift* lock (`cos`-to-segment-0 falls from `1.0` to ~`0`), but `M` stays a near-constant function of the query (retrieval-diversity cosine stays `1.0000`) | **no** — `w1` still decays to `1.8e−11` by segment 16 | one extra `attn()` call per segment (same weights, no new params) | untested |
+| **learned cosine-attention temperature** | `TitansMACBlock(learned_qk_scale=True)` | **no, alone** (`PR` still `1.000`) — but it is the largest *contributor* in combination: added to NS+bias-freeze it takes `PR` from `3.8` to `5.4` (peaks `8.1`), the best measured | no, alone | one parameter per head | untested end-to-end |
+
+Two rows deserve care, because both were previously overstated:
+
+* **`decouple_memory_update` is not the mechanism-targeted fix it was billed as.**
+  It severs the `retrieve → attend → update` path, and that genuinely stops the
+  dominant direction from being frozen at its segment-0 value. But `M` remains a
+  constant function of `q` (the metric that matters for retrieval), and it does
+  not beat what the temperature achieves at lower cost and without deviating from
+  Eq 21-25. **The coupled, paper-faithful path is the recommended default.**
+* **The combination previously flagged as "the natural next step" does not work.**
+  `decouple_memory_update=True` + `cascade_leak="none"` was predicted to fix both
+  pathologies since each addresses one. Measured over 16 segments: magnitude is
+  indeed stabilised (`‖w1‖ ≈ 55`, flat), but direction is *not* — `PR = 1.031`,
+  retrieval cosine `1.0000`. The two fixes do not compose.
+
+**What actually restores internal health.** The two ingredients repair
+*different* things and neither suffices alone (measured over 16 segments, coupled
+path):
+
+| config | `PR(w1)` | `‖w1‖` | retrieval cos |
+|---|---|---|---|
+| baseline | 1.000 | 2.8e−08 | 1.0000 |
+| Newton-Schulz alone | 1.888 | 3.5e−05 | **1.0000** (still constant) |
+| bias-freeze alone | **1.000** (still rank-1) | 1.2e+00 | −0.0714 |
+| NS + bias-freeze | 3.817 | 7.6e−01 | −0.0771 |
+| **NS + bias-freeze + temperature** | **5.395** | 4.8e+01 | 0.1756 |
+
+Newton-Schulz raises the rank but leaves retrieval query-independent;
+bias-freeze fixes retrieval and magnitude but leaves the matrix rank-1. All
+three together are the best configuration found. Notably, none of the three is
+an architectural deviation: the temperature corrects a `1/√d` applied on top of
+already-normalised Q/K, Newton-Schulz *is* ATLAS Eq 57-58, and freezing the bias
+moves *toward* the papers, whose `M_t` recurrence has no bias term at all.
+
+### The health fixes do not pay off downstream — and the reason is visible
+
+Three independent downstream measures, all null or negative:
+
+| measure | without fix | with NS + bias-freeze | cost |
+|---|---|---|---|
+| MQAR, 8 pairs, 6000 steps | `0.5875 ± 0.0710` | `0.5750 ± 0.0864` | 982 s → 2761 s |
+| needle, 6000 steps | `0.0656 ± 0.0381` (chance `0.0625`) | `0.0656 ± 0.0381` | 2907 s → 8502 s |
+| world-model val L1 | `0.5835` | `0.6457` (**worse**; persistence `0.6678`) | ~2.8× |
+
+`accuracy_by_distance` on the MQAR run explains the headline number and is the
+most important measurement in this section (`segment_size = 8`):
+
+```
+distance  3 | 0.9967     <- inside the attention window
+distance  6 | 0.9882     <- inside
+distance  8 | 0.2675     <- beyond it
+distance 10 | 0.2887
+distance 13 | 0.2674
+distance 15 | 0.2553
+```
+
+The model solves ~99% of what attention can see and drops to ~26% (chance
+`0.062`) the moment the answer requires the memory. The much-discussed "56%
+plateau" is just the mixture of those two regimes — **not** a memory-capacity
+ceiling. So the collapse programme has been optimising an organ that has not
+been shown to sit on the critical path.
+
+**Net picture.** Direction lock-in and magnitude decay are two separate
+pathologies, both real, both reproducible, and both now fixable (NS +
+bias-freeze, best with the temperature). What is *not* established is that
+either one limits any task measured so far. The open question is no longer
+"how do we repair the memory" but **"is the memory used at all, and if so why so
+weakly"** — the decisive experiment being an inference-time ablation
+(`reset_memory_each_segment` on trained weights) to test whether the ~26%
+out-of-window accuracy collapses to chance when the carry is severed. Until that
+is answered, further collapse mitigations are premature.
 
 ## Status
 
