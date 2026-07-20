@@ -312,18 +312,32 @@ class MetaplasticCascade(nn.Module):
     beta1, g : geometric coupling hyperparameters (see :func:`geometric_betas`).
     dim : token dimension; required only when ``selective=True`` to build the
         surprise head.
-    selective : if True, a learned ``Linear(dim, K-1)`` + sigmoid head on the
-        token produces per-token, per-edge gates in ``(0, 1)`` that scale the base
-        couplings edge-by-edge, making ``B_t`` data-dependent *and non-commuting*
-        (mode 2 in the module docstring). If False, ``B`` is the fixed geometric
-        matrix (mode 1). Only valid for ``topology="chain"``.
+    selective : if True, a learned head produces per-token, per-edge gates in
+        ``(0, 1)`` that scale the base couplings edge-by-edge, making ``B_t``
+        data-dependent *and non-commuting* (mode 2 in the module docstring). If
+        False, ``B`` is the fixed geometric matrix (mode 1). Only valid for
+        ``topology="chain"``. What drives the gate is ``gate_signal``.
+    gate_signal : ``"content"`` (default) gates on the token representation
+        ``x_t`` via ``Linear(dim, K-1)`` -- a smooth, content-addressed edge gate
+        with no explicit relationship to how surprising the token actually is.
+        ``"surprise"`` instead gates on the memory's own *raw* gradient magnitude
+        ``||grad_t||`` (Titans' own definition of surprise, Sec 3.1) via
+        ``Linear(1, K-1)`` on ``log1p(||grad_t||)``: a learned per-edge
+        threshold+slope on the surprise itself, so consolidation is literally
+        gated by "is this surprising enough to pass deeper" rather than by content
+        -- the mechanism this module's docstring motivates but the ``"content"``
+        mode does not actually implement.
     topology : ``"chain"`` (default) is the tridiagonal diffusion cascade
-        (gradient into reservoir 0, mass exchanged between neighbours, readout =
-        reservoir 0). ``"independent"`` is the diagonal-``B`` null hypothesis: ``K``
-        uncoupled exponential filters (:func:`geometric_decays`), the gradient
-        injected into *all* of them, readout = mean over reservoirs (see
-        :func:`independent_step`). Independent mode has no coupling to gate, so it
-        forbids ``selective``.
+        (gradient into reservoir 0, mass exchanged between neighbours).
+        ``"independent"`` is the diagonal-``B`` null hypothesis: ``K`` uncoupled
+        exponential filters (:func:`geometric_decays`), the gradient injected into
+        *all* of them (see :func:`independent_step`). Independent mode has no
+        coupling to gate, so it forbids ``selective``.
+    readout : which reservoir(s) feed the visible momentum -- see :meth:`readout`.
+        ``"gated"`` makes the *readout itself* context-dependent (a learned
+        ``Linear(dim, K)`` + softmax on ``x_t``), instead of a fixed combination:
+        without this, even a perfectly content/surprise-gated diffusion has its
+        distinctions discarded by a readout that always blends the same way.
 
     The base couplings / decays are stored as non-trained buffers so a fixed
     cascade has no learnable parameters, mirroring how the geometric spacing is a
@@ -339,6 +353,7 @@ class MetaplasticCascade(nn.Module):
         selective: bool = False,
         topology: str = "chain",
         readout: Optional[str] = None,
+        gate_signal: str = "content",
     ):
         super().__init__()
         if num_reservoirs < 1:
@@ -349,20 +364,27 @@ class MetaplasticCascade(nn.Module):
             raise ValueError(
                 "topology='independent' has no coupling to gate -> selective=False"
             )
+        if gate_signal not in ("content", "surprise"):
+            raise ValueError("gate_signal must be 'content' or 'surprise'")
         self.num_reservoirs = num_reservoirs
         self.selective = selective
         self.topology = topology
+        self.gate_signal = gate_signal
         # Readout: which reservoir(s) feed the visible momentum. Default preserves
         # prior behaviour (chain -> shallowest u^1; independent -> mean). ``deep`` /
-        # ``mean`` / ``sum`` / ``learned`` expose the *slow* reservoirs, whose long
-        # retention is otherwise invisible when only u^1 is read.
+        # ``mean`` / ``sum`` / ``learned`` / ``gated`` expose the *slow* reservoirs,
+        # whose long retention is otherwise invisible when only u^1 is read.
         if readout is None:
             readout = "mean" if topology == "independent" else "shallow"
-        if readout not in ("shallow", "mean", "sum", "deep", "learned"):
+        if readout not in ("shallow", "mean", "sum", "deep", "learned", "gated"):
             raise ValueError(f"unknown readout mode {readout!r}")
         self.readout_mode = readout
         if readout == "learned":
             self.readout_w = nn.Parameter(torch.zeros(num_reservoirs))
+        if readout == "gated":
+            if dim is None:
+                raise ValueError("readout='gated' needs `dim` for the readout head")
+            self.readout_head = nn.Linear(dim, num_reservoirs)
         base = geometric_betas(num_reservoirs, beta1, g, dtype=torch.get_default_dtype())
         self.register_buffer("base_betas", base)  # [K-1]
         # Diagonal-B decays for the independent topology (unused by the chain).
@@ -370,13 +392,18 @@ class MetaplasticCascade(nn.Module):
         self.register_buffer("decays", decays)  # [K]
 
         if selective:
-            if dim is None:
-                raise ValueError("selective cascade needs `dim` for the surprise head")
             if num_reservoirs < 2:
                 raise ValueError("selective cascade needs K >= 2 (>=1 edge to gate)")
             # One gate per edge (K-1 outputs), so the *shape* of the diffusion --
             # not just its global scale -- is data-dependent (non-commuting B_t).
-            self.beta_head = nn.Linear(dim, num_reservoirs - 1)
+            if gate_signal == "content":
+                if dim is None:
+                    raise ValueError(
+                        "selective cascade (gate_signal='content') needs `dim`"
+                    )
+                self.beta_head = nn.Linear(dim, num_reservoirs - 1)
+            else:  # "surprise": scalar log-magnitude in, per-edge gate out
+                self.beta_head = nn.Linear(1, num_reservoirs - 1)
 
     # ------------------------------------------------------------------ state
     def init_state(self, template: torch.Tensor) -> torch.Tensor:
@@ -388,18 +415,24 @@ class MetaplasticCascade(nn.Module):
         """The fixed base edge couplings ``[K-1]`` (mode-1 use)."""
         return self.base_betas
 
-    def selective_betas(self, x: torch.Tensor) -> torch.Tensor:
-        """Per-token, per-edge couplings from the head: ``base_betas * sigmoid(Wx)``.
+    def selective_betas(self, signal: torch.Tensor) -> torch.Tensor:
+        """Per-token, per-edge couplings from the head: ``base_betas * sigmoid(W signal)``.
 
-        ``x`` is ``[..., dim]``; returns ``[..., K-1]``. Each edge gate in
-        ``(0, 1)`` never *increases* a coupling beyond its geometric base (so
-        stability is preserved: shrinking a stable doubly-stochastic ``B`` keeps
-        it stable), but per-edge gating reshapes the diffusion profile per token,
-        yielding an event-triggered, non-commuting ``B_t``.
+        ``signal`` is ``[..., dim]`` (``gate_signal="content"``: the token ``x_t``)
+        or ``[..., 1]`` (``gate_signal="surprise"``: ``log1p(||grad_t||)``, see
+        :meth:`~titans.memory.NeuralMemory._step`); returns ``[..., K-1]``. Each
+        edge gate in ``(0, 1)`` never *increases* a coupling beyond its geometric
+        base (so stability is preserved: shrinking a stable doubly-stochastic
+        ``B`` keeps it stable), but per-edge gating reshapes the diffusion profile
+        per token, yielding an event-triggered, non-commuting ``B_t``. Under
+        ``gate_signal="surprise"`` this is a literal learned threshold+slope on
+        the surprise magnitude: large ``|W|`` sharpens it toward a hard "pass only
+        if surprising enough" gate, exactly what a fixed geometric cascade cannot
+        express.
         """
         if not self.selective:
             raise RuntimeError("selective_betas requires selective=True")
-        gate = torch.sigmoid(self.beta_head(x))  # [..., K-1]
+        gate = torch.sigmoid(self.beta_head(signal))  # [..., K-1]
         return gate * self.base_betas  # per-edge scaling -> [..., K-1]
 
     # --------------------------------------------------------------- recurrence
@@ -439,13 +472,19 @@ class MetaplasticCascade(nn.Module):
         """Visible momentum (reservoir 1); see module-level :func:`read`."""
         return read(u)
 
-    def readout(self, u: torch.Tensor) -> torch.Tensor:
+    def readout(self, u: torch.Tensor, x_t: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Visible momentum fed into the memory's weight-decay rule.
 
         ``readout_mode`` selects which reservoir(s) are read: ``shallow`` = u^1
         (fastest; the original Titans-like momentum), ``deep`` = u^K (slowest),
-        ``mean``/``sum`` = pool all K, ``learned`` = softmax-weighted combination
-        (lets training expose the slow reservoirs). ``mean``/``learned`` keep the
+        ``mean``/``sum`` = pool all K, ``learned`` = a *fixed* (outer-trained,
+        context-independent) softmax-weighted combination, ``gated`` = a
+        *per-token* softmax-weighted combination from a ``Linear(dim, K)`` head on
+        ``x_t`` -- unlike every other mode, the mixture itself can change with the
+        current input, so a threshold-gated diffusion's distinction between
+        "this got consolidated deep" and "this stayed shallow" can actually be
+        read out differently depending on context, instead of always being
+        blended the same fixed way. ``mean``/``learned``/``gated`` keep the
         readout on a single-filter scale; ``sum`` inflates it ~K-fold (rescale the
         inner lr accordingly).
         """
@@ -458,5 +497,11 @@ class MetaplasticCascade(nn.Module):
             return u.mean(dim=-1)
         if mode == "sum":
             return u.sum(dim=-1)
+        if mode == "gated":
+            if x_t is None:
+                raise ValueError("readout='gated' needs the token x_t")
+            w = torch.softmax(self.readout_head(x_t), dim=-1)  # [..., K]
+            w = w.view(w.shape[0], *([1] * (u.dim() - 2)), w.shape[-1])
+            return (u * w).sum(dim=-1)
         w = torch.softmax(self.readout_w, dim=0)  # learned
         return (u * w).sum(dim=-1)

@@ -3,6 +3,8 @@
 import torch
 
 from titans import NeuralMemory
+from titans.mac import TitansMACBlock
+from titans.memory import newton_schulz5
 
 
 def make_memory(dim=8, hidden_dim=12, num_layers=2, theta_scale=0.5, seed=0):
@@ -132,3 +134,55 @@ def test_memorization_reduces_error():
         f"memorization did not reduce error: updated={updated_err:.4e} "
         f"baseline={baseline_err:.4e}"
     )
+
+
+# ------------------------------------------------- Newton-Schulz orthogonalisation
+def test_newton_schulz5_balances_singular_values_and_preserves_norm():
+    torch.manual_seed(0)
+    U, _ = torch.linalg.qr(torch.randn(8, 8))
+    V, _ = torch.linalg.qr(torch.randn(6, 6))
+    s = torch.tensor([50.0, 1.0, 0.5, 0.1, 0.05, 0.01])
+    G = ((U[:, :6] * s) @ V.T).unsqueeze(0)  # [1, 8, 6]
+
+    sv_before = torch.linalg.svdvals(G[0])
+    out = newton_schulz5(G)
+    sv_after = torch.linalg.svdvals(out[0])
+
+    spread_before = (sv_before.max() / sv_before.min()).item()
+    spread_after = (sv_after.max() / sv_after.min()).item()
+    assert spread_after < spread_before / 10, "singular values should be far more balanced"
+    assert torch.allclose(G[0].norm(), out[0].norm(), atol=1e-3), "Frobenius norm should be preserved"
+
+
+def test_newton_schulz5_batched_and_differentiable():
+    G = torch.randn(3, 5, 7, requires_grad=True)
+    out = newton_schulz5(G)
+    assert out.shape == G.shape
+    out.sum().backward()
+    assert G.grad is not None and torch.isfinite(G.grad).all()
+
+
+def test_newton_schulz5_passes_through_batched_bias():
+    b = torch.randn(4, 6)  # [B, out] -- a batched bias vector, no matrix structure
+    assert torch.equal(newton_schulz5(b), b)
+
+
+def test_orthogonalize_momentum_forward_backward():
+    """memory_orthogonalize_momentum=True runs end-to-end with finite gradients,
+    and leaves the default (False) path bit-identical."""
+    torch.manual_seed(0)
+    x = torch.randn(2, 16, 16)
+
+    torch.manual_seed(1)
+    block_off = TitansMACBlock(dim=16, segment_size=4)
+    out_off, _, _ = block_off(x)
+
+    torch.manual_seed(1)
+    block_on = TitansMACBlock(dim=16, segment_size=4, memory_orthogonalize_momentum=True)
+    out_on, _, _ = block_on(x)
+
+    assert torch.isfinite(out_on).all()
+    assert not torch.allclose(out_on, out_off), "orthogonalizing momentum should change the output"
+
+    out_on.pow(2).mean().backward()
+    assert any(p.grad is not None and torch.isfinite(p.grad).all() for p in block_on.parameters())

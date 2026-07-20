@@ -239,3 +239,61 @@ def test_impulse_response_power_law_diagnostic(capsys):
         "  loglog[2,30): cascade excess slope=%.3f R2=%.4f | exp R2=%.4f"
         % (slope_c, r2_cas, r2_exp)
     )
+
+
+# ------------------------------------------------------- surprise-gated coupling
+def test_surprise_gate_signal_head_shape():
+    """``gate_signal='surprise'`` takes a scalar (log-surprise), not the token."""
+    cas = MetaplasticCascade(4, dim=None, selective=True, gate_signal="surprise")
+    assert cas.beta_head.in_features == 1
+    betas = cas.selective_betas(torch.randn(3, 1))
+    assert betas.shape == (3, 3)  # [B, K-1]
+
+
+def test_surprise_gate_needs_no_dim():
+    """Unlike content gating, surprise gating doesn't need `dim` (scalar input)."""
+    MetaplasticCascade(4, dim=None, selective=True, gate_signal="surprise")
+
+
+def test_gate_signal_rejects_unknown():
+    with pytest.raises(ValueError):
+        MetaplasticCascade(4, dim=8, selective=True, gate_signal="bogus")
+
+
+def test_surprise_gate_monotone_in_magnitude():
+    """A large-|weight| threshold head passes near-0 gate below threshold and
+    near-1 above it -- i.e. it can express a genuine (soft) surprise threshold,
+    which content gating (keyed on the token, not the gradient magnitude) cannot."""
+    cas = MetaplasticCascade(2, dim=None, selective=True, gate_signal="surprise")
+    with torch.no_grad():
+        cas.beta_head.weight.fill_(20.0)  # sharp threshold
+        cas.beta_head.bias.fill_(-20.0 * 1.0)  # threshold at signal=1.0
+    below = cas.selective_betas(torch.tensor([[0.0]]))
+    above = cas.selective_betas(torch.tensor([[3.0]]))
+    assert below.item() < 1e-3 * cas.base_betas.item()
+    assert above.item() > 0.99 * cas.base_betas.item()
+
+
+# --------------------------------------------------------- context-gated readout
+def test_gated_readout_needs_dim():
+    with pytest.raises(ValueError):
+        MetaplasticCascade(4, dim=None, readout="gated")
+
+
+def test_gated_readout_shape_and_context_dependence():
+    """readout='gated' mixes reservoirs with per-token weights, so two different
+    tokens can read out a different combination of the SAME cascade state."""
+    cas = MetaplasticCascade(4, dim=8, readout="gated")
+    u = torch.randn(3, 5, 4)  # [B, d, K] -- a weight-shaped state
+    x_a = torch.randn(3, 8)
+    x_b = torch.randn(3, 8)
+    out_a = cas.readout(u, x_t=x_a)
+    out_b = cas.readout(u, x_t=x_b)
+    assert out_a.shape == (3, 5)
+    assert not torch.allclose(out_a, out_b)  # context actually changes the mix
+
+
+def test_gated_readout_requires_x_t():
+    cas = MetaplasticCascade(4, dim=8, readout="gated")
+    with pytest.raises(ValueError):
+        cas.readout(torch.randn(2, 4))

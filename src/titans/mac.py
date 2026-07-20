@@ -48,6 +48,14 @@ class TitansMACBlock(nn.Module):
     memory_chunk_size: chunk size for the memory's online update within a segment
         (defaults to ``segment_size`` -- the whole segment as one parallel chunk).
     conv_kernel_size: kernel of the attention's causal conv (default 4).
+    learned_qk_scale, qk_scale_init, qk_scale_max: opt-in learned attention
+        temperature for the cosine-normalised Q/K (default off -> unchanged).
+        See :class:`~titans.attention.CausalSelfAttention`: without it the
+        L2-normalised logits are shrunk again by SDPA's ``1/sqrt(head_dim)``,
+        the softmax is near-uniform, and the attention output -- which is what
+        writes into the long-term memory -- is a near-average of its window, so
+        the memory's per-token gradients are collinear and its momentum sum is
+        rank-1 from the first segment.
     theta_scale: passed to the memory (scales the inner learning rate head).
     """
 
@@ -61,6 +69,9 @@ class TitansMACBlock(nn.Module):
         memory_num_layers: int = 2,
         memory_chunk_size: Optional[int] = None,
         conv_kernel_size: int = 4,
+        learned_qk_scale: bool = False,
+        qk_scale_init: float = 10.0,
+        qk_scale_max: float = 100.0,
         theta_scale: float = 1.0,
         memory_window_size: int = 1,
         use_memory: bool = True,
@@ -72,11 +83,19 @@ class TitansMACBlock(nn.Module):
         cascade_selective: bool = False,
         cascade_topology: str = "chain",
         cascade_readout: Optional[str] = None,
+        cascade_gate_signal: str = "content",
         cascade_leak: str = "full",
         cascade_slow_decay: float = 0.99,
+        memory_update_bias: bool = True,
+        memory_orthogonalize_momentum: bool = False,
+        decouple_memory_update: bool = False,
     ):
         super().__init__()
         self.dim = dim
+        # Opt-in: see the note at the update call-site below. Default False
+        # preserves the paper's Eq 21-25 (single y_t feeds both output and
+        # update).
+        self.decouple_memory_update = decouple_memory_update
         # Ablation switch: when False the long-term neural memory branch is
         # disabled -- no historical retrieval (Eq 21), no memory update / output
         # retrieval (Eq 24-25). Only core causal attention over
@@ -105,11 +124,21 @@ class TitansMACBlock(nn.Module):
             cascade_selective=cascade_selective,
             cascade_topology=cascade_topology,
             cascade_readout=cascade_readout,
+            cascade_gate_signal=cascade_gate_signal,
             cascade_leak=cascade_leak,
             cascade_slow_decay=cascade_slow_decay,
+            update_bias=memory_update_bias,
+            orthogonalize_momentum=memory_orthogonalize_momentum,
         )
         self.persistent = PersistentMemory(dim, num_persistent_tokens)
-        self.attn = CausalSelfAttention(dim, num_heads, conv_kernel_size)
+        self.attn = CausalSelfAttention(
+            dim,
+            num_heads,
+            conv_kernel_size,
+            learned_qk_scale=learned_qk_scale,
+            qk_scale_init=qk_scale_init,
+            qk_scale_max=qk_scale_max,
+        )
 
         # Normalisation + gating before the final output projection (§4.4).
         self.norm_y = nn.RMSNorm(dim)
@@ -182,7 +211,24 @@ class TitansMACBlock(nn.Module):
             y_i = y_full[:, -C:, :]  # [B, C, d]
 
             # 5. Update long-term memory using the attention output y_i.
-            state, S = self.memory.update(y_i, state, S, self.memory_chunk_size)
+            if self.decouple_memory_update:
+                # Sever the retrieve->attend->update feedback loop: h_i (this
+                # segment's retrieval from the CURRENT, possibly already-biased
+                # state) would otherwise leak into k_i/v_i for the very update
+                # that state is about to receive, manufacturing a component of
+                # k_i/v_i correlated with the memory's own current dominant
+                # direction at every step -- the mechanism identified as driving
+                # the rank-1 collapse (see project notes). Here the update signal
+                # is instead computed from a SEPARATE attention pass over
+                # [persistent; segment] only (same attn weights, no h_i), so the
+                # gradient that updates M is shaped purely by new content. The
+                # output path (y_i, r_i, gate below) is unchanged -- still uses
+                # the h_i-inclusive y_i, matching the paper's Eq 21-25.
+                y_update_full = self.attn(torch.cat([p, seg], dim=1))
+                y_update = y_update_full[:, -C:, :]
+                state, S = self.memory.update(y_update, state, S, self.memory_chunk_size)
+            else:
+                state, S = self.memory.update(y_i, state, S, self.memory_chunk_size)
 
             # 6. Output retrieval from the just-updated memory, then gate.
             q_out = self.memory.q_proj(y_i)

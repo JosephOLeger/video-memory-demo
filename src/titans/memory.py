@@ -57,6 +57,55 @@ from .metaplastic import MetaplasticCascade, cascade_step, independent_step
 Params = Dict[str, torch.Tensor]
 
 
+def newton_schulz5(
+    G: torch.Tensor, steps: int = 5, eps: float = 1e-7
+) -> torch.Tensor:
+    """Orthogonalise a batch of matrices toward the nearest semi-orthogonal one.
+
+    The quintic Newton-Schulz iteration used by the Muon optimizer (Jordan et al.
+    2024) and by ATLAS's own inner-loop optimiser (arXiv:2505.23735, Eq 57-58,
+    ``M_t = alpha_t M_{t-1} + NewtonSchulz5(S_t)``). Iterating a degree-5
+    polynomial map drives all singular values of ``G`` toward 1 while preserving
+    its singular *vectors* -- i.e. it reshapes the update to have balanced
+    "spread" across directions instead of being dominated by whichever direction
+    the accumulated momentum happens to have reinforced most.
+
+    Motivation here: diagnosed directly on this project's memory (see the needle/
+    collapse probes) -- accumulating momentum from many sequential outer-product
+    gradients (``-theta_t * grad``) over a long threaded sequence can drift the
+    weight update toward an (approximately) rank-1 matrix, so the memory's output
+    *direction* stops depending on the query even though its *magnitude* still
+    does (a distinct failure mode from the bias-dominance collapse ``update_bias``
+    guards against). Orthogonalising the momentum before it updates the weights
+    is a direct, literature-grounded counter to this specific degeneracy.
+
+    ``G`` is ``[B, out, in]`` (a batch of weight-shaped momentum tensors);
+    returns a same-shape tensor with each matrix pushed toward semi-orthogonal.
+    Anything with fewer than 3 dims (e.g. a batched bias ``[B, out]``, which has
+    no per-example matrix structure to orthogonalise) passes through unchanged.
+    """
+    if G.dim() < 3:
+        return G
+    a, b, c = 3.4445, -4.7750, 2.0315
+    X = G / (G.norm(dim=(-2, -1), keepdim=True) + eps)
+    transposed = X.shape[-2] > X.shape[-1]
+    if transposed:
+        X = X.transpose(-2, -1)
+    for _ in range(steps):
+        A = X @ X.transpose(-2, -1)
+        B = b * A + c * A @ A
+        X = a * X + B @ X
+    if transposed:
+        X = X.transpose(-2, -1)
+    # The NS iteration itself changes X's Frobenius norm (pushing singular values
+    # toward 1 changes their sum of squares), so re-normalise to unit norm before
+    # rescaling to G's original magnitude -- isolates "balance the singular
+    # values" from a confounding change in update magnitude (theta_t's learned
+    # scale assumes momentum sized like -theta_t*grad, not NS's native scale).
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) + eps)
+    return X * G.norm(dim=(-2, -1), keepdim=True)
+
+
 def mlp_forward(params: Params, x: torch.Tensor, num_layers: int) -> torch.Tensor:
     """Pure functional forward of the memory MLP for a *single* example.
 
@@ -185,8 +234,11 @@ class NeuralMemory(nn.Module):
         cascade_selective: bool = False,
         cascade_topology: str = "chain",
         cascade_readout: Optional[str] = None,
+        cascade_gate_signal: str = "content",
         cascade_leak: str = "full",
         cascade_slow_decay: float = 0.99,
+        update_bias: bool = True,
+        orthogonalize_momentum: bool = False,
     ):
         super().__init__()
         hidden_dim = hidden_dim or dim
@@ -195,6 +247,18 @@ class NeuralMemory(nn.Module):
         if window_size < 1:
             raise ValueError("window_size (Omega c) must be >= 1")
         self.window_size = window_size
+        # Default True preserves prior behaviour (biases updated online, same as
+        # weights). False keeps M's bias terms fixed at their outer-trained value
+        # -- see the note in _step: neither Titans nor ATLAS's published M_t
+        # recurrence has a bias term at all, so this tests whether the online
+        # bias update (an nn.Linear-convention addition, not a paper-specified
+        # mechanism) is what drives the memory's collapse to a near-constant
+        # function under long inner-loop threading.
+        self.update_bias = update_bias
+        # Opt-in Newton-Schulz orthogonalisation of the scalar-path momentum
+        # before it updates 2D weight matrices (see newton_schulz5's docstring).
+        # Scoped to the plain (non-cascade) path for now.
+        self.orthogonalize_momentum = orthogonalize_momentum
 
         # Opt-in metaplastic cascade momentum (default off -> scalar Titans).
         self.use_cascade_momentum = use_cascade_momentum
@@ -205,14 +269,23 @@ class NeuralMemory(nn.Module):
         self.cascade_leak = cascade_leak
         self.cascade_slow_decay = cascade_slow_decay
         if use_cascade_momentum:
+            # `dim` is needed by the cascade whenever a head reads the token: the
+            # content-gated coupling (cascade_selective + gate_signal="content") or
+            # the context-dependent readout (cascade_readout="gated"). The
+            # surprise-gated coupling needs no `dim` (its head takes the scalar
+            # log-surprise, not the token).
+            needs_dim = (cascade_selective and cascade_gate_signal == "content") or (
+                cascade_readout == "gated"
+            )
             self.cascade = MetaplasticCascade(
                 cascade_reservoirs,
                 beta1=cascade_beta1,
                 g=cascade_g,
-                dim=dim if cascade_selective else None,
+                dim=dim if needs_dim else None,
                 selective=cascade_selective,
                 topology=cascade_topology,
                 readout=cascade_readout,
+                gate_signal=cascade_gate_signal,
             )
 
         self.memory = NeuralMemoryMLP(dim, hidden_dim, num_layers)
@@ -280,10 +353,29 @@ class NeuralMemory(nn.Module):
         new_S: Params = {}
         new_state: Params = {}
         if self.use_cascade_momentum and self.cascade.selective:
-            betas_t = self.cascade.selective_betas(x_t)  # [B, K-1]
+            if self.cascade.gate_signal == "surprise":
+                # Raw surprise (Titans Sec 3.1: the memory's own loss gradient),
+                # aggregated over every weight tensor and log-compressed so a
+                # linear+sigmoid head can act as a stable learned threshold
+                # regardless of how gradient scale drifts over training.
+                sq = sum((gk.reshape(gk.shape[0], -1) ** 2).sum(dim=-1) for gk in g.values())
+                surprise_t = torch.log1p(torch.sqrt(sq + 1e-12))  # [B]
+                betas_t = self.cascade.selective_betas(surprise_t.unsqueeze(-1))
+            else:
+                betas_t = self.cascade.selective_betas(x_t)  # [B, K-1]
         else:
             betas_t = None
         for key, w in state.items():
+            if not self.update_bias and key.startswith("b"):
+                # Neither Titans nor ATLAS's formal M_t recurrence has a bias term
+                # (every published update rule is a pure matrix/weight recurrence,
+                # see e.g. Titans Eq 13-18/32-35, ATLAS Eq 45-58) -- biases are an
+                # nn.Linear-convention addition of this implementation, subject to
+                # the same online decay+momentum as weights. Keep them fixed at
+                # their outer-trained value: no online update, no momentum state.
+                new_state[key] = w
+                new_S[key] = S[key]
+                continue
             gk = g[key]
             if self.use_cascade_momentum:
                 # Surprise term and the per-token eta_t leak; ``cascade_leak``
@@ -326,13 +418,20 @@ class NeuralMemory(nn.Module):
                     else:
                         b = self.cascade.base_betas
                     new_S[key] = cascade_step(u_prev, injected, b)
-                s_read = self.cascade.readout(new_S[key])
+                s_read = self.cascade.readout(new_S[key], x_t=x_t)
                 new_state[key] = self._bcast(1.0 - alpha_t, w) * w + s_read
             else:
                 new_S[key] = (
                     self._bcast(eta_t, gk) * S[key] - self._bcast(theta_t, gk) * gk
                 )
-                new_state[key] = self._bcast(1.0 - alpha_t, w) * w + new_S[key]
+                update = new_S[key]
+                if self.orthogonalize_momentum and w.dim() >= 3:
+                    # Only 2D weight matrices (batched: [B, out, in]) have an
+                    # orthogonality structure to speak of; bias vectors ([B, out])
+                    # pass through untouched (and are usually frozen anyway when
+                    # update_bias=False).
+                    update = newton_schulz5(update)
+                new_state[key] = self._bcast(1.0 - alpha_t, w) * w + update
         return new_state, new_S
 
     def retrieve(self, state: Params, q: torch.Tensor) -> torch.Tensor:

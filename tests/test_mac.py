@@ -176,3 +176,120 @@ def test_toy_trainability():
 
     assert not math.isnan(losses[-1])
     assert losses[-1] < losses[0], f"loss did not decrease: {losses[0]} -> {losses[-1]}"
+
+
+def test_memory_update_bias_false_freezes_bias_but_not_weights():
+    """``memory_update_bias=False`` keeps M's bias terms fixed at M_0 across the
+    whole inner-loop recurrence, while weights still update online, and the
+    outer loop can still learn the (fixed-at-test-time) bias via backprop."""
+    torch.manual_seed(0)
+    block = make_block(dim=16, segment_size=4, memory_hidden_dim=12,
+                       memory_num_layers=2, seed=0, double=False)
+    block.memory.update_bias = False  # cheap toggle without rebuilding the block
+
+    x = torch.randn(2, 16, 16)
+    out, state, _ = block(x)
+    assert torch.isfinite(out).all()
+
+    m0 = block.memory.memory.init_state(2)
+    for key in state:
+        if key.startswith("b"):
+            assert torch.allclose(state[key], m0[key]), f"{key} should stay frozen"
+        else:
+            assert not torch.allclose(state[key], m0[key]), f"{key} should still update"
+
+    # outer loop can still learn M_0's bias via backprop (only frozen online).
+    for p in block.parameters():
+        p.grad = None
+    out.pow(2).mean().backward()
+    g = block.memory.memory.params["b1"].grad
+    assert g is not None and torch.isfinite(g).all()
+
+
+def test_decouple_memory_update_forward_backward_and_changes_output():
+    """decouple_memory_update=True runs end-to-end with finite gradients, and
+    differs numerically from the default (paper-faithful) path -- it computes
+    the memory-update signal from [persistent; segment] only, severing the
+    retrieve->attend->update feedback loop identified as driving the memory's
+    rank-1 collapse, while leaving the output path (y_i-with-h_i, gate) intact."""
+    torch.manual_seed(0)
+    x = torch.randn(2, 16, 16)
+
+    block_off = make_block(dim=16, segment_size=4, seed=1, double=False)
+    out_off, _, _ = block_off(x)
+
+    torch.manual_seed(1)
+    block_on = TitansMACBlock(dim=16, num_heads=2, segment_size=4,
+                              num_persistent_tokens=3, memory_hidden_dim=12,
+                              decouple_memory_update=True)
+    out_on, state, _ = block_on(x)
+
+    assert torch.isfinite(out_on).all()
+    assert not torch.allclose(out_on, out_off), "should differ from the default path"
+
+    out_on.pow(2).mean().backward()
+    assert any(p.grad is not None and torch.isfinite(p.grad).all()
+               for p in block_on.parameters())
+
+
+# ------------------------------------------------- learned attention temperature
+def test_learned_qk_scale_off_by_default_adds_no_parameters():
+    """Default off must stay bit-identical to the pre-existing block."""
+    torch.manual_seed(3)
+    off = TitansMACBlock(dim=16, num_heads=2, segment_size=4)
+    torch.manual_seed(3)
+    on = TitansMACBlock(dim=16, num_heads=2, segment_size=4, learned_qk_scale=True)
+
+    assert not hasattr(off.attn, "log_qk_scale")
+    assert on.attn.log_qk_scale.shape == (2,)  # one temperature per head
+    assert sum(p.numel() for p in on.parameters()) == \
+        sum(p.numel() for p in off.parameters()) + 2
+
+
+def test_learned_qk_scale_sharpens_attention_and_decorrelates_output():
+    """The point of the flag: with cosine Q/K, SDPA's default 1/sqrt(head_dim)
+    leaves attention near-uniform, so its output tokens are near-collinear (which
+    is what makes the memory's per-token gradients collinear). A learned
+    temperature initialised >1 must measurably decorrelate that output."""
+    torch.manual_seed(0)
+    x = torch.randn(1, 8, 32)
+
+    def meancos(z):
+        zn = torch.nn.functional.normalize(z, dim=-1)
+        c = zn @ zn.T
+        return c[~torch.eye(c.shape[0], dtype=bool)].mean().item()
+
+    torch.manual_seed(4)
+    off = TitansMACBlock(dim=32, num_heads=2, segment_size=8)
+    torch.manual_seed(4)
+    on = TitansMACBlock(dim=32, num_heads=2, segment_size=8, learned_qk_scale=True)
+
+    with torch.no_grad():
+        cos_off = meancos(off.attn(x)[0])
+        cos_on = meancos(on.attn(x)[0])
+
+    # Bare attention over 8 tokens; inside a real block the context is
+    # [persistent; h_i; segment] (a longer causal prefix), where the same
+    # measurement is worse still (~0.90).
+    assert cos_off > 0.55, f"expected the default path to be a smoother, got {cos_off}"
+    assert cos_on < cos_off - 0.2, f"temperature did not decorrelate: {cos_off} -> {cos_on}"
+
+
+def test_learned_qk_scale_is_trained_and_clamped():
+    """The temperature receives gradient, and the clamp caps the effective scale."""
+    block = TitansMACBlock(dim=16, num_heads=2, segment_size=4,
+                           learned_qk_scale=True, qk_scale_init=10.0, qk_scale_max=20.0)
+    out, _, _ = block(torch.randn(2, 8, 16))
+    out.pow(2).mean().backward()
+    g = block.attn.log_qk_scale.grad
+    assert g is not None and torch.isfinite(g).all() and g.abs().sum() > 0
+
+    with torch.no_grad():
+        block.attn.log_qk_scale.fill_(10.0)  # far above the clamp
+        eff = block.attn.log_qk_scale.clamp(max=block.attn.log_qk_scale_max).exp()
+    assert torch.allclose(eff, torch.full_like(eff, 20.0))
+
+
+def test_learned_qk_scale_rejects_bad_init():
+    with pytest.raises(ValueError):
+        TitansMACBlock(dim=16, segment_size=4, learned_qk_scale=True, qk_scale_init=0.0)
