@@ -11,3 +11,4 @@ dist/
 .DS_Store
 results/smoke_results.json
 results/*_smoke*.json
+.claude/
