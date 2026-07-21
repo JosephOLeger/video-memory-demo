@@ -113,6 +113,7 @@ def mlp_forward(
     num_layers: int,
     activation: str = "silu",
     residual: bool = False,
+    normalize_output: bool = True,
 ) -> torch.Tensor:
     """Pure functional forward of the memory MLP for a *single* example.
 
@@ -133,13 +134,22 @@ def mlp_forward(
     paper's formula when ``phi`` is the identity. Documented as a resolution of an
     under-specified point, not as the paper's own choice.
 
-    The output is RMS-normalised (parameter-free). Without it the online weight
-    update is unstable when the memory is threaded across many segments: the
-    momentum recurrence lets ``M``'s weights -- and hence ``M(q)`` and the
-    associative loss ``||M(k)-v||^2`` that drives the update -- grow roughly
-    geometrically per segment, overflowing to ``NaN`` (visible only once the
-    sequence spans enough segments). Normalising the *function* bounds both the
-    retrieval and the loss, so the gradient can no longer feed runaway growth.
+    ``normalize_output`` RMS-normalises the result. It was introduced to stop the
+    online update diverging: the momentum recurrence lets ``M``'s weights -- and
+    hence ``M(q)`` and the associative loss -- grow geometrically per segment and
+    overflow to ``NaN`` once a sequence spans enough segments.
+
+    **It is a deviation from ATLAS, and an expensive one.** The paper normalises
+    the memory's *inputs*: "We apply normalization on keys and queries to
+    stabilize the training" (arXiv:2505.23735 p12), and writes the deep memory as
+    ``M(x) = x + W_1 sigma(W_2 x)`` with no output normalisation at all. Pinning
+    ``||M(k)|| = 1`` while the target ``v = W_V y`` is left unnormalised makes the
+    two live on different scales -- measured here, ``||v|| ~ 0.01`` against
+    ``||M(k)|| = 1``, a factor 100. The inner loss ``||M(k) - v||^2`` is then
+    dominated by ``M``'s own fixed-norm output, the error ``e = M(k) - v`` is
+    essentially ``M(k)``, and the gradient carries almost no information about
+    ``v``: the associative rule stops associating. Prefer ``normalize_qk`` on
+    :class:`NeuralMemory`, which is what the paper actually does.
     """
     h = x
     for i in range(num_layers):
@@ -151,8 +161,11 @@ def mlp_forward(
         # Wider input (a feature map is active) -> the leading slice, which is
         # phi's degree-1 block = the original key. See the docstring.
         h = h + (x if h.shape[-1] == x.shape[-1] else x[..., : h.shape[-1]])
+    if not normalize_output:
+        return h
     # Parameter-free RMSNorm: keeps M's output on a bounded scale regardless of
-    # how large the online-updated weights become.
+    # how large the online-updated weights become. See the docstring for why this
+    # is a deviation worth avoiding.
     rms = torch.sqrt(h.pow(2).mean(dim=-1, keepdim=True) + 1e-6)
     return h / rms
 
@@ -173,6 +186,7 @@ class NeuralMemoryMLP(nn.Module):
         in_dim: Optional[int] = None,
         activation: str = "silu",
         residual: bool = False,
+        normalize_output: bool = True,
     ):
         super().__init__()
         if num_layers < 2:
@@ -187,6 +201,7 @@ class NeuralMemoryMLP(nn.Module):
         # the inner loop actually runs -- it silently ignored both before.
         self.activation = activation
         self.residual = residual
+        self.normalize_output = normalize_output
 
         self.params = nn.ParameterDict()
         for i in range(num_layers):
@@ -205,7 +220,8 @@ class NeuralMemoryMLP(nn.Module):
         }
 
     def forward(self, params: Params, x: torch.Tensor) -> torch.Tensor:
-        return mlp_forward(params, x, self.num_layers, self.activation, self.residual)
+        return mlp_forward(params, x, self.num_layers, self.activation, self.residual,
+                           self.normalize_output)
 
 
 class NeuralMemory(nn.Module):
@@ -285,6 +301,8 @@ class NeuralMemory(nn.Module):
         memory_expansion: Optional[int] = None,
         memory_activation: str = "silu",
         memory_residual: bool = False,
+        normalize_qk: bool = False,
+        normalize_output: bool = True,
     ):
         super().__init__()
         # ATLAS Table 7 specifies the memory MLP as 2 layers, expansion factor 4,
@@ -300,6 +318,14 @@ class NeuralMemory(nn.Module):
             raise ValueError("memory_activation must be 'silu' or 'gelu'")
         self.memory_activation = memory_activation
         self.memory_residual = memory_residual
+        # ATLAS p12: "We apply normalization on keys and queries to stabilize the
+        # training." That is where the paper puts its stabiliser -- on M's INPUTS.
+        # `normalize_output` (in mlp_forward) instead pins M's output norm, which
+        # is not in the paper and breaks the scale match with the target v.
+        # Defaults keep the historical behaviour; set normalize_qk=True and
+        # normalize_output=False for the paper's arrangement.
+        self.normalize_qk = normalize_qk
+        self.normalize_output = normalize_output
         self.dim = dim
         self.theta_scale = theta_scale
         # ATLAS phi: polynomial feature map on keys and queries (degree 1 = the
@@ -361,7 +387,8 @@ class NeuralMemory(nn.Module):
 
         self.memory = NeuralMemoryMLP(dim, hidden_dim, num_layers, in_dim=mem_in_dim,
                                       activation=memory_activation,
-                                      residual=memory_residual)
+                                      residual=memory_residual,
+                                      normalize_output=normalize_output)
         self.num_layers = num_layers
 
         # Outer, ordinarily-trained projections (shared across time).
@@ -382,9 +409,10 @@ class NeuralMemory(nn.Module):
     def _grad_fn(self):
         num_layers = self.num_layers
         act, res = self.memory_activation, self.memory_residual
+        nout = self.normalize_output
 
         def loss(params: Params, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-            pred = mlp_forward(params, k, num_layers, act, res)
+            pred = mlp_forward(params, k, num_layers, act, res, nout)
             return ((pred - v) ** 2).sum()
 
         return grad(loss, argnums=0)
@@ -398,6 +426,8 @@ class NeuralMemory(nn.Module):
         it a plain ``q_proj`` output).
         """
         k = self.k_proj(x)
+        if self.normalize_qk:
+            k = k / (k.pow(2).mean(-1, keepdim=True).sqrt() + 1e-6)
         if self.feature_map is not None:
             k = self.feature_map(k)
         v = self.v_proj(x)
@@ -535,10 +565,13 @@ class NeuralMemory(nn.Module):
         every call site hands in a raw ``q_proj`` output, and ``M`` expects
         ``phi(q)`` whenever it was built for mapped keys.
         """
+        if self.normalize_qk:
+            q = q / (q.pow(2).mean(-1, keepdim=True).sqrt() + 1e-6)
         if self.feature_map is not None:
             q = self.feature_map(q)
-        return vmap(mlp_forward, in_dims=(0, 0, None, None, None))(
-            state, q, self.num_layers, self.memory_activation, self.memory_residual
+        return vmap(mlp_forward, in_dims=(0, 0, None, None, None, None))(
+            state, q, self.num_layers, self.memory_activation, self.memory_residual,
+            self.normalize_output
         )
 
     # ------------------------------------------------------------- carry state

@@ -104,6 +104,9 @@ class TitansMACBlock(nn.Module):
         memory_expansion: Optional[int] = None,
         memory_activation: str = "silu",
         memory_residual: bool = False,
+        normalize_qk: bool = False,
+        normalize_output: bool = True,
+        normalize_retrieval: bool = False,
     ):
         super().__init__()
         self.dim = dim
@@ -111,6 +114,15 @@ class TitansMACBlock(nn.Module):
         # preserves the paper's Eq 21-25 (single y_t feeds both output and
         # update).
         self.decouple_memory_update = decouple_memory_update
+        # ATLAS applies "layer norm at the end of each chunk" (p29). We had no
+        # such thing: r_i is normalised inside _gate, but h_i -- the retrieval
+        # fed straight back INTO attention -- was not, so with no output norm on
+        # M the loop ||w1|| up -> M(k) up -> h_i up -> y up -> v up -> loss up ->
+        # gradients up runs away (measured: ||v|| reaches inf by segment 4).
+        # Normalising the retrieval bounds what LEAVES the memory once per
+        # segment, without touching the inner loss the way normalize_output does.
+        self.normalize_retrieval = normalize_retrieval
+        self.norm_hist = nn.RMSNorm(dim) if normalize_retrieval else None
         # Ablation switch: when False the long-term neural memory branch is
         # disabled -- no historical retrieval (Eq 21), no memory update / output
         # retrieval (Eq 24-25). Only core causal attention over
@@ -150,6 +162,8 @@ class TitansMACBlock(nn.Module):
             memory_expansion=memory_expansion,
             memory_activation=memory_activation,
             memory_residual=memory_residual,
+            normalize_qk=normalize_qk,
+            normalize_output=normalize_output,
         )
         self.persistent = PersistentMemory(dim, num_persistent_tokens)
         self.attn = CausalSelfAttention(
@@ -221,6 +235,8 @@ class TitansMACBlock(nn.Module):
             # 1. Historical retrieval from the memory carried from earlier segs.
             q_hist = self.memory.q_proj(seg)  # [B, C, d]
             h_i = self.memory.retrieve(state, q_hist)  # [B, C, d]
+            if self.norm_hist is not None:
+                h_i = self.norm_hist(h_i)
 
             # 2. Local context: [persistent; retrieved history; segment].
             tilde = torch.cat([p, h_i, seg], dim=1)  # [B, N_p + C + C, d]
