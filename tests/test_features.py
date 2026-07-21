@@ -265,3 +265,58 @@ def test_module_forward_matches_the_functional_inner_loop():
         via_functional = mlp_forward(p, x, mem.num_layers,
                                      mem.memory_activation, mem.memory_residual)
     assert torch.equal(via_module, via_functional)
+
+
+# ------------------------------------------- the forget gate's resting value
+def test_alpha_init_sets_the_memory_half_life():
+    """alpha = sigmoid(0) = 0.5 (the default) means M keeps HALF its content per
+    token -- a half-life of one token. alpha_init sets the resting value through
+    alpha_head's bias so the memory can actually span a sequence."""
+    import math
+    default = NeuralMemory(16)
+    assert abs(torch.sigmoid(default.alpha_head.bias).item() - 0.5) < 0.15
+
+    mem = NeuralMemory(16, alpha_init=0.002)
+    a = torch.sigmoid(mem.alpha_head.bias).item()
+    assert abs(a - 0.002) < 1e-5
+    half_life = math.log(2) / -math.log(1 - a)
+    assert half_life > 300, f"expected a long half-life, got {half_life:.0f} tokens"
+
+
+def test_alpha_init_rejects_out_of_range():
+    for bad in (0.0, 1.0, -0.1, 1.5):
+        with pytest.raises(ValueError):
+            NeuralMemory(16, alpha_init=bad)
+
+
+def test_small_alpha_prevents_the_rank_collapse():
+    """The headline: with a sane forget gate the memory keeps full rank across
+    threaded segments, where the default collapses to rank 1 -- and this needs
+    neither Newton-Schulz nor the bias freeze."""
+    def final_pr(**kw):
+        torch.manual_seed(1)
+        blk = TitansMACBlock(32, num_heads=2, segment_size=8, memory_hidden_dim=32,
+                             memory_num_layers=2, **kw)
+        torch.manual_seed(0)
+        x = torch.randn(2, 64, 32)
+        with torch.no_grad():
+            state, S = blk.memory.init_memory(2)
+            for i in range(8):
+                seg = x[:, i * 8:(i + 1) * 8, :]
+                p = blk.persistent(2)
+                h = blk.memory.retrieve(state, blk.memory.q_proj(seg))
+                if blk.norm_hist is not None:
+                    h = blk.norm_hist(h)
+                y = blk.attn(torch.cat([p, h, seg], dim=1))[:, -8:, :]
+                state, S = blk.memory.update(y, state, S, blk.memory_chunk_size)
+            w = state["w1"][0].double()
+            s = torch.linalg.svdvals(w)
+            return float((s ** 2).sum() ** 2 / (s ** 4).sum()), float(w.norm())
+
+    pr_default, _ = final_pr()
+    pr_fixed, norm_fixed = final_pr(alpha_init=0.002, theta_scale=0.03,
+                                    normalize_qk="l2", normalize_output=False,
+                                    normalize_retrieval=True)
+    assert pr_default < 1.5, f"default should collapse to rank 1, got {pr_default}"
+    assert pr_fixed > 8.0, f"sane gates should keep rank, got {pr_fixed}"
+    assert 1e-3 < norm_fixed < 1e4, f"memory should be alive, ||w1||={norm_fixed}"

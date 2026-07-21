@@ -104,9 +104,10 @@ class TitansMACBlock(nn.Module):
         memory_expansion: Optional[int] = None,
         memory_activation: str = "silu",
         memory_residual: bool = False,
-        normalize_qk: bool = False,
+        normalize_qk: "bool | str" = False,
         normalize_output: bool = True,
         normalize_retrieval: bool = False,
+        alpha_init: Optional[float] = None,
     ):
         super().__init__()
         self.dim = dim
@@ -164,6 +165,7 @@ class TitansMACBlock(nn.Module):
             memory_residual=memory_residual,
             normalize_qk=normalize_qk,
             normalize_output=normalize_output,
+            alpha_init=alpha_init,
         )
         self.persistent = PersistentMemory(dim, num_persistent_tokens)
         self.attn = CausalSelfAttention(

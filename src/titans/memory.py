@@ -45,6 +45,7 @@ the same ``chunk_size`` and uses the same chunk-start semantics; with
 
 from __future__ import annotations
 
+import math
 from typing import Dict, Optional, Tuple
 
 import torch
@@ -301,8 +302,9 @@ class NeuralMemory(nn.Module):
         memory_expansion: Optional[int] = None,
         memory_activation: str = "silu",
         memory_residual: bool = False,
-        normalize_qk: bool = False,
+        normalize_qk: "bool | str" = False,
         normalize_output: bool = True,
+        alpha_init: Optional[float] = None,
     ):
         super().__init__()
         # ATLAS Table 7 specifies the memory MLP as 2 layers, expansion factor 4,
@@ -324,7 +326,21 @@ class NeuralMemory(nn.Module):
         # is not in the paper and breaks the scale match with the target v.
         # Defaults keep the historical behaviour; set normalize_qk=True and
         # normalize_output=False for the paper's arrangement.
-        self.normalize_qk = normalize_qk
+        # False | "rms" | "l2"  (True is accepted as "rms" for back-compat).
+        # The choice is not cosmetic: it sets lambda_max(K K^T), and ATLAS p25
+        # gives the inner loop's convergence condition as
+        #     0 < eta < 2 / lambda_max(K K^T).
+        # RMS-normalising leaves ||k||^2 = d, so a chunk of m collinear keys has
+        # lambda_max ~ m*d (measured 247 at m=8, d=32) and the step must stay
+        # under 0.008 -- which our theta ~ 0.69 violates by 85x, and which is
+        # exactly the divergence observed when the output norm is removed.
+        # L2-normalising leaves ||k|| = 1, so lambda_max ~ m (~8) and the bound
+        # is ~0.25: thirty-two times more usable, for the same stabilising role.
+        if normalize_qk is True:
+            normalize_qk = "rms"
+        if normalize_qk not in (False, None, "rms", "l2"):
+            raise ValueError("normalize_qk must be False, 'rms' or 'l2'")
+        self.normalize_qk = normalize_qk or False
         self.normalize_output = normalize_output
         self.dim = dim
         self.theta_scale = theta_scale
@@ -405,6 +421,25 @@ class NeuralMemory(nn.Module):
         if window_size > 1:
             self.gamma_head = nn.Linear(dim, 1)  # context gate -> sigmoid
 
+        # alpha_init sets the forget gate's resting value via alpha_head's bias.
+        #
+        # The default (no bias init) leaves alpha = sigmoid(0) = 0.5, so
+        # M_t = (1 - alpha) M_{t-1} + S_t keeps HALF the memory per token: a
+        # half-life of one token, which over a 24-token sequence retains 0.5^24
+        # ~ 6e-8. That is a one-token buffer, not a long-term memory, and it is
+        # the dominant cause of the rank-1 collapse this project chased for
+        # weeks: nothing survives long enough to accumulate into more than one
+        # direction. Measured over 16 threaded segments, PR(w1) goes from 1.0 at
+        # alpha=0.5 to 16.1 -- full rank -- at alpha=0.002 (half-life ~350
+        # tokens), with no Newton-Schulz and no bias freeze.
+        #
+        # Half-life in tokens is ln(2) / -ln(1 - alpha).
+        if alpha_init is not None:
+            if not 0.0 < alpha_init < 1.0:
+                raise ValueError("alpha_init must be in (0, 1)")
+            with torch.no_grad():
+                self.alpha_head.bias.fill_(math.log(alpha_init / (1 - alpha_init)))
+
     # ------------------------------------------------------------------ utils
     def _grad_fn(self):
         num_layers = self.num_layers
@@ -427,7 +462,7 @@ class NeuralMemory(nn.Module):
         """
         k = self.k_proj(x)
         if self.normalize_qk:
-            k = k / (k.pow(2).mean(-1, keepdim=True).sqrt() + 1e-6)
+            k = self._norm_qk(k)
         if self.feature_map is not None:
             k = self.feature_map(k)
         v = self.v_proj(x)
@@ -436,6 +471,12 @@ class NeuralMemory(nn.Module):
         eta = torch.sigmoid(self.eta_head(x)).squeeze(-1)
         theta = F.softplus(self.theta_head(x)).squeeze(-1) * self.theta_scale
         return k, v, q, alpha, eta, theta
+
+    def _norm_qk(self, z: torch.Tensor) -> torch.Tensor:
+        """Normalise keys/queries; see the note in ``__init__`` on lambda_max."""
+        if self.normalize_qk == "l2":
+            return z / (z.norm(dim=-1, keepdim=True) + 1e-6)
+        return z / (z.pow(2).mean(-1, keepdim=True).sqrt() + 1e-6)
 
     @staticmethod
     def _bcast(coef: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
@@ -566,7 +607,7 @@ class NeuralMemory(nn.Module):
         ``phi(q)`` whenever it was built for mapped keys.
         """
         if self.normalize_qk:
-            q = q / (q.pow(2).mean(-1, keepdim=True).sqrt() + 1e-6)
+            q = self._norm_qk(q)
         if self.feature_map is not None:
             q = self.feature_map(q)
         return vmap(mlp_forward, in_dims=(0, 0, None, None, None, None))(
