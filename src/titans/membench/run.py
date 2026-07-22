@@ -40,7 +40,7 @@ def train_recall(
     segment_size: int = 8,
     num_heads: int = 1,
     max_len: int = 1024,
-    eval_seeds=range(10_000, 10_020),
+    eval_seeds=range(10_000_000, 10_000_020),
     log_every: int = 0,
     **block_kwargs,
 ) -> dict:
@@ -49,6 +49,12 @@ def train_recall(
     ``segment_size`` must match the value baked into ``task_fn``. Returns final
     train loss, held-out accuracy (mean/std over ``eval_seeds``), and the chance
     level, plus the trained ``model`` for further probing.
+
+    ``eval_seeds`` must not overlap the training range. Training draws
+    ``task_fn(step)`` for ``step`` in ``[0, steps)``, and the old default of
+    ``range(10_000, 10_020)`` sat inside that range for any run past 10k steps --
+    so those runs trained on their own eval batches, once each. Held out here by
+    putting the eval seeds at 1e7, far beyond any step count we use.
     """
     sample = task_fn(0)
     model = RecallModel(sample.vocab_size, dim=dim, depth=depth,
@@ -96,7 +102,7 @@ def train_recall_converge(
     segment_size: int = 8,
     num_heads: int = 1,
     max_len: int = 1024,
-    eval_seeds=range(10_000, 10_020),
+    eval_seeds=range(10_000_000, 10_000_020),
     eval_every: int = 500,
     max_steps: int = 8000,
     min_steps: int = 2000,

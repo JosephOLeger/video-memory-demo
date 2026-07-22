@@ -36,3 +36,18 @@ def test_model_forward_backward():
     loss.backward()
     grads = [p.grad for p in model.parameters() if p.grad is not None]
     assert grads and all(torch.isfinite(g).all() for g in grads)
+
+
+def test_eval_seeds_do_not_overlap_the_training_range():
+    """Training draws task_fn(step) for step in [0, steps). Eval seeds sitting
+    inside that range means the model trains on its own eval batches -- which is
+    exactly what the old default range(10_000, 10_020) did for any run past 10k
+    steps. Eval seeds must be far beyond any step count we run."""
+    import inspect
+    from titans.membench import run as run_mod
+
+    for fn in (run_mod.train_recall, run_mod.train_recall_converge):
+        default = inspect.signature(fn).parameters["eval_seeds"].default
+        assert min(default) >= 1_000_000, (
+            f"{fn.__name__}: eval seeds start at {min(default)}, which a long run "
+            "would reach during training")
