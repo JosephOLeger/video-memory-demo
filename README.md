@@ -657,6 +657,98 @@ uniform 4, and since `chunk = segment_size` by default this happens every
 segment. Fixing it needs gradients carried across a chunk boundary, which
 conflicts with evaluating them all at the chunk-start weights.
 
+## Results (2026-07-21/22): the collapse is fixed, and it buys something
+
+Two measured outcomes, on two different tasks, each with its own control.
+
+### Video world model -- the metaplastic cascade wins
+
+10 seeds per config, 5 epochs on the 5999-sequence EgoLife cache, permutation tests:
+
+| config | n | val L1 | vs persistence (0.6561) |
+|---|---|---|---|
+| **`atlas_cascade`** | 10 | **0.4293 ± 0.0168** | **+34.6%** |
+| `titans` | 10 | 0.4711 ± 0.0398 | +28.2% |
+| `atlas` | 10 | 0.5109 ± 0.0378 | +22.1% |
+
+```
+atlas_cascade vs atlas      +0.0816   p < 0.0001   ***
+atlas_cascade vs titans     +0.0418   p = 0.0093   ***
+atlas         vs titans     -0.0398   p = 0.044      *
+```
+
+**The ATLAS stack without the cascade is significantly *worse* than plain Titans**
+on next-latent prediction; adding the cascade reverses that and beats Titans.
+`atlas_cascade` also has the lowest variance. The cascade is this project's own
+idea, from neither paper, and it is the only component that clearly wins here --
+after being written off in July on the strength of an under-converged sweep.
+
+### MQAR -- out-of-window memory goes from 0.23 to 0.99
+
+`sane_ns` (`SANE` + Muon + learned attention temperature) at 12 pairs, where
+plain Titans fails to learn the task at all on half its seeds:
+
+| | in-window (control) | out-of-window (memory) |
+|---|---|---|
+| `sane_ns`, seed 1 | 1.0000 | **0.9941** |
+| `sane_ns`, seed 0 | 1.0000 | **0.9858** |
+| same config, **memory branch off** | 1.0000 | **0.0531 / 0.0731** |
+| `titans` | 1.0000 | 0.132 |
+
+*(chance = 0.0625)*
+
+The anti-leak control is the point: disable the memory branch and out-of-window
+accuracy falls to **exactly chance**, while in-window stays at 1.0. Nothing but
+the threaded memory can be carrying the answer. For reference, full (unsegmented)
+attention scores 0.997 on this task -- so in its good mode the memory does as well
+as seeing the entire sequence.
+
+**It is bimodal, and that is the open problem.** Roughly half the seeds reach the
+high mode; the rest sit at the Titans baseline and ~12% die outright:
+
+```
+ 8 pairs:  4/8 high (0.99, 0.99, 0.99, 0.76)   3 low (~0.27)   1 dead
+12 pairs:  2/5 high (0.99, 0.99)               2 low (0.22)    1 dead
+```
+
+### The rank collapse is resolved -- but it was never the whole story
+
+`PR(w1)` under `sane_ns` during real training at 12 pairs, against 1.000 for
+Titans:
+
+| step | seed 0 (ends high) | seed 1 (high) | seed 2 (ends low) | seed 3 (low) |
+|---|---|---|---|---|
+| 0 | 30.68 | 32.29 | 32.65 | 32.26 |
+| 4000 | 25.15 | 22.57 | 25.18 | 25.54 |
+
+Rank holds at 22-30 and **survives training**, unlike the earlier mitigations
+(Newton-Schulz + bias-freeze + temperature eroded from 4.7 to 2.0 over 10k steps).
+
+**But the two modes are indistinguishable by rank** -- 25.15 against 25.18. The
+bimodality is not the collapse. The memory is healthy either way; one seed learns
+to use it and the other does not. So the link between internal health and task
+performance still does not exist, for the third time in this project. What
+changed is that the *ceiling* moved: a healthy memory made 0.99 reachable, which
+it was not before.
+
+The open question is now an optimisation one -- why a healthy memory is exploited
+only half the time -- not an architectural one.
+
+### What the configuration is, and why each piece is there
+
+| ingredient | what it fixes | alone? |
+|---|---|---|
+| `alpha_init=0.002` | forget-gate half-life of **one token** -> ~346 | fixes magnitude only |
+| `normalize_qk="l2"` | `lambda_max ~ m` so ATLAS's bound `2/lambda_max` is ~0.25, not ~0.008 | -- |
+| `theta_scale=0.03` | puts the inner step inside that bound | -- |
+| `normalize_output=False` | the output norm pins `\|M(k)\| = 1` against a target at ~0.01, emptying the inner loss | diverges alone |
+| `normalize_retrieval=True` | stands in for the paper's chunk-end layer norm; bounds the `h_i` feedback | -- |
+| Muon + bias freeze | rank and retrieval diversity | doesn't survive training alone |
+| `learned_qk_scale` | attention stops averaging its window | holds one segment alone |
+
+Every one is inert or harmful on its own. This is the assembled set, and the
+gains above are the assembled result -- no single-ingredient claim is supported.
+
 ## Data/parameter proportions: a deliberate, documented deviation
 
 ATLAS trains at **40–88 tokens per parameter** (Table 7: 170M/15B, 340M/15B,

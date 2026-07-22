@@ -43,6 +43,14 @@ TABLE7 = dict(memory_expansion=4, memory_activation="gelu", memory_residual=True
 OMEGA = dict(memory_window_size=4)
 MUON = dict(memory_orthogonalize_momentum=True, memory_update_bias=False)
 CASCADE = dict(memory_use_cascade=True, cascade_leak="none", cascade_readout="mean")
+# The gate/normalisation set that follows ATLAS's own bounds (p25) rather than
+# patching around them. Each piece is inert or harmful alone; together they take
+# MQAR's out-of-attention-window memory from 0.23 to 0.99 (see README).
+SANE = dict(alpha_init=0.002,          # forget-gate half-life 1 token -> ~346
+            theta_scale=0.03,          # inner step under the 2/lambda_max bound
+            normalize_qk="l2",         # ||k|| = 1 -> lambda_max ~ m, bound ~0.25
+            normalize_output=False,    # the output norm empties the inner loss
+            normalize_retrieval=True)  # stands in for the paper's chunk-end norm
 
 CONFIGS: dict[str, dict] = {
     "titans": {},
@@ -51,6 +59,12 @@ CONFIGS: dict[str, dict] = {
     "omega": {**PHI, **TABLE7, **OMEGA},
     "atlas": {**PHI, **TABLE7, **OMEGA, **MUON},
     "atlas_cascade": {**PHI, **TABLE7, **OMEGA, **MUON, **CASCADE},
+    # Best configuration found on MQAR. Bimodal there: ~50% of seeds reach
+    # memory ~0.99, the rest sit at the Titans baseline ~0.27, and ~12% die.
+    # Never yet run on video -- the world model's winner is atlas_cascade, and
+    # the two have no ingredient in common beyond Muon.
+    "sane_ns": {**SANE, **MUON, "learned_qk_scale": True},
+    "sane_ns_cascade": {**SANE, **MUON, "learned_qk_scale": True, **CASCADE},
 }
 
 # Newton-Schulz dominates VRAM, so configs that use it need the smaller batch.
