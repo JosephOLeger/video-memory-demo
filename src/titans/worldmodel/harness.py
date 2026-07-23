@@ -38,6 +38,49 @@ def persistence_baseline_l1(val_z: torch.Tensor) -> float:
 
 
 @torch.no_grad()
+def memory_health(model, z: torch.Tensor, n_probe: int = 8) -> dict:
+    """Rank / magnitude / query-dependence of the online memory, on real latents.
+
+    Measured by running the first block's own segment loop, so the state is the
+    one training actually produces -- not a fresh block on synthetic input, which
+    is how every earlier probe in this project was run and which was shown to
+    overestimate intermediate configurations by ~40%.
+
+      pr        participation ratio of w1's singular values. 1.0 = rank-1
+                (collapsed); the healthy value is set by the memory's width.
+      norm      ||w1||_F. Collapsing to 0 is a distinct pathology from rank.
+      cos_ret   mean pairwise cosine of retrievals for distinct probe queries.
+                1.0 = M has become a constant function of the query.
+    """
+    blk = model.blocks[0]
+    mem = blk.memory
+    B = z.shape[0]
+    h = model.in_proj(z)
+    C = blk.segment_size
+    state, S = mem.init_memory(B)
+    for i in range(h.shape[1] // C):
+        seg = h[:, i * C:(i + 1) * C, :]
+        p = blk.persistent(B)
+        hi = mem.retrieve(state, mem.q_proj(seg))
+        if getattr(blk, "norm_hist", None) is not None:
+            hi = blk.norm_hist(hi)
+        y = blk.attn(torch.cat([p, hi, seg], dim=1))[:, -C:, :]
+        state, S = mem.update(y, state, S, blk.memory_chunk_size)
+    w = state["w1"][0].double()
+    sv = torch.linalg.svdvals(w)
+    q = torch.randn(n_probe, model.dim, device=z.device,
+                    generator=torch.Generator(device=z.device).manual_seed(7))
+    r = mem.retrieve(state, q.unsqueeze(0).expand(B, -1, -1))[0].double()
+    rn = r / (r.norm(dim=-1, keepdim=True) + 1e-9)
+    c = rn @ rn.T
+    off = c[~torch.eye(c.shape[0], dtype=bool, device=c.device)]
+    return {"pr": float((sv ** 2).sum() ** 2 / (sv ** 4).sum()),
+            "norm": float(w.norm()),
+            "cos_ret": float(off.mean()),
+            "finite": bool(torch.isfinite(w).all())}
+
+
+@torch.no_grad()
 def _eval_l1(model, z: torch.Tensor, batch_size: int, max_seqs: int | None = None) -> float:
     """Next-step L1 over ``z``, evaluated in mini-batches.
 
@@ -70,6 +113,7 @@ def train_eval_once(
     eval_batch_size: int | None = None,
     eval_max_seqs: int | None = None,
     log_every: int = 0,
+    health_every: int = 0,
     **model_kwargs,
 ) -> dict:
     """Train one WorldModel (given seed/config) and return train & val next-step L1.
@@ -99,8 +143,20 @@ def train_eval_once(
         steps = max(1, int(round(epochs * -(-B // bs))))
 
     opt = torch.optim.Adam(model.parameters(), lr=lr)
+    health: list[dict] = []
+    probe = vz[: min(4, vz.shape[0])]
     model.train()
     for step in range(steps):
+        if health_every and step % health_every == 0:
+            model.eval()
+            hh = memory_health(model, probe)
+            hh["step"] = step
+            health.append(hh)
+            if log_every:
+                print(f"    [health] step {step:6d}  PR={hh['pr']:8.3f}  "
+                      f"||w1||={hh['norm']:.3e}  cos_ret={hh['cos_ret']:+.4f}",
+                      flush=True)
+            model.train()
         idx = torch.randperm(B, device=device)[:bs] if bs < B else slice(None)
         batch = tz[idx]
         opt.zero_grad()
@@ -111,10 +167,14 @@ def train_eval_once(
             print(f"    step {step:6d}/{steps}  train L1 {loss.item():.4f}", flush=True)
         model.train()
 
+    if health_every:
+        hh = memory_health(model, probe); hh["step"] = steps
+        health.append(hh)
     return {
         "train_l1": _eval_l1(model, tz, ebs, eval_max_seqs),
         "val_l1": _eval_l1(model, vz, ebs, eval_max_seqs),
         "steps": steps,
+        "health": health,
         "model": model,
     }
 
@@ -133,6 +193,7 @@ def run_config(
     eval_batch_size: int | None = None,
     eval_max_seqs: int | None = None,
     log_every: int = 0,
+    health_every: int = 0,
     **model_kwargs,
 ) -> dict:
     """Train one config across ``seeds`` and report mean/std train & val L1.
@@ -156,7 +217,7 @@ def run_config(
                             device=device, batch_size=batch_size,
                             eval_batch_size=eval_batch_size,
                             eval_max_seqs=eval_max_seqs, log_every=log_every,
-                            **model_kwargs)
+                            health_every=health_every, **model_kwargs)
         r.pop("model", None)   # don't pin every seed's weights in memory
         per_seed.append(r)
     tr = torch.tensor([r["train_l1"] for r in per_seed])

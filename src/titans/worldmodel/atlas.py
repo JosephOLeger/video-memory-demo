@@ -63,8 +63,21 @@ CONFIGS: dict[str, dict] = {
     # memory ~0.99, the rest sit at the Titans baseline ~0.27, and ~12% die.
     # Never yet run on video -- the world model's winner is atlas_cascade, and
     # the two have no ingredient in common beyond Muon.
+    "sane": {**SANE},
     "sane_ns": {**SANE, **MUON, "learned_qk_scale": True},
     "sane_ns_cascade": {**SANE, **MUON, "learned_qk_scale": True, **CASCADE},
+    # Union of both tasks' winners: the full ATLAS stack, the cascade, and the
+    # gate/normalisation set. Note SANE removes the output RMSNorm, which on MQAR
+    # killed one seed in four -- on continuous regression that is more exposed,
+    # not less, so this arm may simply diverge. That is itself worth measuring.
+    # SANE minus normalize_output=False: on continuous video latents, dropping
+    # the output norm on top of phi+cascade sends ||M|| to inf at step 0 (NaN,
+    # measured). Keep the output norm here; alpha_init + L2 keys + theta_scale +
+    # retrieval-norm are what carry over. Documented deviation from the literal
+    # "everything" reading, forced by the task.
+    "atlas_cascade_sane": {**PHI, **TABLE7, **OMEGA, **MUON, **CASCADE,
+                           **{k: v for k, v in SANE.items() if k != "normalize_output"},
+                           "learned_qk_scale": True},
 }
 
 # Newton-Schulz dominates VRAM, so configs that use it need the smaller batch.
@@ -94,6 +107,7 @@ def run(
     lr: float = 1e-3,
     out: str | Path | None = None,
     log_every: int = 0,
+    health_every: int = 0,
 ) -> dict:
     """Train the named configs on a latent cache and compare them.
 
@@ -111,6 +125,7 @@ def run(
     results = compare_variants(
         train_path, val_path, variants, seeds=list(seeds), epochs=epochs, lr=lr,
         batch_size=batch_size, eval_batch_size=batch_size, log_every=log_every,
+        health_every=health_every,
     )
     for r in results.values():
         r["elapsed_s"] = time.time() - t0
@@ -134,6 +149,8 @@ def main() -> None:
     ap.add_argument("--depth", type=int, default=2)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--log-every", type=int, default=100)
+    ap.add_argument("--health-every", type=int, default=0,
+                    help="probe memory rank/magnitude/query-dependence every N steps")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -150,6 +167,7 @@ def main() -> None:
         seeds=[int(s) for s in args.seeds.split(",")],
         epochs=args.epochs, batch_size=args.batch_size, dim=args.dim,
         depth=args.depth, lr=args.lr, out=args.out, log_every=args.log_every,
+        health_every=args.health_every,
     )
     print()
     print(format_comparison(results), flush=True)
