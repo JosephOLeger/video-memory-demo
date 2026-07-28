@@ -12,8 +12,14 @@
 
 from .model import WorldModel
 from .gmm import GMMHead, gmm_nll, gmm_log_prob, mixture_mean, dominant_mean
-from .bottleneck import fit_pca, apply_pca, inverse_pca
-from .train import load_latents, next_step_loss, synthetic_latents, train_demo
+from .bottleneck import fit_pca, apply_pca, inverse_pca, pca_reduce_splits
+from .train import (
+    latent_cache_meta,
+    load_latents,
+    next_step_loss,
+    synthetic_latents,
+    train_demo,
+)
 from .encoder import VJEPA2Encoder
 from .precompute_latents import (
     precompute,
@@ -34,6 +40,8 @@ __all__ = [
     "fit_pca",
     "apply_pca",
     "inverse_pca",
+    "pca_reduce_splits",
+    "latent_cache_meta",
     "next_step_loss",
     "synthetic_latents",
     "train_demo",

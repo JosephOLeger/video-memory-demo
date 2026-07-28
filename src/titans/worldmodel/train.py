@@ -34,6 +34,20 @@ def load_latents(path: str | Path) -> torch.Tensor:
     return obj["latents"] if isinstance(obj, dict) else obj
 
 
+def latent_cache_meta(path: str | Path) -> dict:
+    """Metadata stored alongside a cached latent tensor (``{}`` for a bare tensor).
+
+    Used to recognise a cache that has already been PCA-reduced by
+    :mod:`titans.worldmodel.make_pca_cache` -- such a cache carries a ``pca`` key,
+    and re-standardising or re-projecting it would silently undo the reduction it
+    was built to provide.
+    """
+    obj = torch.load(path, weights_only=False)
+    if not isinstance(obj, dict):
+        return {}
+    return {k: v for k, v in obj.items() if k != "latents"}
+
+
 def standardize_latents(z: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
     """Per-channel standardisation (mean 0, unit variance) of latents ``[B, T, d]``.
 

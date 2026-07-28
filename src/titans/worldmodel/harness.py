@@ -22,8 +22,9 @@ import torch
 import torch.nn.functional as F
 
 from .ablation import train_stats
+from .bottleneck import pca_reduce_splits
 from .model import WorldModel
-from .train import load_latents
+from .train import latent_cache_meta, load_latents
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -189,6 +190,8 @@ def run_config(
     lr: float = 1e-3,
     device: str = DEVICE,
     standardize: bool = True,
+    pca_k: int | None = None,
+    pca_whiten: bool = True,
     batch_size: int | None = None,
     eval_batch_size: int | None = None,
     eval_max_seqs: int | None = None,
@@ -202,9 +205,37 @@ def run_config(
     val leakage. Returns per-seed train/val L1s, their mean/std, the persistence
     baseline, and the config used. ``val_mean - train_mean`` is the
     generalisation gap.
+
+    ``pca_k`` reduces the latents to a **fixed** ``k``-dim PCA basis fitted on train
+    (:func:`~titans.worldmodel.bottleneck.pca_reduce_splits`) and, unless the caller
+    overrides them, sets ``dim=k`` and ``io_projection=False`` -- i.e. the model runs
+    directly on the reduced data with no learned input/output projection. The PCA
+    centres (and, whitened, rescales) the data, so it *replaces* ``standardize``.
+
+    **Losses under ``pca_k`` live in the PCA space and are not comparable to runs
+    without it** -- including the persistence baseline, which is recomputed in the
+    same space so within-run comparisons stay meaningful.
     """
     train_raw, val_raw = load_latents(train_path), load_latents(val_path)
-    if standardize:
+    pca_info = None
+    pre = latent_cache_meta(train_path)
+    if pca_k is None and "pca" in pre:
+        # Cache already reduced by make_pca_cache: it is centred (and, whitened,
+        # unit-variance), so standardising again would rescale it a second time.
+        # Configure the model for it rather than letting the defaults misread it.
+        pca_info = {"k": int(pre["k"]), "whiten": bool(pre["whiten"]),
+                    "explained": float(pre["explained"]), "prereduced": True}
+        train_z, val_z = train_raw, val_raw
+        model_kwargs.setdefault("dim", pca_info["k"])
+        model_kwargs.setdefault("io_projection", False)
+    elif pca_k is not None:
+        train_z, val_z, pca = pca_reduce_splits(train_raw, val_raw, pca_k,
+                                                whiten=pca_whiten)
+        pca_info = {"k": pca_k, "whiten": pca_whiten, "explained": pca["explained"],
+                    "prereduced": False}
+        model_kwargs.setdefault("dim", pca_k)
+        model_kwargs.setdefault("io_projection", False)
+    elif standardize:
         mean, std = train_stats(train_raw)
         train_z, val_z = _standardize(train_raw, mean, std), _standardize(val_raw, mean, std)
     else:
@@ -231,6 +262,7 @@ def run_config(
         "per_seed": per_seed,
         "baseline_l1": baseline,
         "beats_baseline": va.mean().item() < baseline,
+        "pca": pca_info,
         "config": model_kwargs,
         "device": device,
         "n_seeds": len(per_seed),
@@ -260,10 +292,18 @@ def compare_variants(
 
 def format_comparison(results: dict) -> str:
     """Table of variant -> train & val L1, gen gap, vs the persistence baseline."""
-    baseline = next(iter(results.values()))["baseline_l1"]
-    dev = next(iter(results.values()))["device"]
-    n = next(iter(results.values()))["n_seeds"]
-    lines = [
+    first = next(iter(results.values()))
+    baseline = first["baseline_l1"]
+    dev = first["device"]
+    n = first["n_seeds"]
+    pca = first.get("pca")
+    lines = []
+    if pca:
+        # Loud, because an L1 in PCA space silently looks like an L1 in latent space.
+        lines.append(f"SPACE: PCA k={pca['k']} whiten={pca['whiten']} "
+                     f"(explains {100 * pca['explained']:.1f}% of train variance) "
+                     "-- L1 values are NOT comparable to non-PCA runs")
+    lines += [
         f"device={dev}  seeds={n}  persistence baseline (val) L1={baseline:.4f}",
         "variant              |  train L1  |   val L1 (mean±std)  | gap  | vs base",
         "---------------------+------------+----------------------+------+--------",

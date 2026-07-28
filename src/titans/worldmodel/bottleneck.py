@@ -71,3 +71,33 @@ def inverse_pca(reduced: torch.Tensor, pca: Pca) -> torch.Tensor:
     z = reduced * pca["sv"].to(dev) if pca["whiten"] else reduced
     xs = z @ pca["components"].to(dev)          # [..., D]
     return xs * pca["std"].to(dev) + pca["mean"].to(dev)
+
+
+def pca_reduce_splits(
+    train: torch.Tensor,
+    val: torch.Tensor,
+    k: int,
+    *,
+    whiten: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, Pca]:
+    """Fit a PCA on ``train`` and project both splits into its ``k``-dim basis.
+
+    This is the "just change the dataset" path: the reduction is a **fixed, unlearned
+    basis** applied to the data once, so a model can consume the reduced latents with
+    no input/output projection at all (``WorldModel(io_projection=False)``). Contrast
+    the learned ``in_proj``/``out_proj``, which put most of a small model's parameters
+    into mapping in and out of the 1024-D encoder space.
+
+    Fit is on **train only** -- the val split is projected with the train basis, so
+    there is no leakage, matching the standardisation convention used elsewhere.
+
+    Because the PCA centres the data (and, with ``whiten=True``, sets every component
+    to unit variance), it *replaces* the per-channel standardisation rather than
+    composing with it; applying both would rescale the components a second time.
+
+    Returns ``(train_reduced, val_reduced, pca)``; ``pca["explained"]`` is the
+    fraction of variance the ``k`` kept components carry, which is the honest cost of
+    the reduction and should be reported with any result measured in this space.
+    """
+    pca = fit_pca(train, k, whiten=whiten)
+    return apply_pca(train, pca), apply_pca(val, pca), pca

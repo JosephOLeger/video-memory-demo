@@ -34,6 +34,15 @@ class WorldModel(nn.Module):
     depth: number of stacked :class:`~titans.mac.TitansMACBlock` layers.
     segment_size: ``C`` for every block; the sequence length ``T`` must be a
         multiple of this (the blocks raise a clear error otherwise).
+    io_projection: when ``True`` (default) the model learns ``in_proj``
+        (``latent_dim -> dim``) and ``out_norm``/``out_proj`` (``dim -> latent_dim``).
+        When ``False`` all three become identities and the model operates *directly*
+        in the latent space, which then must already equal ``dim``. Use this with a
+        fixed PCA basis (:mod:`titans.worldmodel.bottleneck`): the dimensionality
+        reduction becomes a property of the *dataset* rather than a learned layer, so
+        no learned linear map sits between the data and the memory. Note the block's
+        own ``out_proj`` residual (§4.4) still supplies a learnable output map inside
+        each MAC block, so this removes the model-level I/O, not all output capacity.
     **block_kwargs: forwarded to each ``TitansMACBlock`` (e.g. ``num_heads``,
         ``num_persistent_tokens``, ``memory_num_layers``).
     """
@@ -44,19 +53,30 @@ class WorldModel(nn.Module):
         dim: int = 128,
         depth: int = 2,
         segment_size: int = 8,
+        io_projection: bool = True,
         **block_kwargs,
     ):
         super().__init__()
         self.latent_dim = latent_dim
         self.dim = dim
+        self.io_projection = io_projection
+        if not io_projection and latent_dim != dim:
+            raise ValueError(
+                f"io_projection=False needs latent_dim == dim, got {latent_dim} != {dim}. "
+                "Reduce the latents first (e.g. bottleneck.pca_reduce_splits(k=dim))."
+            )
 
-        self.in_proj = nn.Linear(latent_dim, dim)
+        self.in_proj = nn.Linear(latent_dim, dim) if io_projection else nn.Identity()
         self.blocks = nn.ModuleList(
             TitansMACBlock(dim, segment_size=segment_size, **block_kwargs)
             for _ in range(depth)
         )
-        self.out_norm = nn.RMSNorm(dim)
-        self.out_proj = nn.Linear(dim, latent_dim)
+        # Both are dropped together when io_projection=False: an RMSNorm with no
+        # following projection would pin every prediction to unit RMS while the
+        # PCA targets keep their own scale -- the same scale mismatch documented
+        # for the memory's `normalize_output`.
+        self.out_norm = nn.RMSNorm(dim) if io_projection else nn.Identity()
+        self.out_proj = nn.Linear(dim, latent_dim) if io_projection else nn.Identity()
 
     def forward(self, z: torch.Tensor, carry=None, return_carry: bool = False,
                 return_features: bool = False):
