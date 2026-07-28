@@ -1,0 +1,115 @@
+"""The [V;V]/[V;W] echo benchmark.
+
+This module produces the project's headline memory metric, so the tests guard the
+parts whose silent breakage would invalidate a whole sweep: the doubling/scoring
+geometry, that the PCA path really removes the learned projections, and that
+pointing at a PCA cache is detected from the data rather than trusted to a flag.
+"""
+
+import json
+
+import pytest
+import torch
+
+from titans.worldmodel.echo import (
+    build_parser, double, per_copy_l1_K, prepare_data, run,
+)
+from titans.worldmodel.make_pca_cache import build
+
+
+def _latents(n=6, t=16, d=32, seed=0):
+    g = torch.Generator().manual_seed(seed)
+    basis = torch.randn(8, d, generator=g)
+    coef = torch.randn(n, t, 8, generator=g)
+    return coef @ basis + 0.05 * torch.randn(n, t, d, generator=g)
+
+
+def _args(train, val, **over):
+    a = build_parser().parse_args(
+        ["--label", "t", "--train", str(train), "--val", str(val),
+         "--horizon", "4", "--steps", "3", "--n-eval", "4", "--dim", "16",
+         "--batch", "2", "--seg", "4"]
+    )
+    for k, v in over.items():
+        setattr(a, k, v)
+    return a
+
+
+def test_double_builds_VV_and_VW():
+    v = torch.arange(2 * 3 * 2).float().reshape(2, 3, 2)
+    w = torch.zeros_like(v)
+    vv, vw = double(v), double(v, w)
+    assert vv.shape == (2, 6, 2) and vw.shape == (2, 6, 2)
+    assert torch.equal(vv[:, :3], v) and torch.equal(vv[:, 3:], v)
+    assert torch.equal(vw[:, 3:], w)
+
+
+def test_per_copy_scores_the_two_halves_separately():
+    """A model that is perfect on the 1st copy and wrong on the 2nd must show it."""
+    T, K, margin = 8, 2, 1
+
+    class Fake(torch.nn.Module):
+        blocks: list = []
+
+        def forward(self, z):
+            out = z.roll(-K, dims=1).clone()   # exact K-step prediction
+            out[:, T:] += 1.0                  # ...but corrupted on the 2nd copy
+            return out
+
+    seq = torch.randn(2, 2 * T, 3)
+    first, second = per_copy_l1_K(Fake(), seq, T, K, reset=False, margin=margin)
+    assert first == pytest.approx(0.0, abs=1e-5)
+    assert second == pytest.approx(1.0, abs=1e-5)
+
+
+def test_prepare_data_standardizes_a_raw_cache(tmp_path):
+    tp, vp = tmp_path / "tr.pt", tmp_path / "va.pt"
+    torch.save({"latents": _latents() * 50 + 10}, tp)
+    torch.save({"latents": _latents(seed=1) * 50 + 10}, vp)
+    tr, va, space = prepare_data(tp, vp)
+    assert space["kind"] == "standardized"
+    assert tr.mean().abs() < 0.1 and abs(tr.std() - 1.0) < 0.2
+
+
+def test_prepare_data_detects_a_pca_cache(tmp_path):
+    tp, vp = tmp_path / "tr.pt", tmp_path / "va.pt"
+    torch.save({"latents": _latents(n=8, d=48)}, tp)
+    torch.save({"latents": _latents(n=4, d=48, seed=1)}, vp)
+    info = build(tp, vp, k=8, out_prefix=tmp_path / "red")
+    tr, va, space = prepare_data(info["train"], info["val"])
+    assert space["kind"] == "pca" and space["k"] == 8
+    assert tr.shape[-1] == 8 and va.shape[-1] == 8
+
+
+def test_pca_run_has_no_learned_io_and_dim_follows_k(tmp_path):
+    """The whole point: on a PCA cache, dim = k and the I/O projections are gone."""
+    tp, vp = tmp_path / "tr.pt", tmp_path / "va.pt"
+    torch.save({"latents": _latents(n=8, t=16, d=48)}, tp)
+    torch.save({"latents": _latents(n=4, t=16, d=48, seed=1)}, vp)
+    info = build(tp, vp, k=8, out_prefix=tmp_path / "red")
+
+    r = run(_args(info["train"], info["val"], dim=999), "cpu")
+    assert r["io_projection"] is False
+    assert r["dim"] == 8          # --dim 999 is ignored; k wins
+    assert r["space"]["kind"] == "pca"
+    for v in (r["content_specificity"], r["mem_effect"], r["pr"]):
+        assert v == v             # not NaN
+
+
+def test_raw_run_keeps_the_learned_io(tmp_path):
+    """Non-PCA path is unchanged, so earlier sweep cells stay comparable."""
+    tp, vp = tmp_path / "tr.pt", tmp_path / "va.pt"
+    torch.save({"latents": _latents(n=8, t=16, d=48)}, tp)
+    torch.save({"latents": _latents(n=4, t=16, d=48, seed=1)}, vp)
+    r = run(_args(tp, vp), "cpu")
+    assert r["io_projection"] is True and r["dim"] == 16
+    assert r["space"]["kind"] == "standardized"
+
+
+def test_result_is_json_serialisable(tmp_path):
+    """Results are written as JSON by the sweep; a non-serialisable field breaks it."""
+    tp, vp = tmp_path / "tr.pt", tmp_path / "va.pt"
+    torch.save({"latents": _latents(n=8, t=16, d=48)}, tp)
+    torch.save({"latents": _latents(n=4, t=16, d=48, seed=1)}, vp)
+    r = run(_args(tp, vp), "cpu")
+    assert json.loads(json.dumps(r))["label"] == "t"
