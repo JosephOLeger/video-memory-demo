@@ -61,6 +61,16 @@ def latent_cache_meta(path: str | Path) -> dict:
     return load_latent_cache(path)[1]
 
 
+def train_stats(z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-channel mean/std over ``(videos, time)`` of the *train* latents.
+
+    Kept separate from :func:`standardize_latents` because the statistics must be
+    fitted on train and then applied to val unchanged -- computing them per split
+    would leak val statistics into the evaluation.
+    """
+    return z.mean(dim=(0, 1), keepdim=True), z.std(dim=(0, 1), keepdim=True)
+
+
 def standardize_latents(z: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
     """Per-channel standardisation (mean 0, unit variance) of latents ``[B, T, d]``.
 

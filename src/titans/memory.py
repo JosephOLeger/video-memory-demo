@@ -41,6 +41,16 @@ code paths comparable for any chunk size, ``forward_naive_sequential`` accepts
 the same ``chunk_size`` and uses the same chunk-start semantics; with
 ``chunk_size=None`` (default) it runs the fully-online recurrence, which equals
 ``forward_chunked(..., chunk_size=1)``.
+
+Cost of the objective (``window_size``, the ATLAS Omega rule -- see
+:class:`NeuralMemory`). ``window_size=1`` is the **default** and is Titans' delta
+rule: the per-token gradient is used directly, with no window machinery at all
+(``_scan_chunked`` takes a dedicated branch), so choosing the cheap objective is
+just leaving the parameter alone. ``window_size=c>1`` adds **no extra backward
+pass** -- the gradient of a sum is the sum of gradients, and every per-token
+gradient is already computed -- but it does add a ``c``-term weighted sum per
+token per weight tensor in the scan, and creates the ``gamma_head`` gates. If a
+run is too slow, dropping to ``window_size=1`` recovers the original cost exactly.
 """
 
 from __future__ import annotations
@@ -483,6 +493,18 @@ class NeuralMemory(nn.Module):
         """Broadcast a per-batch scalar ``coef`` [B] against leaf ``ref`` [B,...]."""
         return coef.view(coef.shape[0], *([1] * (ref.dim() - 1)))
 
+    def _gamma(self, x: torch.Tensor) -> Optional[torch.Tensor]:
+        """Omega per-token pruning gates ``gamma_i`` ``[B, N]`` (``None`` if ``c=1``).
+
+        Every path that runs the windowed objective must call this. ``forward_chunked``
+        previously did not, so with ``c>1`` it summed the window *unweighted* and
+        ``gamma_head`` received no gradient at all -- a parameter that existed, was
+        counted, and did nothing.
+        """
+        if self.window_size <= 1:
+            return None
+        return torch.sigmoid(self.gamma_head(x)).squeeze(-1)
+
     def _step(
         self,
         state: Params,
@@ -736,11 +758,7 @@ class NeuralMemory(nn.Module):
         if x.dim() != 3:
             raise ValueError("update expects x of shape [B, T, d]")
         k, v, _, alpha, eta, theta = self._project(x)
-        gamma = (
-            torch.sigmoid(self.gamma_head(x)).squeeze(-1)
-            if self.window_size > 1
-            else None
-        )
+        gamma = self._gamma(x)
         state, S, _ = self._scan_chunked(
             k, v, alpha, eta, theta, state, S, chunk_size, q=None, gamma=gamma, x=x
         )
@@ -767,19 +785,40 @@ class NeuralMemory(nn.Module):
         x = x.reshape(B, N, d)
 
         k, v, q, alpha, eta, theta = self._project(x)
+        gamma = self._gamma(x)
         grad_fn = self._grad_fn()
         batched_grad = vmap(grad_fn, in_dims=(0, 0, 0))  # over batch B
 
         state = self.memory.init_state(B)
         S = self.init_momentum(state)
         anchor = state  # weights at which gradients are evaluated
+        c = self.window_size
 
         ys = []
         for t in range(N):
             if chunk_size is not None and t % chunk_size == 0:
                 anchor = state  # freeze at chunk start
             grad_state = state if chunk_size is None else anchor
-            g = batched_grad(grad_state, k[:, t], v[:, t])
+            # Omega (ATLAS Eq 9): the gated sum over the last c tokens. Clamped to
+            # the current chunk when chunking, exactly as ``_scan_chunked`` does, so
+            # the two paths stay comparable; with ``chunk_size=None`` the window is
+            # unclamped, which is the fully-online reading of the rule.
+            lo = t - c + 1
+            if chunk_size is not None:
+                lo = max(lo, (t // chunk_size) * chunk_size)
+            lo = max(lo, 0)
+            g = None
+            for i in range(lo, t + 1):
+                gi = batched_grad(grad_state, k[:, i], v[:, i])
+                if gamma is not None:
+                    gi = {key: self._bcast(gamma[:, i], val) * val
+                          for key, val in gi.items()}
+                g = gi if g is None else {key: g[key] + gi[key] for key in gi}
+            if self.window_normalize:
+                mass = (sum(gamma[:, i] for i in range(lo, t + 1))
+                        if gamma is not None else None)
+                g = {key: (val / self._bcast(mass + 1e-6, val) if mass is not None
+                           else val / (t - lo + 1)) for key, val in g.items()}
             state, S = self._step(
                 state, S, g, alpha[:, t], eta[:, t], theta[:, t], x_t=x[:, t]
             )
@@ -812,7 +851,8 @@ class NeuralMemory(nn.Module):
 
         state, S = self.init_memory(B)
         state, _, ys = self._scan_chunked(
-            k, v, alpha, eta, theta, state, S, chunk_size, q=q, x=x
+            k, v, alpha, eta, theta, state, S, chunk_size, q=q,
+            gamma=self._gamma(x), x=x,
         )
 
         Y = torch.stack(ys, dim=1)

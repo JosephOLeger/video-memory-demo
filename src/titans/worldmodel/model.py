@@ -94,9 +94,10 @@ class WorldModel(nn.Module):
 
         With ``return_features=True`` the pre-output-projection features
         ``[B, T, dim]`` are returned instead of the latent prediction, so an
-        alternative output head (e.g. the GMM/MDN head in :mod:`titans.worldmodel.gmm`)
-        can consume them in place of the linear ``out_proj``. The default path is
-        unchanged.
+        alternative output head can consume them in place of the linear
+        ``out_proj``. Nothing in the repo uses this today (it was added for a
+        Gaussian-mixture head that has since been removed); it is kept because it
+        is the natural seam for any future non-L1 output objective.
         """
         if carry is None:
             carry = [(None, None)] * len(self.blocks)

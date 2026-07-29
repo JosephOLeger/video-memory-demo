@@ -57,11 +57,10 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from .ablation import train_stats
 from .atlas import CONFIGS
 from .harness import _standardize, memory_health
 from .model import WorldModel
-from .train import load_latent_cache
+from .train import load_latent_cache, train_stats
 
 
 def double(v: torch.Tensor, w: torch.Tensor | None = None) -> torch.Tensor:

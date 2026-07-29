@@ -21,10 +21,9 @@ from typing import Iterable
 import torch
 import torch.nn.functional as F
 
-from .ablation import train_stats
 from .bottleneck import pca_reduce_splits
 from .model import WorldModel
-from .train import load_latent_cache, load_latents
+from .train import load_latent_cache, load_latents, train_stats
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 

@@ -7,15 +7,20 @@ in the full 1024-D space is wasteful in two ways the project cares about:
 * **Parameters go to I/O, not memory.** With a small model width the `in_proj`
   (``D -> dim``) and `out_proj` (``dim -> D``) dominate the parameter count, so most
   of the model is just projecting in and out of the latent space rather than the
-  long-term memory / attention we study.
-* **The GMM head scales with ``D``.** A ``K``-component diagonal mixture needs
-  ``K*(1+2D)`` outputs; at ``D=1024`` that head alone dwarfs the model.
+  long-term memory we study. Measured with ``sane_ns`` at depth 2: a learned-I/O
+  model at ``dim=64`` puts **51%** of its parameters in those two projections and
+  only 16% in the memory; on a ``k=128`` PCA cache it is **0%** and 33%.
+* **A learned projection co-adapts with the memory**, so "what did the memory
+  learn?" is entangled with "what did the projection choose to show it". A fixed
+  basis removes that degree of freedom.
 
 Fitting a PCA on the *train* latents and modelling in the reduced (optionally
-whitened) ``k``-dim space fixes both: smaller I/O projections, a tractable GMM head,
-a lower-entropy target, and less overfitting -- at the cost of the PCA reconstruction
-error (fixed, ~10-15% variance at ``k=128``). The transform is *fit on train only*
-(no val leakage) and applied to both splits.
+whitened) ``k``-dim space makes the reduction a property of the **dataset**: the
+model can then run with no I/O projection at all
+(:class:`~titans.worldmodel.model.WorldModel` with ``io_projection=False``). The
+cost is the reconstruction error -- measured on the 8000-sequence EgoLife cache,
+``k=128`` keeps 85.7% of the variance and ``k=256`` keeps 92.9%. The transform is
+*fit on train only* (no val leakage) and applied to both splits.
 """
 
 from __future__ import annotations

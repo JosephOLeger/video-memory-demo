@@ -1,15 +1,14 @@
-"""Tests for the synthetic memory benchmark (shapes + a forward/backward)."""
+"""Tests for MQAR, the one token-level memory probe kept (shapes + fwd/bwd)."""
 
 import torch
 
-from titans.membench.tasks import associative_recall, copy_task, needle
+from titans.membench.tasks import associative_recall
 from titans.membench.model import RecallModel
 
 
 def test_task_shapes_and_padding():
     for fn in (lambda: associative_recall(batch=8, num_pairs=4, segment_size=8, seed=0),
-               lambda: copy_task(batch=8, length=10, segment_size=8, seed=0),
-               lambda: needle(batch=8, length=20, segment_size=8, seed=0)):
+               lambda: associative_recall(batch=8, num_pairs=12, segment_size=8, seed=1)):
         b = fn()
         assert b.x.shape == b.y.shape == b.mask.shape
         assert b.x.shape[1] % 8 == 0, "length must be a multiple of segment_size"
@@ -23,8 +22,6 @@ def test_single_answer_per_row_for_recall():
     b = associative_recall(batch=16, num_pairs=5, segment_size=8, seed=1)
     assert (b.mask.sum(dim=1) == 1).all()          # one query answer per row
     assert b.distance.shape == (16,)
-    n = needle(batch=16, length=24, segment_size=8, seed=1)
-    assert (n.mask.sum(dim=1) == 1).all()
 
 
 def test_model_forward_backward():
