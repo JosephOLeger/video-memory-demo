@@ -113,3 +113,48 @@ def test_result_is_json_serialisable(tmp_path):
     torch.save({"latents": _latents(n=4, t=16, d=48, seed=1)}, vp)
     r = run(_args(tp, vp), "cpu")
     assert json.loads(json.dumps(r))["label"] == "t"
+
+
+def test_prefix_swap_scores_identical_content():
+    """[V1;V1] and [V2;V1] must be scored on the very same frames.
+
+    This is the whole point of the prefix-swap probe: the earlier metric compared
+    halves holding *different* content, so its gap confounded "the memory helps"
+    with "one video is harder than the other".
+    """
+    va = _latents(n=4, t=8, d=6, seed=11)
+    other = torch.roll(va, 1, 0)
+    vv, cross = double(va), double(other, va)
+    T = va.shape[1]
+    assert torch.equal(vv[:, T:], cross[:, T:])       # same second half
+    assert not torch.equal(vv[:, :T], cross[:, :T])   # different prefix
+    # and the prefix really is another video, not a shift of the same one
+    assert torch.equal(cross[:, :T], torch.roll(va, 1, 0))
+
+
+def test_memory_gain_is_zero_when_the_prefix_cannot_matter():
+    """A memoryless predictor must score identically under both prefixes."""
+    T, K, margin = 8, 2, 1
+
+    class Memoryless(torch.nn.Module):
+        blocks: list = []
+
+        def forward(self, z):
+            return z.roll(-K, dims=1)     # depends only on the local window
+
+    va = _latents(n=4, t=T, d=5, seed=12)
+    other = torch.roll(va, 1, 0)
+    m = Memoryless()
+    _, rep = per_copy_l1_K(m, double(va), T, K, reset=False, margin=margin)
+    _, cro = per_copy_l1_K(m, double(other, va), T, K, reset=False, margin=margin)
+    assert rep == pytest.approx(cro, abs=1e-6)        # memory_gain == 0
+
+
+def test_run_reports_the_prefix_swap_fields(tmp_path):
+    tp, vp = tmp_path / "tr.pt", tmp_path / "va.pt"
+    torch.save({"latents": _latents(n=8, t=16, d=48)}, tp)
+    torch.save({"latents": _latents(n=4, t=16, d=48, seed=1)}, vp)
+    r = run(_args(tp, vp), "cpu")
+    assert r["second_repeat"] == r["second"]
+    assert r["memory_gain"] == pytest.approx(r["second_cross"] - r["second_repeat"])
+    assert r["second_cross"] == r["second_cross"]     # not NaN

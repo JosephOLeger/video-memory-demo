@@ -12,14 +12,26 @@ second should be easier. Two controls make the reading unambiguous:
 ``second_memoff``  the same weights with ``reset_memory_each_segment=True``, so
                    nothing crosses a segment boundary. ``mem_effect = second_memoff
                    - second > 0`` means the threaded memory helps at all.
-``second_VW``      the second half is a **different** video ``W``. This is the one
-                   that matters: a memory that merely learned "video dynamics are
-                   smooth" helps just as much on ``W``, while a memory that stored
-                   *this* content does not. Hence the headline metric
 
-                       content_specificity = second_VW - second     (larger = better)
+**The prefix-swap probe (headline).** Score the *same* content under two different
+prefixes, so nothing but the memory's contents differs:
 
-which is the project's current ranking metric for memory variants.
+    [V1 ; V1]   second half = V1, and the memory has just seen V1
+    [V2 ; V1]   second half = V1, but the memory has seen an unrelated V2
+
+Both are pure inference on one trained model, and both are scored on positions
+``T..2T`` — the *identical* frames of ``V1``. Hence
+
+    memory_gain = second_cross - second_repeat       (larger = better)
+
+If the memory retained V1, predicting V1 must be easier when V1 is what it holds.
+
+This replaces an earlier metric, ``content_specificity = second_VW - second``, which
+compared predicting ``W`` after ``V`` against predicting ``V`` after ``V``. There the
+two scored halves held *different content*, so the gap confounded "the memory helps"
+with "W happens to be harder to predict than V". ``second_VW`` is still reported so
+the 75 cells already measured with it stay comparable, but it is no longer the
+metric to rank on.
 
 **PCA mode.** Pointed at a cache written by :mod:`titans.worldmodel.make_pca_cache`,
 the model runs directly on the fixed PCA basis with **no learned input/output
@@ -140,10 +152,13 @@ def run(a, device) -> dict:
         loss = F.l1_loss(model(z)[:, :-K], z[:, K:])
         opt.zero_grad(); loss.backward(); opt.step()
     va = va[:a.n_eval]
-    vv = double(va)
-    vw = double(va, torch.roll(va, 1, 0))
+    other = torch.roll(va, 1, 0)          # a different held-out video per row
+    vv = double(va)                       # [V1 ; V1]
+    cross = double(other, va)             # [V2 ; V1]  -- same second half as vv
+    vw = double(va, other)                # [V1 ; V2]  -- legacy, different 2nd half
     f, s = per_copy_l1_K(model, vv, T, K, reset=False)
     _, s_off = per_copy_l1_K(model, vv, T, K, reset=True)
+    _, s_cross = per_copy_l1_K(model, cross, T, K, reset=False)
     _, s_vw = per_copy_l1_K(model, vw, T, K, reset=False)
     h = memory_health(model, va[:4])
     return dict(label=a.label, seed=a.seed, horizon=K, T=T, seg=a.seg,
@@ -155,8 +170,12 @@ def run(a, device) -> dict:
                 params=sum(p.numel() for p in model.parameters()),
                 first=f, second=s, echo_gain=f - s,
                 second_memoff=s_off, echo_gain_memoff=f - s_off,
+                # prefix-swap probe: identical scored content, only the prefix differs
+                second_repeat=s, second_cross=s_cross,
+                memory_gain=s_cross - s,           # >0 => the memory retained V1
+                # legacy metric, kept so the 75 [V;W] cells stay comparable
                 second_VW=s_vw,
-                content_specificity=s_vw - s,     # >0 => memory is content-specific
+                content_specificity=s_vw - s,
                 mem_effect=s_off - s,              # >0 => threaded memory helps
                 pr=h["pr"])
 
@@ -195,10 +214,11 @@ def main() -> None:
     tag = (f"PCA k={sp['k']}" if sp["kind"] == "pca" else "standardized")
     print(f"[{r['elapsed_s']:.0f}s] {a.label} K={r['horizon']} s{r['seed']} "
           f"seg={r['seg']} dim={r['dim']} [{tag}] PR={r['pr']:.1f}", flush=True)
-    print(f"  content_specificity {r['content_specificity']:+.4f}  "
-          f"mem_effect {r['mem_effect']:+.4f}  "
-          f"(2nd={r['second']:.4f} VW={r['second_VW']:.4f} off={r['second_memoff']:.4f})",
-          flush=True)
+    print(f"  memory_gain {r['memory_gain']:+.4f}  "
+          f"(repeat={r['second_repeat']:.4f} cross={r['second_cross']:.4f})", flush=True)
+    print(f"  mem_effect {r['mem_effect']:+.4f}  "
+          f"content_specificity {r['content_specificity']:+.4f} (legacy)  "
+          f"off={r['second_memoff']:.4f}", flush=True)
     if a.out:
         Path(a.out).write_text(json.dumps(r, indent=2))
     print(f"DONE {a.label} K{r['horizon']} s{r['seed']}", flush=True)
