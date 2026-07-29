@@ -92,7 +92,7 @@ def test_pca_run_has_no_learned_io_and_dim_follows_k(tmp_path):
     assert r["io_projection"] is False
     assert r["dim"] == 8          # --dim 999 is ignored; k wins
     assert r["space"]["kind"] == "pca"
-    for v in (r["content_specificity"], r["mem_effect"], r["pr"]):
+    for v in (r["memory_gain"], r["mem_effect"], r["pr"]):
         assert v == v             # not NaN
 
 

@@ -26,12 +26,13 @@ Both are pure inference on one trained model, and both are scored on positions
 
 If the memory retained V1, predicting V1 must be easier when V1 is what it holds.
 
-This replaces an earlier metric, ``content_specificity = second_VW - second``, which
-compared predicting ``W`` after ``V`` against predicting ``V`` after ``V``. There the
-two scored halves held *different content*, so the gap confounded "the memory helps"
-with "W happens to be harder to predict than V". ``second_VW`` is still reported so
-the 75 cells already measured with it stay comparable, but it is no longer the
-metric to rank on.
+An earlier metric, ``content_specificity = second_VW - second``, compared predicting
+``W`` after ``V`` against predicting ``V`` after ``V``. Those two scored halves held
+*different content*, so the gap confounded "the memory helps" with "W happens to be
+harder to predict than V" -- the probe above exists precisely to remove that
+confound, and the old one has been deleted rather than kept as a second ranking.
+Result files produced before this change still carry the old field; they are
+historical data and are not comparable to ``memory_gain``.
 
 **PCA mode.** Pointed at a cache written by :mod:`titans.worldmodel.make_pca_cache`,
 the model runs directly on the fixed PCA basis with **no learned input/output
@@ -155,11 +156,9 @@ def run(a, device) -> dict:
     other = torch.roll(va, 1, 0)          # a different held-out video per row
     vv = double(va)                       # [V1 ; V1]
     cross = double(other, va)             # [V2 ; V1]  -- same second half as vv
-    vw = double(va, other)                # [V1 ; V2]  -- legacy, different 2nd half
     f, s = per_copy_l1_K(model, vv, T, K, reset=False)
     _, s_off = per_copy_l1_K(model, vv, T, K, reset=True)
     _, s_cross = per_copy_l1_K(model, cross, T, K, reset=False)
-    _, s_vw = per_copy_l1_K(model, vw, T, K, reset=False)
     h = memory_health(model, va[:4])
     return dict(label=a.label, seed=a.seed, horizon=K, T=T, seg=a.seg,
                 cascade=a.cascade, reservoirs=a.reservoirs if a.cascade else 0,
@@ -173,9 +172,6 @@ def run(a, device) -> dict:
                 # prefix-swap probe: identical scored content, only the prefix differs
                 second_repeat=s, second_cross=s_cross,
                 memory_gain=s_cross - s,           # >0 => the memory retained V1
-                # legacy metric, kept so the 75 [V;W] cells stay comparable
-                second_VW=s_vw,
-                content_specificity=s_vw - s,
                 mem_effect=s_off - s,              # >0 => threaded memory helps
                 pr=h["pr"])
 
@@ -215,10 +211,8 @@ def main() -> None:
     print(f"[{r['elapsed_s']:.0f}s] {a.label} K={r['horizon']} s{r['seed']} "
           f"seg={r['seg']} dim={r['dim']} [{tag}] PR={r['pr']:.1f}", flush=True)
     print(f"  memory_gain {r['memory_gain']:+.4f}  "
-          f"(repeat={r['second_repeat']:.4f} cross={r['second_cross']:.4f})", flush=True)
-    print(f"  mem_effect {r['mem_effect']:+.4f}  "
-          f"content_specificity {r['content_specificity']:+.4f} (legacy)  "
-          f"off={r['second_memoff']:.4f}", flush=True)
+          f"(repeat={r['second_repeat']:.4f} cross={r['second_cross']:.4f})  "
+          f"mem_effect {r['mem_effect']:+.4f}", flush=True)
     if a.out:
         Path(a.out).write_text(json.dumps(r, indent=2))
     print(f"DONE {a.label} K{r['horizon']} s{r['seed']}", flush=True)
