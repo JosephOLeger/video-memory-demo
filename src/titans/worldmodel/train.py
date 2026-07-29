@@ -34,18 +34,31 @@ def load_latents(path: str | Path) -> torch.Tensor:
     return obj["latents"] if isinstance(obj, dict) else obj
 
 
-def latent_cache_meta(path: str | Path) -> dict:
-    """Metadata stored alongside a cached latent tensor (``{}`` for a bare tensor).
+def load_latent_cache(path: str | Path) -> tuple[torch.Tensor, dict]:
+    """Load a cache once, returning ``(latents, metadata)``.
 
-    Used to recognise a cache that has already been PCA-reduced by
-    :mod:`titans.worldmodel.make_pca_cache` -- such a cache carries a ``pca`` key,
-    and re-standardising or re-projecting it would silently undo the reduction it
-    was built to provide.
+    Prefer this over calling :func:`load_latents` and :func:`latent_cache_meta`
+    separately: ``torch.load`` deserialises the whole file, so two calls read the
+    tensor twice -- 1.5 GB of redundant I/O per job on the full EgoLife cache.
+
+    ``metadata`` is every non-``latents`` key of the saved dict (``{}`` for a bare
+    tensor). A cache reduced by :mod:`titans.worldmodel.make_pca_cache` carries a
+    ``pca`` key, which is how callers recognise that re-standardising or
+    re-projecting it would silently undo the reduction it was built to provide.
     """
     obj = torch.load(path, weights_only=False)
     if not isinstance(obj, dict):
-        return {}
-    return {k: v for k, v in obj.items() if k != "latents"}
+        return obj, {}
+    return obj["latents"], {k: v for k, v in obj.items() if k != "latents"}
+
+
+def latent_cache_meta(path: str | Path) -> dict:
+    """Metadata of a cached latent tensor (``{}`` for a bare tensor).
+
+    Convenience wrapper; use :func:`load_latent_cache` when the tensor is wanted
+    too, so the file is read once rather than twice.
+    """
+    return load_latent_cache(path)[1]
 
 
 def standardize_latents(z: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:

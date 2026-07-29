@@ -15,6 +15,7 @@ from .gmm import GMMHead, gmm_nll, gmm_log_prob, mixture_mean, dominant_mean
 from .bottleneck import fit_pca, apply_pca, inverse_pca, pca_reduce_splits
 from .train import (
     latent_cache_meta,
+    load_latent_cache,
     load_latents,
     next_step_loss,
     synthetic_latents,
@@ -42,6 +43,7 @@ __all__ = [
     "inverse_pca",
     "pca_reduce_splits",
     "latent_cache_meta",
+    "load_latent_cache",
     "next_step_loss",
     "synthetic_latents",
     "train_demo",

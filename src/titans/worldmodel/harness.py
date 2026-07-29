@@ -24,7 +24,7 @@ import torch.nn.functional as F
 from .ablation import train_stats
 from .bottleneck import pca_reduce_splits
 from .model import WorldModel
-from .train import latent_cache_meta, load_latents
+from .train import load_latent_cache, load_latents
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -216,9 +216,9 @@ def run_config(
     without it** -- including the persistence baseline, which is recomputed in the
     same space so within-run comparisons stay meaningful.
     """
-    train_raw, val_raw = load_latents(train_path), load_latents(val_path)
+    train_raw, pre = load_latent_cache(train_path)
+    val_raw = load_latents(val_path)
     pca_info = None
-    pre = latent_cache_meta(train_path)
     if pca_k is None and "pca" in pre:
         # Cache already reduced by make_pca_cache: it is centred (and, whitened,
         # unit-variance), so standardising again would rescale it a second time.

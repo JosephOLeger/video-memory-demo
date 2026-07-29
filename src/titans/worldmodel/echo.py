@@ -61,7 +61,7 @@ from .ablation import train_stats
 from .atlas import CONFIGS
 from .harness import _standardize, memory_health
 from .model import WorldModel
-from .train import latent_cache_meta, load_latents
+from .train import load_latent_cache
 
 
 def double(v: torch.Tensor, w: torch.Tensor | None = None) -> torch.Tensor:
@@ -117,8 +117,8 @@ def prepare_data(train_path, val_path):
     fitted on train. ``space`` describes which, and carries ``dim``/``io_projection``
     for the model.
     """
-    tr, va = load_latents(train_path), load_latents(val_path)
-    meta = latent_cache_meta(train_path)
+    tr, meta = load_latent_cache(train_path)
+    va, _ = load_latent_cache(val_path)
     if "pca" in meta:
         space = {"kind": "pca", "k": int(meta["k"]), "whiten": bool(meta["whiten"]),
                  "explained": float(meta["explained"]),
