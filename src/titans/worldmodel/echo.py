@@ -95,6 +95,8 @@ def per_copy_l1_K(model, seq, T, K, reset, batch=8, margin=4):
 def build_cfg(a) -> dict:
     """SANE-only base (`sane_ns`) plus the cascade overrides the sweep varies."""
     cfg = dict(CONFIGS["sane_ns"])            # healthy no-cascade SANE base
+    if getattr(a, "eta_init", None) is not None:
+        cfg["eta_init"] = a.eta_init
     if a.cascade:
         cfg["memory_use_cascade"] = True
         cfg["cascade_reservoirs"] = a.reservoirs
@@ -165,6 +167,7 @@ def run(a, device) -> dict:
                 readout=(a.readout if a.cascade else None),
                 topology=(a.topology if a.cascade else None),
                 dim=dim, io_projection=io_projection, space=space,
+                eta_init=getattr(a, "eta_init", None),
                 params=sum(p.numel() for p in model.parameters()),
                 first=f, second=s, echo_gain=f - s,
                 second_memoff=s_off, echo_gain_memoff=f - s_off,
@@ -195,6 +198,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--selective", action="store_true")
     ap.add_argument("--gate", default="content")
     ap.add_argument("--topology", default="chain")
+    ap.add_argument("--eta-init", type=float, default=None, dest="eta_init",
+                    help="resting momentum decay; horizon in tokens is 1/(1-eta)")
     ap.add_argument("--out", default=None)
     return ap
 

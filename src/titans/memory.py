@@ -315,6 +315,7 @@ class NeuralMemory(nn.Module):
         normalize_qk: "bool | str" = False,
         normalize_output: bool = True,
         alpha_init: Optional[float] = None,
+        eta_init: Optional[float] = None,
     ):
         super().__init__()
         # ATLAS Table 7 specifies the memory MLP as 2 layers, expansion factor 4,
@@ -449,6 +450,32 @@ class NeuralMemory(nn.Module):
                 raise ValueError("alpha_init must be in (0, 1)")
             with torch.no_grad():
                 self.alpha_head.bias.fill_(math.log(alpha_init / (1 - alpha_init)))
+
+        # eta_init sets the momentum decay's resting value, the exact counterpart of
+        # alpha_init -- and it addresses the same defect, which had gone unnoticed on
+        # this gate.
+        #
+        # With no bias init, eta = sigmoid(0) = 0.5, so S_t = eta S_{t-1} - theta g_t
+        # has an effective horizon 1/(1 - eta) of ~2 tokens: the momentum forgets a
+        # gradient after two steps. Measured on a SANE model, alpha's half-life is
+        # ~346 tokens while eta's horizon sits at 2.1 -- the forget gate was fixed and
+        # the momentum gate was not, so the memory's *accumulation* stayed short-range
+        # no matter how long its retention became.
+        #
+        # This is the hypothesis the metaplastic cascade may simply have been
+        # compensating for: a K-reservoir cascade supplies long timescales that the
+        # scalar momentum structurally never had -- not because a scalar cannot have
+        # them, but because nothing ever set eta's resting value.
+        #
+        # Horizon in tokens is 1/(1 - eta). Note the tradeoff: eta -> 1 removes the
+        # momentum's own decay, so under sustained same-sign gradients S grows roughly
+        # linearly in sequence length, and the only remaining damping is the (1 - alpha)
+        # forget gate -- which alpha_init has deliberately made very weak.
+        if eta_init is not None:
+            if not 0.0 < eta_init < 1.0:
+                raise ValueError("eta_init must be in (0, 1)")
+            with torch.no_grad():
+                self.eta_head.bias.fill_(math.log(eta_init / (1 - eta_init)))
 
     # ------------------------------------------------------------------ utils
     def _grad_fn(self):
