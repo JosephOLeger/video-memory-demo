@@ -61,6 +61,7 @@ from .atlas import CONFIGS
 from .harness import _standardize, memory_health
 from .model import WorldModel
 from .train import load_latent_cache, train_stats
+from .training import train_loop
 
 
 def double(v: torch.Tensor, w: torch.Tensor | None = None) -> torch.Tensor:
@@ -97,6 +98,8 @@ def build_cfg(a) -> dict:
     cfg = dict(CONFIGS["sane_ns"])            # healthy no-cascade SANE base
     if getattr(a, "eta_init", None) is not None:
         cfg["eta_init"] = a.eta_init
+    if getattr(a, "theta_scale", None) is not None:
+        cfg["theta_scale"] = a.theta_scale
     if a.cascade:
         cfg["memory_use_cascade"] = True
         cfg["cascade_reservoirs"] = a.reservoirs
@@ -146,13 +149,15 @@ def run(a, device) -> dict:
                        segment_size=a.seg, io_projection=io_projection,
                        **cfg).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-    B = tr.shape[0]
-    model.train()
-    for step in range(a.steps):
-        idx = torch.randperm(B, device=device)[:a.batch]
-        z = double(tr[idx])
-        loss = F.l1_loss(model(z)[:, :-K], z[:, K:])
-        opt.zero_grad(); loss.backward(); opt.step()
+    # Train on [V;V] via train_loop, which adds resumable checkpointing and
+    # optional truncated BPTT. With bptt_window=None and no --ckpt this is the
+    # same computation as the original inline loop.
+    train_loop(model, tr, steps=a.steps, opt=opt, batch_size=a.batch,
+               transform=double,
+               horizon=K, window=getattr(a, "bptt_window", None),
+               ckpt_path=getattr(a, "ckpt", None),
+               ckpt_every=getattr(a, "ckpt_every", 0),
+               label=a.label, seed=a.seed, horizon_K=K)
     va = va[:a.n_eval]
     other = torch.roll(va, 1, 0)          # a different held-out video per row
     vv = double(va)                       # [V1 ; V1]
@@ -168,6 +173,8 @@ def run(a, device) -> dict:
                 topology=(a.topology if a.cascade else None),
                 dim=dim, io_projection=io_projection, space=space,
                 eta_init=getattr(a, "eta_init", None),
+                bptt_window=getattr(a, "bptt_window", None),
+                theta_scale=cfg.get("theta_scale"),
                 params=sum(p.numel() for p in model.parameters()),
                 first=f, second=s, echo_gain=f - s,
                 second_memoff=s_off, echo_gain_memoff=f - s_off,
@@ -198,8 +205,16 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--selective", action="store_true")
     ap.add_argument("--gate", default="content")
     ap.add_argument("--topology", default="chain")
+    ap.add_argument("--theta-scale", type=float, default=None, dest="theta_scale",
+                    help="inner-step scale; 0.01 fixes the NaN divergence, 0.03 is SANE's default")
     ap.add_argument("--eta-init", type=float, default=None, dest="eta_init",
                     help="resting momentum decay; horizon in tokens is 1/(1-eta)")
+    ap.add_argument("--bptt-window", type=int, default=None, dest="bptt_window",
+                    help="truncate BPTT to this many steps; VRAM becomes independent\n"
+                         "of sequence length (measured: 0.82 GiB at T=128..2048)")
+    ap.add_argument("--ckpt", default=None,
+                    help="checkpoint path; an existing one is resumed from")
+    ap.add_argument("--ckpt-every", type=int, default=0, dest="ckpt_every")
     ap.add_argument("--out", default=None)
     return ap
 

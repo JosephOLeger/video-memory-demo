@@ -66,6 +66,13 @@ CONFIGS: dict[str, dict] = {
     "sane": {**SANE},
     "sane_ns": {**SANE, **MUON, "learned_qk_scale": True},
     "sane_ns_cascade": {**SANE, **MUON, "learned_qk_scale": True, **CASCADE},
+    # SANE with the inner step halved. normalize_output=False makes the inner
+    # loop diverge to NaN on ~13% of seeds -- abruptly, inside a single forward,
+    # with no precursor (see README 8.5). theta_scale=0.01 prevented it on MQAR
+    # without restoring the output norm, which is what SANE deliberately removes.
+    # Note theta already sat ~10x INSIDE ATLAS's 2/lambda_max bound when it
+    # diverged, so this margin is empirical, not the paper's condition.
+    "sane_ns_theta01": {**SANE, **MUON, "learned_qk_scale": True, "theta_scale": 0.01},
     # Union of both tasks' winners: the full ATLAS stack, the cascade, and the
     # gate/normalisation set. Note SANE removes the output RMSNorm, which on MQAR
     # killed one seed in four -- on continuous regression that is more exposed,
