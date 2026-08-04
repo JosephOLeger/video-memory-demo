@@ -302,6 +302,17 @@ A second control, `mem_effect = second_memoff − second`, re-runs the same weig
 with `reset_memory_each_segment=True` so nothing crosses a segment boundary: `> 0`
 means the threaded memory helps at all.
 
+> **Train this with full BPTT.** A read at position `T+j` in copy 2 and the write at
+> position `j` it must credit are exactly `T` apart, and `tbptt_step` detaches the
+> carry at every window boundary — so **any `--bptt-window <= T` severs every
+> read/write pair** and the benchmark measures nothing. It is not enough for the
+> window merely to *cross* the copy boundary. Measured: at `T=144` with
+> `--bptt-window 120`, `memory_gain` collapsed from +0.215 to +0.032 on all arms at
+> once, with the echo itself gone (`first` 0.690 → `second` 0.684, against
+> 0.675 → 0.542 when trained correctly). The lever against VRAM is `T`, via
+> `crop_cache.py` — never the window. Windowing stays fine for ordinary next-latent
+> training, where the useful dependencies are short.
+
 > **Superseded metric.** An earlier version ranked on
 > `content_specificity = second_VW − second`, comparing predicting `W` after `V`
 > against predicting `V` after `V`. Those two scored halves hold *different
@@ -336,7 +347,7 @@ as a diagnostic of *what broke*, not as a target.
 
 ```bash
 pip install -e '.[test]'
-pytest                       # 124 tests
+pytest                       # 150 tests
 ```
 
 Beyond shapes and trainability, the suite guards the properties that turned out to
@@ -513,6 +524,41 @@ the same NaN bit-for-bit, so a failed cell must be replaced with a *different* s
 never retried. It affected ~13 % of echo-sweep cells, and it is what invalidated an
 earlier capacity sweep — so **memory capacity remains unmeasured**.
 
+### 8.6 Initialising the momentum gate matches a whole cascade — and it replicates
+
+On `memory_gain` (§6.1), `T=64`, `K=24`, full BPTT, batch 8, 2500 steps, PCA `k=128`.
+`nocas_eta10` is `nocas` plus one changed bias: `--eta-init 0.9`, i.e. a momentum
+horizon `1/(1-η)` of 10 tokens instead of the default 2.1. Permutation tests, paired
+by seed. **0 NaN in either sweep** — the PCA representation appears to suppress §8.5.
+
+| arm | small corpus, 0.38 M latents (n=24) | full EgoLife, 2.80 M latents (n=8) |
+|---|---|---|
+| `nocas` | +0.2154 ± 0.0249 | +0.1666 ± 0.0120 |
+| `nocas_eta10` | +0.2377 (**+0.0223**, p=0.0027) | +0.2236 (**+0.0571**, p=0.008) |
+| `cas_tag` | +0.2475 (**+0.0321**, p=0.0002) | +0.2063 (**+0.0397**, p=0.016) |
+| `eta_init` − cascade | −0.0098, p=0.20 **ns** | +0.0173, p=0.29 **ns** |
+
+Three readings:
+
+1. **One bias buys what the architecture buys.** Both beat the baseline in both
+   sweeps, and the two are never distinguishable from each other — at 7× the data
+   the sign of their gap even flips, which is what "indistinguishable" looks like.
+   This generalises the `alpha_init`/SANE lesson (§8.1): gains credited to
+   multi-timescale machinery are largely recoverable by initialising the gates that
+   are already there. `η` had gone unfixed while `α` was fixed, so the memory's
+   *accumulation* stayed short-range however long its retention became.
+2. **The effect grows with scale.** What moved is the baseline: `nocas` fell 23 %
+   while `nocas_eta10` fell 6 %. The harder corpus punishes the un-tuned gate, so
+   this does not wash out — the usual worry about a small-corpus result.
+3. **`eta_init` carries more seed variance** (SD 0.0295 against 0.0120), so it buys
+   a higher mean at a wider spread.
+
+**Caveat.** The two corpora differ on two axes at once: 7.3× more latents *and*
+208 ms per latent instead of 469 ms. The baseline's drop could be the finer
+resolution rather than the volume; separating them needs a run at matched
+resolution. And "not significantly different" is not "equal" — resolving the
+residual gap at 3 SE would need ~120 seeds per arm.
+
 ## 9. Data/parameter proportions: an accepted deviation
 
 ATLAS trains at **40-88 tokens per parameter** (Table 7). Our video corpus is
@@ -564,6 +610,54 @@ over several seeds and reports `mean ± std`, plus the **persistence baseline**
 (`ẑ[t+1] = z[t]`) so a number means something; `compare_variants` /
 `format_comparison` tabulate several configs, with the train/val gap flagging
 overfitting (data-limited) against underfitting.
+
+### Preparing a corpus
+
+```bash
+# encode the full corpus into resumable shards (one GPU slice per process)
+python -m titans.worldmodel.encode_egolife --split train --out-dir cache/egolife_full --gpu-slice 0/4
+
+# fit the PCA basis on train only, in O(d^2) memory, and write both reduced caches
+python -m titans.worldmodel.sharded --shard-dir cache/egolife_full --k 128 \
+    --out-prefix cache/egolife_full_pca
+
+# cut to shorter sequences so [V;V] fits under FULL BPTT (see §6.1)
+python -m titans.worldmodel.crop_cache --src cache/egolife_full_pca128_train.pt \
+    --dst cache/egolife_full_pca128_T64_train.pt --T 64
+```
+
+### Running a sweep on the shared box
+
+Write one command per line into a queue file, then let a cron-driven pool drain it:
+
+```bash
+# 1. size the guard on the HEAVIEST arm -- never extrapolate from the lightest
+python -m titans.worldmodel.measure_vram --train ...T64_train.pt --val ...T64_val.pt \
+    --horizon 24 --batch 8
+#    nocas 6.36 / nocas_eta10 6.36 / cas_tag 9.34 GiB  -> guard 13000 MiB
+
+# 2. eight workers, two per card, restored every ten minutes if any die
+JOBS=jobs_ref64.txt GUARD=13000 PREFIX=S bash scripts/keepalive.sh
+crontab -l | { cat; echo "*/10 * * * * JOBS=jobs_ref64.txt GUARD=13000 PREFIX=S /bin/bash \$HOME/work/titans-mac/scripts/keepalive.sh"; } | crontab -
+```
+
+`scripts/pool4.sh` is the worker: a free-VRAM guard, one requeue on failure then a
+drop, and a per-job timeout so a hung job cannot hold a card for days. Two hard-won
+details are baked into it, both of which have cost whole sweeps:
+
+* **The guard must be sized on the heaviest arm.** `cas_tag` needs +47 % over
+  `nocas` — from `--readout gated` and `--selective`, about +24 % each; the cascade
+  *reservoirs* are nearly free. A guard set from `nocas` puts two heavy jobs on one
+  card. Cost: 74 jobs (2026-07-29), 22 (07-31).
+* **The guard is a check-then-act race.** Workers polling a cold pool in the same
+  second all read the card as free and all launch. `pool4.sh` holds a per-card
+  `flock` across *read free → pop job → let it allocate* (`SETTLE=120 s`), so the
+  second worker on a card reads a post-allocation number.
+
+Swapping a running pool is safe: `kill` the `pool4.sh` **parent** (not the process
+group) and its `timeout … python …` child survives to finish and write its JSON,
+while the worker stops pulling new work. Give the replacements a new `PREFIX` or the
+keepalive's `pgrep` will think they are already running.
 
 ## 11. Not built
 
