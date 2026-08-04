@@ -12,3 +12,17 @@ dist/
 results/smoke_results.json
 results/*_smoke*.json
 .claude/
+
+# Sweep artefacts on the workstation. These are outputs, not sources: the caches and
+# checkpoints are large (the encoded corpus alone is 19 GB) and the box holds the only
+# copy, so a checkout there must never touch them. Keeping them ignored is what makes
+# `git reset --hard` safe on the box.
+cache/
+ckpt/
+logs/
+archive/
+jobs_*.txt
+jobs_*.txt.lock
+echo_*.json
+ablation_*.json
+nan_diag*/
