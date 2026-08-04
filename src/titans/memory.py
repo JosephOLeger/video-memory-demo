@@ -125,6 +125,7 @@ def mlp_forward(
     activation: str = "silu",
     residual: bool = False,
     normalize_output: bool = True,
+    normalize_hidden: "bool | float" = False,
 ) -> torch.Tensor:
     """Pure functional forward of the memory MLP for a *single* example.
 
@@ -161,12 +162,55 @@ def mlp_forward(
     essentially ``M(k)``, and the gradient carries almost no information about
     ``v``: the associative rule stops associating. Prefer ``normalize_qk`` on
     :class:`NeuralMemory`, which is what the paper actually does.
+
+    ``normalize_hidden`` **L2**-normalises every hidden activation, which is the
+    stability fix the theory note asks for and ``normalize_output`` is not.
+
+    For the last layer's parameter block the Gauss-Newton curvature is exactly
+    ``lambda_max(H_GN^(W1)) = 2 ||h_0||^2`` where ``h_0 = sigma(W_0 k + b_0)`` is
+    the input to that layer. ``normalize_qk`` pins ``||k|| = 1`` -- the *input* to
+    the memory -- and therefore bounds the wrong Gram matrix: ``h_0`` is computed
+    from online-updated weights and is free to grow inside the inner loop. Pinning
+    ``||h_0||_2 = 1`` makes that curvature exactly ``2``, a constant.
+
+    Why L2 and not RMS: an RMSNorm leaves ``||h_0|| = sqrt(d_h)``, about 22 at
+    ATLAS's expansion 4, against a predicted instability threshold near ``2``. RMS
+    would not bound the quantity that matters.
+
+    Pass a float to choose the target norm; ``True`` means 1.0. This is not
+    cosmetic. At initialisation ``||h_0|| ~ 0.3``, so normalising to 1 *raises* the
+    resting curvature by ~10x while capping it -- the fix is a ceiling, not a
+    reduction, and a ceiling of 1 sits only a factor ~2 below the predicted
+    threshold of 1.97. A smaller target keeps the resting point where it was. The
+    counter-pressure is that ``M(k) = W_1 h_0 + b_1`` must still reach ``||v||``, so
+    shrinking ``h_0`` pushes scale into ``W_1``, which inflates the *first* layer's
+    curvature bound ``2 ||k||^2 ||W_1 diag(sigma')||^2``. Where that trade-off sits
+    is an empirical question.
+
+    Unlike ``normalize_output`` this costs nothing in associative signal: ``M(k) =
+    W_1 h_0 + b_1`` keeps its scale free, so ``W_1`` can still shrink to match
+    ``||v|| ~ 0.01``, and the residual ``M(k) - v`` keeps carrying information
+    about ``v``. What is given up is narrower: ``h_0``'s *magnitude* can no longer
+    carry information, only its direction.
+
+    It also damps the first layer's block as a side effect -- the normalisation's
+    Jacobian ``(I - h h^T / ||h||^2) / ||h||`` shrinks as ``||h||`` grows -- but
+    that block's curvature ``<= 2 ||k||^2 ||W_1 diag(sigma')||^2`` still depends on
+    ``||W_1||``, which nothing here bounds. Only the last layer is bounded *by
+    construction*; whether that suffices is the empirical question.
     """
     h = x
     for i in range(num_layers):
         h = h @ params[f"w{i}"].transpose(-1, -2) + params[f"b{i}"]
         if i < num_layers - 1:
             h = F.gelu(h) if activation == "gelu" else F.silu(h)
+            if normalize_hidden:
+                # For the 2-layer memory both papers specify, this single site is
+                # h_0 -- the input to the last layer. Normalising every hidden
+                # activation generalises that to deeper memories without changing
+                # the L=2 case.
+                target = 1.0 if normalize_hidden is True else float(normalize_hidden)
+                h = target * h / (h.pow(2).sum(dim=-1, keepdim=True).sqrt() + 1e-6)
     if residual and x.shape[-1] >= h.shape[-1]:
         # Equal widths -> the paper's M(x) = x + W_1 sigma(W_2 x) verbatim.
         # Wider input (a feature map is active) -> the leading slice, which is
@@ -198,6 +242,7 @@ class NeuralMemoryMLP(nn.Module):
         activation: str = "silu",
         residual: bool = False,
         normalize_output: bool = True,
+        normalize_hidden: "bool | float" = False,
     ):
         super().__init__()
         if num_layers < 2:
@@ -213,6 +258,7 @@ class NeuralMemoryMLP(nn.Module):
         self.activation = activation
         self.residual = residual
         self.normalize_output = normalize_output
+        self.normalize_hidden = normalize_hidden
 
         self.params = nn.ParameterDict()
         for i in range(num_layers):
@@ -232,7 +278,7 @@ class NeuralMemoryMLP(nn.Module):
 
     def forward(self, params: Params, x: torch.Tensor) -> torch.Tensor:
         return mlp_forward(params, x, self.num_layers, self.activation, self.residual,
-                           self.normalize_output)
+                           self.normalize_output, self.normalize_hidden)
 
 
 class NeuralMemory(nn.Module):
@@ -314,6 +360,7 @@ class NeuralMemory(nn.Module):
         memory_residual: bool = False,
         normalize_qk: "bool | str" = False,
         normalize_output: bool = True,
+        normalize_hidden: "bool | float" = False,
         alpha_init: Optional[float] = None,
         eta_init: Optional[float] = None,
     ):
@@ -353,6 +400,9 @@ class NeuralMemory(nn.Module):
             raise ValueError("normalize_qk must be False, 'rms' or 'l2'")
         self.normalize_qk = normalize_qk or False
         self.normalize_output = normalize_output
+        # Bounds lambda_max(H_GN^(W1)) = 2||h_0||^2 by construction; see
+        # mlp_forward's docstring for why normalize_qk does not.
+        self.normalize_hidden = normalize_hidden
         self.dim = dim
         self.theta_scale = theta_scale
         # ATLAS phi: polynomial feature map on keys and queries (degree 1 = the
@@ -415,7 +465,8 @@ class NeuralMemory(nn.Module):
         self.memory = NeuralMemoryMLP(dim, hidden_dim, num_layers, in_dim=mem_in_dim,
                                       activation=memory_activation,
                                       residual=memory_residual,
-                                      normalize_output=normalize_output)
+                                      normalize_output=normalize_output,
+                                      normalize_hidden=normalize_hidden)
         self.num_layers = num_layers
 
         # Outer, ordinarily-trained projections (shared across time).
@@ -481,10 +532,10 @@ class NeuralMemory(nn.Module):
     def _grad_fn(self):
         num_layers = self.num_layers
         act, res = self.memory_activation, self.memory_residual
-        nout = self.normalize_output
+        nout, nhid = self.normalize_output, self.normalize_hidden
 
         def loss(params: Params, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-            pred = mlp_forward(params, k, num_layers, act, res, nout)
+            pred = mlp_forward(params, k, num_layers, act, res, nout, nhid)
             return ((pred - v) ** 2).sum()
 
         return grad(loss, argnums=0)
@@ -659,9 +710,9 @@ class NeuralMemory(nn.Module):
             q = self._norm_qk(q)
         if self.feature_map is not None:
             q = self.feature_map(q)
-        return vmap(mlp_forward, in_dims=(0, 0, None, None, None, None))(
+        return vmap(mlp_forward, in_dims=(0, 0, None, None, None, None, None))(
             state, q, self.num_layers, self.memory_activation, self.memory_residual,
-            self.normalize_output
+            self.normalize_output, self.normalize_hidden
         )
 
     # ------------------------------------------------------------- carry state

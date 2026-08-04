@@ -73,6 +73,14 @@ CONFIGS: dict[str, dict] = {
     # Note theta already sat ~10x INSIDE ATLAS's 2/lambda_max bound when it
     # diverged, so this margin is empirical, not the paper's condition.
     "sane_ns_theta01": {**SANE, **MUON, "learned_qk_scale": True, "theta_scale": 0.01},
+    # The theory note's fix for the same divergence, from the other direction.
+    # theta_scale=0.01 shrinks the step; this bounds the curvature the step is
+    # multiplied by -- lambda_max(H_GN^(W1)) = 2||h_0||^2, which normalize_qk does
+    # NOT bound because h_0 is computed from online-updated weights. Unlike
+    # normalize_output it leaves M(k)'s scale free, so the associative loss keeps
+    # its signal. theta_scale=0.01 was measured to cost memory_gain (p=0.015);
+    # whether this one is free is the point of measuring it.
+    "sane_ns_nh": {**SANE, **MUON, "learned_qk_scale": True, "normalize_hidden": True},
     # Union of both tasks' winners: the full ATLAS stack, the cascade, and the
     # gate/normalisation set. Note SANE removes the output RMSNorm, which on MQAR
     # killed one seed in four -- on continuous regression that is more exposed,

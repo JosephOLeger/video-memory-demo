@@ -106,6 +106,7 @@ class TitansMACBlock(nn.Module):
         memory_residual: bool = False,
         normalize_qk: "bool | str" = False,
         normalize_output: bool = True,
+        normalize_hidden: "bool | float" = False,
         normalize_retrieval: bool = False,
         alpha_init: Optional[float] = None,
         eta_init: Optional[float] = None,
@@ -166,6 +167,7 @@ class TitansMACBlock(nn.Module):
             memory_residual=memory_residual,
             normalize_qk=normalize_qk,
             normalize_output=normalize_output,
+            normalize_hidden=normalize_hidden,
             alpha_init=alpha_init,
             eta_init=eta_init,
         )

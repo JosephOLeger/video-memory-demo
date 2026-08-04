@@ -100,6 +100,10 @@ def build_cfg(a) -> dict:
         cfg["eta_init"] = a.eta_init
     if getattr(a, "theta_scale", None) is not None:
         cfg["theta_scale"] = a.theta_scale
+    if getattr(a, "normalize_hidden", None) is not None:
+        # L2-bound the last layer's Gauss-Newton curvature, 2||h_0||^2. Unlike
+        # normalize_output (which SANE removes) this leaves M(k)'s scale free.
+        cfg["normalize_hidden"] = a.normalize_hidden
     if a.cascade:
         cfg["memory_use_cascade"] = True
         cfg["cascade_reservoirs"] = a.reservoirs
@@ -174,6 +178,7 @@ def run(a, device) -> dict:
                 dim=dim, io_projection=io_projection, space=space,
                 eta_init=getattr(a, "eta_init", None),
                 bptt_window=getattr(a, "bptt_window", None),
+                normalize_hidden=getattr(a, "normalize_hidden", None),
                 theta_scale=cfg.get("theta_scale"),
                 params=sum(p.numel() for p in model.parameters()),
                 first=f, second=s, echo_gain=f - s,
@@ -209,6 +214,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="inner-step scale; 0.01 fixes the NaN divergence, 0.03 is SANE's default")
     ap.add_argument("--eta-init", type=float, default=None, dest="eta_init",
                     help="resting momentum decay; horizon in tokens is 1/(1-eta)")
+    ap.add_argument("--normalize-hidden", type=float, default=None,
+                    dest="normalize_hidden",
+                    help="target L2 norm for the memory's hidden activation h_0 "
+                         "(bounds lambda_max(H_GN^(W1)) = 2||h_0||^2); unset = off")
     ap.add_argument("--bptt-window", type=int, default=None, dest="bptt_window",
                     help="truncate BPTT to this many steps; VRAM becomes independent\n"
                          "of sequence length (measured: 0.82 GiB at T=128..2048)")
