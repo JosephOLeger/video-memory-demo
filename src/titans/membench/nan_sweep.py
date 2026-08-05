@@ -6,10 +6,15 @@ to prevent there. MQAR at ``dim=32`` is where it was characterised (README §8.5
 abrupt, inside a single forward, on a minority of seeds, and **deterministic per
 seed**, so a failed cell must be replaced with a different seed and never retried.
 
-The setup is the one that produced those numbers: ``segment_size=8``, ``dim=32``,
-memory hidden 32, batch 32, 3000 steps, ``num_pairs=8``. ``--seed`` varies the model
-initialisation, which is what the seed-dependence is about; the task stream itself is
-seeded by step index and is identical across arms.
+The setup is the one that produced those numbers, taken from the ``nan_diag`` probe
+that localised the failure to step 1639: ``segment_size=8``, ``dim=32``, batch 32,
+3000 steps, ``num_pairs=8``, and **``key_vocab = val_vocab = 64``**. That last one is
+not cosmetic -- a first attempt at ``vocab=16`` (chance 1/16 instead of 1/64) is an
+easier task with a different curvature, and produced 0 divergences in 25 cells. The
+memory's hidden width is left at its default rather than pinned, again to match.
+
+``--seed`` varies the model initialisation, which is what the seed-dependence is
+about; the task stream itself is seeded by step index and is identical across arms.
 
 Outcome recorded per cell: ``diverged`` and, when it did, ``diverged_at`` -- the step
 the loss first went non-finite. A NaN rate is only meaningful against a control run
@@ -31,7 +36,7 @@ from ..worldmodel.atlas import CONFIGS
 from .run import train_recall
 from .tasks import associative_recall
 
-SEG, DIM, MEM_HIDDEN = 8, 32, 32
+SEG, DIM = 8, 32
 
 
 def main() -> None:
@@ -40,18 +45,18 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--steps", type=int, default=3000)
     ap.add_argument("--num-pairs", type=int, default=8, dest="num_pairs")
+    ap.add_argument("--vocab", type=int, default=64,
+                    help="key AND value vocabulary; 64 is what diverged")
     ap.add_argument("--normalize-hidden", type=float, default=None, dest="nh",
                     help="target L2 norm for h_0; unset = off")
     ap.add_argument("--label", default=None)
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
 
-    kv = max(16, a.num_pairs)
-
     def make_task(seed):
         return associative_recall(batch=32, num_pairs=a.num_pairs,
-                                  segment_size=SEG, key_vocab=kv, val_vocab=16,
-                                  seed=seed)
+                                  segment_size=SEG, key_vocab=a.vocab,
+                                  val_vocab=a.vocab, seed=seed)
 
     cfg = dict(CONFIGS[a.config])
     if a.nh is not None:
@@ -60,7 +65,7 @@ def main() -> None:
     torch.manual_seed(a.seed)
     t0 = time.time()
     res = train_recall(make_task, steps=a.steps, lr=1e-3, dim=DIM, depth=2,
-                       segment_size=SEG, num_heads=1, memory_hidden_dim=MEM_HIDDEN,
+                       segment_size=SEG, num_heads=1, memory_num_layers=2,
                        eval_seeds=range(10_000_000, 10_000_020),
                        stop_on_nan=True, **cfg)
 
@@ -68,7 +73,7 @@ def main() -> None:
     out = {
         "label": a.label or a.config + ("" if a.nh is None else f"_nh{a.nh:g}"),
         "config": a.config, "seed": a.seed, "steps": a.steps,
-        "num_pairs": a.num_pairs, "normalize_hidden": a.nh,
+        "num_pairs": a.num_pairs, "vocab": a.vocab, "normalize_hidden": a.nh,
         "diverged": res["diverged_at"] is not None,
         "diverged_at": res["diverged_at"],
         "acc_mean": acc, "acc_std": float(res["acc_std"]),
