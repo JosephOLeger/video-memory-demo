@@ -73,3 +73,37 @@ def test_stop_on_nan_records_the_step_and_halts():
     off = train_recall(task, steps=3, dim=16, depth=1, segment_size=4,
                        memory_hidden_dim=8, eval_seeds=range(10_000_000, 10_000_002))
     assert off["diverged_at"] is None
+
+
+def test_nan_sweep_levers_reach_the_memory():
+    """theta_scale / eta_init / chunk must change the computation, not just be accepted.
+
+    A flag that is accepted and silently inert is this codebase's recurring failure
+    mode (README §3, §7), and these three are the levers the predicted threshold
+    `theta* ~ (1 - eta) / m` is measured with.
+    """
+    import torch
+
+    from titans.membench.model import RecallModel
+
+    def build(**kw):
+        torch.manual_seed(0)
+        return RecallModel(16, dim=16, depth=1, segment_size=8,
+                           memory_num_layers=2, normalize_qk="l2",
+                           normalize_output=False, **kw)
+
+    x = torch.randint(0, 16, (2, 16))
+    base = build()
+    with torch.no_grad():
+        y0 = base(x)
+
+    # each lever, alone, must move the output
+    for kw in ({"theta_scale": 0.5}, {"eta_init": 0.9}, {"memory_chunk_size": 4}):
+        m = build(**kw)
+        with torch.no_grad():
+            y = m(x)
+        assert not torch.allclose(y0, y), f"{kw} left the computation unchanged"
+
+    # and the chunk really lands on the block
+    assert build(memory_chunk_size=4).blocks[0].memory_chunk_size == 4
+    assert build().blocks[0].memory_chunk_size == 8        # defaults to the segment

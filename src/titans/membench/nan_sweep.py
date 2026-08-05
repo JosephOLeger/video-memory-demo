@@ -49,23 +49,40 @@ def main() -> None:
                     help="key AND value vocabulary; 64 is what diverged")
     ap.add_argument("--normalize-hidden", type=float, default=None, dest="nh",
                     help="target L2 norm for h_0; unset = off")
+    # Levers for the predicted threshold theta* ~ (1 - eta) / m. Chunk length m is
+    # varied through memory_chunk_size with segment_size held fixed, so attention
+    # sees the same window at every m and only the inner loop's staleness changes.
+    ap.add_argument("--theta-scale", type=float, default=None, dest="theta_scale")
+    ap.add_argument("--eta-init", type=float, default=None, dest="eta_init")
+    ap.add_argument("--chunk", type=int, default=None,
+                    help="memory_chunk_size = m; defaults to the segment size")
+    ap.add_argument("--seg", type=int, default=SEG, dest="seg")
     ap.add_argument("--label", default=None)
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
 
+    if a.chunk is not None and a.chunk > a.seg:
+        raise SystemExit(f"chunk {a.chunk} cannot exceed segment size {a.seg}")
+
     def make_task(seed):
         return associative_recall(batch=32, num_pairs=a.num_pairs,
-                                  segment_size=SEG, key_vocab=a.vocab,
+                                  segment_size=a.seg, key_vocab=a.vocab,
                                   val_vocab=a.vocab, seed=seed)
 
     cfg = dict(CONFIGS[a.config])
     if a.nh is not None:
         cfg["normalize_hidden"] = a.nh
+    if a.theta_scale is not None:
+        cfg["theta_scale"] = a.theta_scale
+    if a.eta_init is not None:
+        cfg["eta_init"] = a.eta_init
+    if a.chunk is not None:
+        cfg["memory_chunk_size"] = a.chunk
 
     torch.manual_seed(a.seed)
     t0 = time.time()
     res = train_recall(make_task, steps=a.steps, lr=1e-3, dim=DIM, depth=2,
-                       segment_size=SEG, num_heads=1, memory_num_layers=2,
+                       segment_size=a.seg, num_heads=1, memory_num_layers=2,
                        eval_seeds=range(10_000_000, 10_000_020),
                        stop_on_nan=True, **cfg)
 
@@ -74,6 +91,8 @@ def main() -> None:
         "label": a.label or a.config + ("" if a.nh is None else f"_nh{a.nh:g}"),
         "config": a.config, "seed": a.seed, "steps": a.steps,
         "num_pairs": a.num_pairs, "vocab": a.vocab, "normalize_hidden": a.nh,
+        "theta_scale": cfg.get("theta_scale"), "eta_init": cfg.get("eta_init"),
+        "seg": a.seg, "chunk": a.chunk if a.chunk is not None else a.seg,
         "diverged": res["diverged_at"] is not None,
         "diverged_at": res["diverged_at"],
         "acc_mean": acc, "acc_std": float(res["acc_std"]),
