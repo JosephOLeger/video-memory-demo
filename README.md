@@ -343,11 +343,28 @@ actually produces.
 **Health has repeatedly failed to predict task performance** — see §8. It is kept
 as a diagnostic of *what broke*, not as a target.
 
+### 6.4 Inner-loop stability — `stability.py`
+
+Not a memory metric: a probe for §8.5. It samples **per chunk**, which is the
+granularity the recurrence advances at — the divergence happens inside a single
+forward, so anything sampled per optimisation step reads it as gradual and misses it.
+
+`trace_forward` threads the real recurrence and reports, for every chunk: the two
+candidate curvatures `λ_max(2 Xᵀ diag(w) X)` for `X = K` (ATLAS's Gram) and
+`X = H₀` (the deep one), `‖h₀‖`, `‖W₀‖₂`, `‖W₁‖₂`, `‖S‖`, the realised gates, `κ`,
+and the resulting `ϱ(B)`. It uses the **per-token** weights `w_i` rather than a
+chunk-level Gram, for the reason in §8.6 — the identity `Σ_i w_i = κ` is a test.
+
+Every raw quantity is returned, not just the derived `ϱ`, so a spectral radius can
+be recomputed offline under a corrected formula without re-running anything. Sanity
+checks against the numbers the theory note measured independently: `λ_max(KᵀK)`
+lands at 7.3-9.0 (note: 7.5-7.9) and `κ` at 14.63 / 28.60 for `η = 0.534 / 0.9`.
+
 ## 7. Tests
 
 ```bash
 pip install -e '.[test]'
-pytest                       # 150 tests
+pytest                       # 161 tests
 ```
 
 Beyond shapes and trainability, the suite guards the properties that turned out to
@@ -365,7 +382,11 @@ be easy to break:
   the prefixes differ, and a deliberately memoryless predictor scores exactly
   `memory_gain = 0`;
 * PCA is fitted on train only, and `io_projection=False` really leaves no learned
-  I/O parameter behind.
+  I/O parameter behind;
+* `normalize_hidden` holds `‖h₀‖` to its target *and* leaves `M(k)`'s scale free —
+  the pair of properties that separate it from `normalize_output` (§8.8);
+* cropping a cache preserves both content order and the `pca` metadata the harness
+  keys on, so a cropped corpus cannot silently stop being pre-reduced.
 
 That last class — "does the flag do anything?" — is the one worth extending when
 adding a flag.
@@ -514,17 +535,66 @@ Both candidate fixes work (baseline dies at accuracy 0.000):
 `theta_scale=0.01` is the better lead: it stays inside the SANE design, whereas
 restoring the output norm re-introduces exactly what SANE removes.
 
-**A theory point.** `θ` sat at 0.021-0.022 with a margin of ~0.09 against ATLAS's
-inner-loop bound `2/λ_max(K Kᵀ)` — *well inside* it — yet halving `θ` prevents the
-blow-up. ATLAS's condition is **necessary but far from sufficient** here; the usable
-margin is much smaller than the bound suggests.
-
 The divergence is **deterministic per seed**: re-running the same seed reproduces
 the same NaN bit-for-bit, so a failed cell must be replaced with a *different* seed,
 never retried. It affected ~13 % of echo-sweep cells, and it is what invalidated an
 earlier capacity sweep — so **memory capacity remains unmeasured**.
 
-### 8.6 Initialising the momentum gate matches a whole cascade — and it replicates
+**Reproducing it needs the right task.** The cell above is `sane_ns`, `dim=32`,
+`segment_size=8`, `num_pairs=8`, batch 32, and **`key_vocab = val_vocab = 64`**.
+That last one is not incidental: re-running at `vocab=16` (chance 1/16 instead of
+1/64) is an easier task with a different key geometry and gave **0 divergences in
+25 cells**. `membench/nan_sweep.py` is the runnable cell, with those values as
+defaults.
+
+### 8.6 Why ATLAS's bound does not cover this
+
+`θ` sat at 0.021-0.022 against ATLAS's inner-loop bound `2/λ_max(K Kᵀ)` — a
+*factor ~10 inside* it — yet halving `θ` prevents the blow-up. Working out why is a
+separate note (`TheoTitanFr.pdf`); what it establishes, and what it rules out:
+
+**The convention first.** ATLAS's p.26 iterate `M − η(MK − V)Kᵀ` is the gradient of
+`½‖·‖²`, so their `2/λ_max(KKᵀ)` presupposes the ½. Our inner loss (`_grad_fn`) has
+no ½, so **our budget is `1/λ_max(KKᵀ)`, half theirs**. Every number below is stated
+in `λ_max(H)` with `H = 2 KᵀK` to keep that explicit. (ATLAS is internally
+inconsistent here: its Prop. 1 writes `ℓ = ‖MK − V‖²` without the ½.)
+
+Two structural departures from the setting ATLAS's bound is stated in, and **neither
+explains the divergence**:
+
+* **Momentum + decay.** The exact characteristic polynomial of the
+  `S_t = η S_{t−1} − θ g`, `M_t = (1−α)M_{t−1} + S_t` recurrence (§1) gives stability iff
+  `0 ≤ θ λ_max(H) < (1+η)(2−α)`. Momentum *widens* the admissible step (`2 ↦ 2(1+η)`)
+  — the classic heavy-ball result. It cannot cause a blow-up inside ATLAS's bound.
+* **Stale chunk gradients.** Every gradient in a chunk is evaluated at the chunk-start
+  anchor, so the same error is acted on `m` times without re-evaluation, inflating the
+  effective step by `κ = Q_m/(1−η)` (14.6 at rest, **28.6 at `eta_init=0.9`**). But the
+  chunk map takes the **per-token** Hessians `H_i = 2 k_i k_iᵀ`, weighted
+  `w_i = Σ_{j≥i} a^{m−j} η^{j−i}` with `Σ_i w_i = κ`. Multiplying `κ` by a chunk-level
+  `λ_max(KᵀK)` — already summed over the `m` tokens — double-counts by ~`m`. Done
+  correctly, `ϱ(B) ≈ 0.32`: `θ` at 26 % of the chunk budget, a margin of ×3.9.
+  Verified against exact simulation of the recurrence.
+
+What is left is **the deep memory's own curvature**. Write `M`'s own layers
+`W₀, b₀, W₁, b₁` (not to be confused with the outer projections `W_K/W_V/W_Q`, which
+are frozen for the inner loop). For `ℓ = ‖M(k) − v‖²` the Gauss-Newton curvature of
+the *last layer's* block is `λ_max(H_GN^(W1)) = 2‖h₀‖²` with `h₀ = σ(W₀k + b₀)`. ATLAS's `λ_max(KKᵀ)` is the curvature of a **matrix**
+memory, where `J = k` and the keys' Gram matrix *is* the Hessian. For a deep memory
+it is not: `normalize_qk` pins `‖k‖ = 1` but bounds neither `‖h₀‖` nor `‖W₁‖`, both
+online-updated and free to grow inside the inner loop. **The bound sits on the wrong
+Gram matrix** — the precise content of "necessary but far from sufficient".
+
+Predicted thresholds at `θ = 0.0208`, `η = 0.534`, `m = 8`: unstable once
+`θ·Λ_chunk > 2.37`, i.e. **`‖h₀‖ > 1.97`** against 0.29 at initialisation; a
+sufficient condition is `‖W₀‖₂ + ‖b₀‖₂ < 1.97`. This also explains both known fixes
+as one mechanism: `normalize_output=True` bounds the residual so `2Jᵀr` cannot
+inherit `‖h₀‖`'s growth (at the cost of the associative signal, §8.1), and halving
+`θ_scale` attacks the same product `θλ` from the other side.
+
+`stability.py` measures all of it per chunk (§6.4), and `normalize_hidden` bounds
+`‖h₀‖` directly (§8.8).
+
+### 8.7 Initialising the momentum gate matches a whole cascade — and it replicates
 
 On `memory_gain` (§6.1), `T=64`, `K=24`, full BPTT, batch 8, 2500 steps, PCA `k=128`.
 `nocas_eta10` is `nocas` plus one changed bias: `--eta-init 0.9`, i.e. a momentum
@@ -558,6 +628,50 @@ Three readings:
 resolution rather than the volume; separating them needs a run at matched
 resolution. And "not significantly different" is not "equal" — resolving the
 residual gap at 3 SE would need ~120 seeds per arm.
+
+### 8.8 `normalize_hidden`: free on plain SANE, expensive on `eta_init`
+
+§8.6 says the unbounded quantity is `‖h₀‖`, so bound it: `normalize_hidden`
+L2-normalises the memory's hidden activation, making `λ_max(H_GN^(W1)) = 2‖h₀‖²` a
+constant. **L2, not RMS** — an RMSNorm leaves `‖h₀‖ = √d_h ≈ 22` at ATLAS's
+expansion 4, against a threshold near 2, so it would not bound the quantity that
+matters. The target norm is a parameter: at init `‖h₀‖ ≈ 0.3`, so a ceiling of 1.0
+caps the curvature while *raising* the resting point ~10×.
+
+Unlike `normalize_output` it costs **no associative signal**: `M(k) = W₁h₀ + b₁`
+keeps its scale free, so `W₁` can still shrink to meet `‖v‖ ≈ 0.01`. Pinned by test —
+fitting a small-norm target converges with `normalize_hidden` and does not with
+`normalize_output`.
+
+Echo benchmark, full EgoLife `T=64` corpus, **n=8 per arm, 0 NaN in all 40 cells**,
+paired permutation tests:
+
+| arm | `memory_gain` | vs its control | p (paired) |
+|---|---|---|---|
+| `nocas` | +0.1666 ± 0.0120 | — | — |
+| `nocas_nh` (target 1.0) | +0.1677 ± 0.0135 | **+0.0011** | 0.88 **ns** |
+| `nocas_nh03` (target 0.3) | +0.1655 ± 0.0113 | −0.0010 | 0.87 **ns** |
+| `nocas_eta10` | +0.2236 ± 0.0295 | +0.0571 vs `nocas` | 0.0078 |
+| `nocas_eta10_nh` | +0.1911 ± 0.0127 | **−0.0326 vs eta10** | **0.0078** |
+
+1. **On plain SANE it is free** (+0.0011, p=0.88) — which `theta_scale=0.01` is not
+   (it costs `memory_gain` at p=0.015) and `normalize_output` is not (it empties the
+   loss). The target norm does not matter (0.3 vs 1.0: p=0.72), so the result does
+   not hinge on tuning.
+2. **On the `eta_init` arm it costs**: −0.0326, removing 57 % of eta_init's gain.
+   Still clearly above `nocas` (+0.0245, p=0.0007), so not a cancellation.
+3. **It halves that arm's seed variance** (SD 0.0295 → 0.0127, back to `nocas`'s
+   0.0120). Consistent with — not proof of — part of `eta_init`'s gain coming from
+   operating near the instability edge: `κ` is 28.6 at `eta_init=0.9` against 14.6 at
+   rest, and §8.6 puts the resting point already past the predicted threshold there.
+   The theory said `eta10` is where the fix would bite hardest, and it is.
+
+The controls reproduced §8.7 to four decimals, which also confirms the flag is inert
+when off.
+
+**What this does not yet show is that it prevents the divergence it was built for.**
+PCA space gives 0 NaN everywhere, so the sweep above had nothing to prevent; that
+question lives on MQAR (§8.5) and is open.
 
 ## 9. Data/parameter proportions: an accepted deviation
 
@@ -641,6 +755,18 @@ JOBS=jobs_ref64.txt GUARD=13000 PREFIX=S bash scripts/keepalive.sh
 crontab -l | { cat; echo "*/10 * * * * JOBS=jobs_ref64.txt GUARD=13000 PREFIX=S /bin/bash \$HOME/work/titans-mac/scripts/keepalive.sh"; } | crontab -
 ```
 
+The MQAR divergence cells are the same shape of job, and cheap (under a GiB each,
+8-25 min depending on whether Muon is on):
+
+```bash
+python -m titans.membench.nan_sweep --config sane_ns --seed 0 --out cell.json
+python -m titans.membench.nan_sweep --config sane_ns --seed 0 --normalize-hidden 1.0
+```
+
+Arms must share the seed grid: the divergence is deterministic per seed, so a NaN
+rate only means something against a control at the *same* seeds. Raise `WORKERS`
+for these — twelve fit where two echo jobs would.
+
 `scripts/pool4.sh` is the worker: a free-VRAM guard, one requeue on failure then a
 drop, and a per-job timeout so a hung job cannot hold a card for days. Two hard-won
 details are baked into it, both of which have cost whole sweeps:
@@ -667,4 +793,17 @@ keepalive's `pgrep` will think they are already running.
 * A **true parallel scan** for the momentum recurrence (`_scan_chunked` is a Python
   loop across chunks).
 * The **tensor-sketch feature map** that would restore `φ`'s cross terms.
-* A **VLM / language head** — the model predicts latents, not text.
+* A **VLM / language head** — the model predicts latents, not text. Grafting the
+  memory into a pretrained open multimodal model (frozen backbone, zero-init output
+  gate, memory on a per-frame pooled stream) is the natural next scope; sketched, not
+  started.
+* A **bound on the first layer's curvature**. `normalize_hidden` (§8.8) bounds the
+  last layer's block by construction; the first layer's
+  `≤ 2‖k‖²‖W₁ diag σ′‖²` still depends on `‖W₁‖`, which nothing constrains.
+* **Open problems from the theory note**: lifting the linearisation to genuinely
+  per-token `(H_i, v_i)`; measuring the predicted threshold `θ⋆ ∝ (1−η)/m` by
+  sweeping `θ_scale` and `m`; a switched-system certificate (common Lyapunov `P`, or
+  a bound on the joint spectral radius) for the data-dependent gates; and the
+  admissible region in the `(α, η)` plane, where `α → 0` removes the contraction and
+  `η → 1` makes `κ` diverge — long retention and long accumulation are in direct
+  tension.
