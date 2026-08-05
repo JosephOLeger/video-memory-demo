@@ -24,7 +24,10 @@ mkdir -p "$(dirname "$LOG")"; : > "$GLOCK" 2>/dev/null
 while true; do
   [ -s "$JOBS" ] || { echo "[w${GPU}_${WID}] pool vide $(date +%H:%M)" >> "$LOG"; break; }
 
-  exec 9>"$GLOCK"; flock 9                 # serialise spin-up on this card
+  # Serialise spin-up on this card. -w so a lock left held by something else can
+  # never deadlock a worker: it retries instead of blocking forever.
+  exec 9>"$GLOCK"
+  if ! flock -w 300 9; then exec 9>&-; sleep 60; continue; fi
   free=$(nvidia-smi -i "$GPU" --query-gpu=memory.free --format=csv,noheader,nounits)
   if [ "${free:-0}" -lt "$NEED" ]; then exec 9>&-; sleep 120; continue; fi
   job=$(flock "$LOCK" -c "head -1 '$JOBS'; sed -i '1d' '$JOBS'")
@@ -34,7 +37,10 @@ while true; do
   retried=$(printf '%s' "$job" | grep -c "##RETRY##")
   job=${job/ \#\#RETRY\#\#/}
   echo "[w${GPU}_${WID}] START $(date +%H:%M) free=${free} :: $job" >> "$LOG"
-  CUDA_VISIBLE_DEVICES=$GPU timeout "$TMO" bash -c "$job" >> "$LOG" 2>&1 &
+  # 9>&- is load-bearing: without it the job inherits the lock fd and holds the
+  # card lock for its entire run, so the second worker on a card can never start
+  # and the pool silently runs at half throughput.
+  CUDA_VISIBLE_DEVICES=$GPU timeout "$TMO" bash -c "$job" >> "$LOG" 2>&1 9>&- &
   pid=$!
   sleep "$SETTLE"                          # let it allocate before anyone re-reads free
   exec 9>&-                                # release the card lock
