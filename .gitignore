@@ -26,3 +26,4 @@ jobs_*.txt.lock
 echo_*.json
 ablation_*.json
 nan_diag*/
+mkjobs_*.sh
