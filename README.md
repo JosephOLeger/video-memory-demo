@@ -804,6 +804,9 @@ keepalive's `pgrep` will think they are already running.
   per-token `(H_i, v_i)`; measuring the predicted threshold `θ⋆ ∝ (1−η)/m` by
   sweeping `θ_scale` and `m`; a switched-system certificate (common Lyapunov `P`, or
   a bound on the joint spectral radius) for the data-dependent gates; and the
-  admissible region in the `(α, η)` plane, where `α → 0` removes the contraction and
-  `η → 1` makes `κ` diverge — long retention and long accumulation are in direct
-  tension.
+  admissible region in the `(α, η)` plane. Note the note's own framing needs a
+  correction here: **`κ` does not diverge as `η → 1`** at finite chunk length — it
+  saturates at `m(m+1)/2` (36 at `m=8`, measured). Pushing `η` from 0.5 to 1 costs
+  a factor 2.6, not unbounded growth. The knob that does diverge is **`m`**, since
+  `κ ~ m²/2`, which makes the chunk length the destabilising parameter rather than
+  the momentum decay.
