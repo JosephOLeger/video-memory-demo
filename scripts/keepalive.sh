@@ -15,6 +15,7 @@ GUARD=${GUARD:-13000}       # MiB free a card must have before a worker takes a 
 TMO=${TMO:-21600}           # per-job timeout in seconds
 PREFIX=${PREFIX:-W}         # worker-id prefix; CHANGE IT when replacing a running
                             # pool, or the pgrep below thinks the old ones are new
+WORKERS=${WORKERS:-8}       # total workers, spread round-robin over the 4 cards
 #
 # **Set GUARD from titans.worldmodel.measure_vram, on the heaviest arm.** The arms
 # differ by ~50% and a guard sized on the lightest one puts two heavy jobs on a card:
@@ -34,10 +35,12 @@ launch() {  # $1 jobsfile  $2 gpu  $3 wid  $4 needMiB  $5 timeout
 }
 
 if [ -s "$JOBS" ]; then
-  # two workers per card: one job rarely saturates an A5000, and the guard plus
+  # Default two per card: one job rarely saturates an A5000, and the guard plus
   # pool4's per-card lock decide whether the second one actually gets to start.
-  gpus=(0 1 2 3 0 1 2 3)
-  for j in 0 1 2 3 4 5 6 7; do
-    launch "$JOBS" "${gpus[$j]}" "${PREFIX}${j}" "$GUARD" "$TMO"
+  # Raise WORKERS for small jobs (MQAR at dim=32 takes under a GiB), lower it for
+  # heavy ones. More workers than a card can actually keep busy buys nothing --
+  # a single echo job already sits at ~83% utilisation.
+  for ((j = 0; j < WORKERS; j++)); do
+    launch "$JOBS" "$((j % 4))" "${PREFIX}${j}" "$GUARD" "$TMO"
   done
 fi
