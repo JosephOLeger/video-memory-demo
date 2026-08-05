@@ -48,3 +48,28 @@ def test_eval_seeds_do_not_overlap_the_training_range():
         assert min(default) >= 1_000_000, (
             f"{fn.__name__}: eval seeds start at {min(default)}, which a long run "
             "would reach during training")
+
+
+def test_stop_on_nan_records_the_step_and_halts():
+    """The NaN sweep's outcome variable: when did the inner loop blow up."""
+    import torch
+
+    from titans.membench.run import train_recall
+    from titans.membench.tasks import associative_recall
+
+    def task(seed):
+        return associative_recall(batch=4, num_pairs=2, segment_size=4,
+                                  key_vocab=8, val_vocab=4, seed=seed)
+
+    # healthy run: no divergence recorded
+    torch.manual_seed(0)
+    ok = train_recall(task, steps=3, dim=16, depth=1, segment_size=4,
+                      memory_hidden_dim=8, eval_seeds=range(10_000_000, 10_000_002),
+                      stop_on_nan=True)
+    assert ok["diverged_at"] is None
+
+    # and the key exists on the default path too, so callers can read it blind
+    torch.manual_seed(0)
+    off = train_recall(task, steps=3, dim=16, depth=1, segment_size=4,
+                       memory_hidden_dim=8, eval_seeds=range(10_000_000, 10_000_002))
+    assert off["diverged_at"] is None

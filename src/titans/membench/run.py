@@ -42,6 +42,7 @@ def train_recall(
     max_len: int = 1024,
     eval_seeds=range(10_000_000, 10_000_020),
     log_every: int = 0,
+    stop_on_nan: bool = False,
     **block_kwargs,
 ) -> dict:
     """Train a :class:`RecallModel` on ``task_fn`` and eval accuracy on unseen seeds.
@@ -63,10 +64,18 @@ def train_recall(
     opt = torch.optim.Adam(model.parameters(), lr=lr)
 
     model.train()
+    diverged_at = None
     for step in range(steps):
         b = task_fn(step)
         logits = model(b.x.to(device))
         loss, _ = _masked(logits, b.y.to(device), b.mask.to(device))
+        # ``stop_on_nan`` records *when* the inner loop blew up, and stops. The
+        # divergence is abrupt -- healthy at step n, all-NaN at n+1, inside a
+        # single forward (README 8.5) -- so the step index is the measurement,
+        # and running on afterwards only burns a card producing NaN.
+        if stop_on_nan and not torch.isfinite(loss):
+            diverged_at = step
+            break
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -87,6 +96,7 @@ def train_recall(
         "acc_std": accs.std(unbiased=False).item(),
         "chance": 1.0 / sample.answer_classes,
         "train_loss": loss.item(),
+        "diverged_at": diverged_at,
         "model": model,
         "device": device,
     }
