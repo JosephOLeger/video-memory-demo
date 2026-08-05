@@ -351,6 +351,7 @@ class NeuralMemory(nn.Module):
         cascade_gate_signal: str = "content",
         cascade_leak: str = "full",
         cascade_slow_decay: float = 0.99,
+        cascade_leak_rate: float = 1.0,
         update_bias: bool = True,
         orthogonalize_momentum: bool = False,
         feature_degree: int = 1,
@@ -442,6 +443,16 @@ class NeuralMemory(nn.Module):
             )
         self.cascade_leak = cascade_leak
         self.cascade_slow_decay = cascade_slow_decay
+        # Rate of the surprise-driven leak: the retained fraction is
+        # exp(-cascade_leak_rate * theta_t). Without it the leak is exp(-theta_t),
+        # which ties the memory's horizon to the inner step size -- at
+        # theta_scale 0.03 the retained fraction is 0.979 (horizon ~49 tokens) but
+        # at 2.0 it is 0.25 (horizon 1.3), so a theta sweep would move the step and
+        # the horizon together by a factor of ~36 and measure neither. The rate
+        # decouples them: hold `cascade_leak_rate * theta_scale` fixed to sweep the
+        # step at constant leak, or lower it to reach the long-horizon regime where
+        # the stability condition is expected to appear (the analogue of eta -> 1).
+        self.cascade_leak_rate = cascade_leak_rate
         if use_cascade_momentum:
             # `dim` is needed by the cascade whenever a head reads the token: the
             # content-gated coupling (cascade_selective + gate_signal="content") or
@@ -647,7 +658,9 @@ class NeuralMemory(nn.Module):
                     # surprise (theta_t). Boring tokens (theta~0) barely leak; a
                     # surprising token displaces old memory -> turnover paced by
                     # events, not by every step (Benna-Fusi-like, avoids saturation).
-                    u_prev = torch.exp(-self._bcast(theta_t, S[key])) * S[key]
+                    u_prev = torch.exp(
+                        -self.cascade_leak_rate * self._bcast(theta_t, S[key])
+                    ) * S[key]
                 else:  # "shallow": leak reservoir 0 only (functional, no in-place)
                     r0 = eta_b * torch.ones_like(S[key][..., :1])
                     rest = torch.ones_like(S[key][..., 1:])
