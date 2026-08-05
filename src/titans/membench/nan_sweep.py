@@ -57,6 +57,13 @@ def main() -> None:
     ap.add_argument("--chunk", type=int, default=None,
                     help="memory_chunk_size = m; defaults to the segment size")
     ap.add_argument("--seg", type=int, default=SEG, dest="seg")
+    # Cascade flags, mirroring echo.py so an arm reads the same in both sweeps.
+    ap.add_argument("--cascade", action="store_true")
+    ap.add_argument("--reservoirs", type=int, default=6)
+    ap.add_argument("--leak", default="none")
+    ap.add_argument("--readout", default="gated")
+    ap.add_argument("--selective", action="store_true")
+    ap.add_argument("--gate", default="surprise")
     ap.add_argument("--label", default=None)
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
@@ -78,6 +85,13 @@ def main() -> None:
         cfg["eta_init"] = a.eta_init
     if a.chunk is not None:
         cfg["memory_chunk_size"] = a.chunk
+    if a.cascade:
+        cfg.update(memory_use_cascade=True, cascade_reservoirs=a.reservoirs,
+                   cascade_leak=a.leak, cascade_gate_signal=a.gate)
+        if a.readout != "none":
+            cfg["cascade_readout"] = a.readout
+        if a.selective:
+            cfg["cascade_selective"] = True
 
     torch.manual_seed(a.seed)
     t0 = time.time()
@@ -93,6 +107,7 @@ def main() -> None:
         "num_pairs": a.num_pairs, "vocab": a.vocab, "normalize_hidden": a.nh,
         "theta_scale": cfg.get("theta_scale"), "eta_init": cfg.get("eta_init"),
         "seg": a.seg, "chunk": a.chunk if a.chunk is not None else a.seg,
+        "cascade": a.cascade, "leak": a.leak if a.cascade else None,
         "diverged": res["diverged_at"] is not None,
         "diverged_at": res["diverged_at"],
         "acc_mean": acc, "acc_std": float(res["acc_std"]),
