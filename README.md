@@ -804,9 +804,22 @@ keepalive's `pgrep` will think they are already running.
   per-token `(H_i, v_i)`; measuring the predicted threshold `θ⋆ ∝ (1−η)/m` by
   sweeping `θ_scale` and `m`; a switched-system certificate (common Lyapunov `P`, or
   a bound on the joint spectral radius) for the data-dependent gates; and the
-  admissible region in the `(α, η)` plane. Note the note's own framing needs a
-  correction here: **`κ` does not diverge as `η → 1`** at finite chunk length — it
-  saturates at `m(m+1)/2` (36 at `m=8`, measured). Pushing `η` from 0.5 to 1 costs
-  a factor 2.6, not unbounded growth. The knob that does diverge is **`m`**, since
-  `κ ~ m²/2`, which makes the chunk length the destabilising parameter rather than
-  the momentum decay.
+  admissible region in the `(α, η)` plane. The note's `κ ~ m/(1−η)` asymptotic
+  (Remark 3) needs a domain: with `ε = 1−η` and `a = 1`,
+  `κ = m/ε − η(1−η^m)/ε²`, which has **two regimes crossing over at
+  `1/(1−η) ≈ m`** — the momentum's horizon against the chunk length:
+
+  | regime | condition | `κ` |
+  |---|---|---|
+  | horizon shorter than the chunk | `1/(1−η) ≪ m` | `≈ m/(1−η)` (the note's form) |
+  | horizon longer than the chunk | `1/(1−η) ≫ m` | `→ m(m+1)/2`, **saturated** |
+
+  A gradient injected at step `i` can only be re-applied on the `m−i+1` steps left
+  in the chunk, so the chunk *truncates* the momentum's horizon and the triangular
+  number falls out by counting. Measured at `m=8`: `κ` = 14.6 at `η=0.534`
+  (naive 17.2 ✓) but 28.6 at `η=0.9` (naive 80 ✗, bound 36 ✓).
+
+  Consequence: **`κ` does not diverge as `η → 1`** at finite `m`, so "long
+  retention and long accumulation in direct tension" does not hold as stated.
+  `m` remains the high-leverage knob — `κ` grows at least linearly in it in both
+  regimes while `η` saturates.
