@@ -12,14 +12,20 @@ system we want to observe, isolated from the outer optimiser. Forward-only also
 means no activation graph, so length costs nothing: 500 repetitions of a 144-frame
 clip is 72000 steps at the memory footprint of one.
 
-Two streams, because stability alone is not the question:
+Three streams, because stability alone is not the question:
 
 ``loop``     one held-out clip repeated R times. A working memory should predict
              repetition 2 better than repetition 1 and hold that advantage. This is
              the [V;V] echo test taken to its limit.
-``shuffle``  R *different* held-out clips. Nothing to re-use, so the prediction
-             error is flat by construction -- it isolates the drift of the state
-             from any genuine memory benefit.
+``cycle``    a pool of R_p random clips round-robin. Repetition still exists, but the
+             memory has to hold several contents at once and keep them apart.
+``shuffle``  R *independent* random clips. Nothing to re-use, so the echo advantage
+             must be zero -- what is left is purely the drift of the state.
+
+Each stream is paired with a **memory-off control on the identical clip order** (the
+carry dropped between clips). The gain is read against that, never against another
+stream: "loop is better than shuffle" would confound the memory's contribution with
+one clip happening to be easier than another.
 
 **Both a divergence and a collapse must be caught.** A run whose loss goes NaN and a
 run whose memory quietly stops carrying information both fail, and only the first
@@ -82,20 +88,30 @@ def state_diagnostics(model, carry, n_probe: int = 8) -> dict:
     return out
 
 
-def build_stream(va: torch.Tensor, reps: int, mode: str, seed: int = 0):
+def build_stream(va: torch.Tensor, reps: int, mode: str, seed: int = 0, pool: int = 4):
     """A list of ``reps`` clips of shape ``[1, T, dim]``, fed one after another.
 
     A list rather than one concatenated tensor: the stream is processed clip by clip
     so the per-repetition metrics fall out naturally, and a 72000-step tensor never
     has to exist.
+
+    ``loop``     one clip, ``reps`` times. Maximal repetition.
+    ``cycle``    ``pool`` random clips round-robin. Repetition still exists but the
+                 memory must hold several contents at once and keep them apart --
+                 the regime a real deployment is in.
+    ``shuffle``  ``reps`` independent random clips. No repetition at all, so any echo
+                 advantage must be zero and only the state's drift is left.
     """
     g = torch.Generator().manual_seed(seed)
     if mode == "loop":
         idx = [int(torch.randint(va.shape[0], (1,), generator=g))] * reps
+    elif mode == "cycle":
+        base = torch.randint(va.shape[0], (min(pool, va.shape[0]),), generator=g).tolist()
+        idx = [base[r % len(base)] for r in range(reps)]
     elif mode == "shuffle":
         idx = torch.randint(va.shape[0], (reps,), generator=g).tolist()
     else:
-        raise ValueError(f"mode must be 'loop' or 'shuffle', got {mode!r}")
+        raise ValueError(f"mode must be 'loop', 'cycle' or 'shuffle', got {mode!r}")
     return [va[i:i + 1] for i in idx]
 
 
@@ -143,7 +159,8 @@ def main() -> None:
     ap.add_argument("--reps", type=int, default=200)
     ap.add_argument("--seg", type=int, default=8)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--modes", default="loop,shuffle")
+    ap.add_argument("--modes", default="loop,cycle,shuffle")
+    ap.add_argument("--pool", type=int, default=4, help="clips in the cycle pool")
     ap.add_argument("--eta-init", type=float, default=None, dest="eta_init")
     ap.add_argument("--cascade", action="store_true")
     ap.add_argument("--reservoirs", type=int, default=6)
@@ -180,12 +197,13 @@ def main() -> None:
 
     streams = {}
     for mode in a.modes.split(","):
-        clips = build_stream(va, a.reps, mode, seed=a.seed)
+        clips = build_stream(va, a.reps, mode, seed=a.seed, pool=a.pool)
         streams[mode] = run_stream(model, clips)
-        if mode == "loop":
-            # memory-off control on the identical clip order, so the echo advantage
-            # is measured against the same content and not against another clip.
-            streams["loop_memoff"] = run_stream(model, clips, reset_each=True)
+        # Memory-off control for EVERY mode, on the identical clip order. Comparing
+        # loop against shuffle would confound the memory's contribution with "clip 7
+        # happens to be easier than clip 312"; comparing each stream against itself
+        # with the carry dropped does not.
+        streams[mode + "_memoff"] = run_stream(model, clips, reset_each=True)
 
     def summary(tr):
         fin = [r for r in tr if r["finite"]]
@@ -205,6 +223,16 @@ def main() -> None:
             "all_finite": len(fin) == len(tr),
         }
 
+    summ = {k: summary(v) for k, v in streams.items()}
+    # The headline number: how much the threaded memory is worth at the END of the
+    # stream, on the same content. Positive = the memory still helps; ~0 = it has
+    # stopped carrying anything, whether or not it went non-finite.
+    for mode in a.modes.split(","):
+        on, off = summ.get(mode), summ.get(mode + "_memoff")
+        if on and off:
+            on["memory_gain_tail"] = off["l1_tail"] - on["l1_tail"]
+            on["memory_gain_rep0"] = off["l1_rep0"] - on["l1_rep0"]
+
     out = {
         "label": a.label or os.path.basename(a.ckpt),
         "ckpt": os.path.basename(a.ckpt), "train_step": step,
@@ -213,7 +241,7 @@ def main() -> None:
         "eta_init": cfg.get("eta_init"), "theta_scale": cfg.get("theta_scale"),
         "reps": a.reps, "T": va.shape[1], "dim": dim, "seg": a.seg,
         "tokens_per_stream": a.reps * va.shape[1],
-        "summary": {k: summary(v) for k, v in streams.items()},
+        "summary": summ,
         "elapsed_s": time.time() - t0,
     }
     print(json.dumps(out), flush=True)

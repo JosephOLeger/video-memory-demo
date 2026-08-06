@@ -99,3 +99,18 @@ def test_cascade_carry_is_diagnosable():
     tr = run_stream(m, build_stream(_va(), reps=3, mode="loop"))
     assert len(tr) == 3 and all(r["b0"]["finite"] for r in tr)
     assert tr[-1]["b0"]["S_norm"] > 0.0
+
+
+def test_cycle_reuses_a_small_pool_round_robin():
+    """The regime between loop and shuffle: repetition exists but is interleaved."""
+    va = _va(n=20)
+    clips = build_stream(va, reps=9, mode="cycle", pool=3)
+    assert len(clips) == 9
+    for r in range(9):
+        assert torch.equal(clips[r], clips[r % 3])
+    assert len({c[0, 0, 0].item() for c in clips}) == 3
+
+
+def test_pool_larger_than_the_cache_is_clamped():
+    clips = build_stream(_va(n=3), reps=6, mode="cycle", pool=99)
+    assert len({c[0, 0, 0].item() for c in clips}) <= 3
