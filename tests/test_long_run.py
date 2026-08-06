@@ -114,3 +114,22 @@ def test_cycle_reuses_a_small_pool_round_robin():
 def test_pool_larger_than_the_cache_is_clamped():
     clips = build_stream(_va(n=3), reps=6, mode="cycle", pool=99)
     assert len({c[0, 0, 0].item() for c in clips}) <= 3
+
+
+def test_memoff_baseline_matches_the_uncached_control():
+    """The cache must be exact, not an approximation: same numbers, fewer forwards."""
+    from titans.worldmodel.long_run import memoff_baseline
+    m, va = _model(), _va()
+    clips = build_stream(va, reps=6, mode="cycle", pool=2)
+    cached = memoff_baseline(m, clips)
+    plain = run_stream(m, clips, reset_each=True)
+    assert [r["rep"] for r in cached] == [r["rep"] for r in plain]
+    for c, q in zip(cached, plain):
+        assert c["l1"] == pytest.approx(q["l1"], rel=1e-12)
+
+
+def test_diag_every_subsamples_state_but_never_the_loss():
+    m = _model()
+    tr = run_stream(m, build_stream(_va(), reps=7, mode="loop"), diag_every=3)
+    assert all("l1" in r for r in tr)
+    assert [r["rep"] for r in tr if "b0" in r] == [0, 3, 6]   # 6 is the last rep
