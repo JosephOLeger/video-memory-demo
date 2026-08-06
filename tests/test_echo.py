@@ -62,13 +62,13 @@ def test_per_copy_scores_the_two_halves_separately():
     assert second == pytest.approx(1.0, abs=1e-5)
 
 
-def test_prepare_data_standardizes_a_raw_cache(tmp_path):
+def test_prepare_data_rejects_a_raw_cache(tmp_path):
+    """Raw caches used to be standardised and fed through a learned projection."""
     tp, vp = tmp_path / "tr.pt", tmp_path / "va.pt"
     torch.save({"latents": _latents() * 50 + 10}, tp)
     torch.save({"latents": _latents(seed=1) * 50 + 10}, vp)
-    tr, va, space = prepare_data(tp, vp)
-    assert space["kind"] == "standardized"
-    assert tr.mean().abs() < 0.1 and abs(tr.std() - 1.0) < 0.2
+    with pytest.raises(SystemExit, match="not a PCA cache"):
+        prepare_data(tp, vp)
 
 
 def test_prepare_data_detects_a_pca_cache(tmp_path):
@@ -89,21 +89,24 @@ def test_pca_run_has_no_learned_io_and_dim_follows_k(tmp_path):
     info = build(tp, vp, k=8, out_prefix=tmp_path / "red")
 
     r = run(_args(info["train"], info["val"], dim=999), "cpu")
-    assert r["io_projection"] is False
     assert r["dim"] == 8          # --dim 999 is ignored; k wins
     assert r["space"]["kind"] == "pca"
     for v in (r["memory_gain"], r["mem_effect"], r["pr"]):
         assert v == v             # not NaN
 
 
-def test_raw_run_keeps_the_learned_io(tmp_path):
-    """Non-PCA path is unchanged, so earlier sweep cells stay comparable."""
+def test_raw_cache_is_rejected(tmp_path):
+    """A non-PCA cache has nowhere to go now, and must say so instead of guessing.
+
+    Silently standardising a 1024-D cache and hoping dim matches is exactly the
+    failure this replaces: it would build a model in a space no result is comparable
+    to. The old learned-projection path was removed 2026-08-06.
+    """
     tp, vp = tmp_path / "tr.pt", tmp_path / "va.pt"
     torch.save({"latents": _latents(n=8, t=16, d=48)}, tp)
     torch.save({"latents": _latents(n=4, t=16, d=48, seed=1)}, vp)
-    r = run(_args(tp, vp), "cpu")
-    assert r["io_projection"] is True and r["dim"] == 16
-    assert r["space"]["kind"] == "standardized"
+    with pytest.raises(SystemExit, match="not a PCA cache"):
+        run(_args(tp, vp), "cpu")
 
 
 def test_result_is_json_serialisable(tmp_path):
@@ -111,7 +114,8 @@ def test_result_is_json_serialisable(tmp_path):
     tp, vp = tmp_path / "tr.pt", tmp_path / "va.pt"
     torch.save({"latents": _latents(n=8, t=16, d=48)}, tp)
     torch.save({"latents": _latents(n=4, t=16, d=48, seed=1)}, vp)
-    r = run(_args(tp, vp), "cpu")
+    info = build(tp, vp, k=8, out_prefix=tmp_path / "red")
+    r = run(_args(info["train"], info["val"]), "cpu")
     assert json.loads(json.dumps(r))["label"] == "t"
 
 
@@ -154,7 +158,8 @@ def test_run_reports_the_prefix_swap_fields(tmp_path):
     tp, vp = tmp_path / "tr.pt", tmp_path / "va.pt"
     torch.save({"latents": _latents(n=8, t=16, d=48)}, tp)
     torch.save({"latents": _latents(n=4, t=16, d=48, seed=1)}, vp)
-    r = run(_args(tp, vp), "cpu")
+    info = build(tp, vp, k=8, out_prefix=tmp_path / "red")
+    r = run(_args(info["train"], info["val"]), "cpu")
     assert r["second_repeat"] == r["second"]
     assert r["memory_gain"] == pytest.approx(r["second_cross"] - r["second_repeat"])
     assert r["second_cross"] == r["second_cross"]     # not NaN

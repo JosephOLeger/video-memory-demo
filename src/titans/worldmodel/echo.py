@@ -34,17 +34,16 @@ confound, and the old one has been deleted rather than kept as a second ranking.
 Result files produced before this change still carry the old field; they are
 historical data and are not comparable to ``memory_gain``.
 
-**PCA mode.** Pointed at a cache written by :mod:`titans.worldmodel.make_pca_cache`,
-the model runs directly on the fixed PCA basis with **no learned input/output
-projection** (``WorldModel(io_projection=False)``), and the standardisation is
-skipped -- the PCA already centres and (whitened) scales the data. With a learned
-``in_proj``/``out_proj`` at ``dim=64`` over 1024-D latents, 51% of the model's
-parameters sit in those two projections and only 16% in the memory; on a k=128 PCA
-cache it is 0% and 33%. Detected from the cache metadata rather than a flag, so a
-run cannot silently mix the two.
+**PCA only.** The cache must come from :mod:`titans.worldmodel.make_pca_cache`: the
+model runs directly on the fixed PCA basis and has no learned input/output projection
+at all, so a raw 1024-D cache has nowhere to go. Standardisation is likewise gone --
+the PCA already centres and (whitened) scales the data.
 
-**L1 values in PCA space are not comparable to non-PCA runs.** The reported
-``space`` field records which one produced a result.
+The learned-projection mode was removed on 2026-08-06. At ``dim=64`` over 1024-D
+latents 51% of the model's parameters sat in those two projections and only 16% in
+the memory, so a memory comparison was largely an I/O-capacity comparison; on a k=128
+PCA cache it is 0% and 33%. Results produced in that space are historical and are not
+comparable to anything here.
 """
 
 from __future__ import annotations
@@ -58,9 +57,9 @@ import torch
 import torch.nn.functional as F
 
 from .atlas import CONFIGS
-from .harness import _standardize, memory_health
+from .harness import memory_health
 from .model import WorldModel
-from .train import load_latent_cache, train_stats
+from .train import load_latent_cache
 from .training import train_loop
 
 
@@ -120,20 +119,24 @@ def build_cfg(a) -> dict:
 def prepare_data(train_path, val_path):
     """Load both splits and normalise them for training.
 
-    Returns ``(train, val, space)``. A PCA-reduced cache is used as-is (it is
-    already centred/whitened); a raw cache gets the per-channel standardisation
-    fitted on train. ``space`` describes which, and carries ``dim``/``io_projection``
-    for the model.
+    Returns ``(train, val, space)``. The cache must already be PCA-reduced -- it is
+    used as-is, being centred and (whitened) scaled by the reduction itself. A raw
+    cache is rejected rather than standardised: with no learned input projection there
+    is no way to map 1024-D latents onto the model width.
     """
     tr, meta = load_latent_cache(train_path)
     va, _ = load_latent_cache(val_path)
-    if "pca" in meta:
-        space = {"kind": "pca", "k": int(meta["k"]), "whiten": bool(meta["whiten"]),
-                 "explained": float(meta["explained"]),
-                 "latent_dim_original": int(meta.get("latent_dim_original", 0))}
-        return tr, va, space
-    m_, s_ = train_stats(tr)
-    return _standardize(tr, m_, s_), _standardize(va, m_, s_), {"kind": "standardized"}
+    if "pca" not in meta:
+        raise SystemExit(
+            f"{train_path} is not a PCA cache. The learned input/output projection was "
+            "removed, so the model runs directly in the latent space and the data must "
+            "arrive already reduced. Build one with "
+            "`python -m titans.worldmodel.make_pca_cache`."
+        )
+    space = {"kind": "pca", "k": int(meta["k"]), "whiten": bool(meta["whiten"]),
+             "explained": float(meta["explained"]),
+             "latent_dim_original": int(meta.get("latent_dim_original", 0))}
+    return tr, va, space
 
 
 def run(a, device) -> dict:
@@ -143,15 +146,11 @@ def run(a, device) -> dict:
     tr, va = tr.to(device), va.to(device)
     torch.manual_seed(a.seed)
     cfg = build_cfg(a)
-    if space["kind"] == "pca":
-        # The reduction IS the input representation: no learned projection sits
-        # between the data and the memory, so dim is dictated by the cache.
-        dim, io_projection = space["k"], False
-    else:
-        dim, io_projection = a.dim, True
+    # The reduction IS the input representation: no learned projection sits between
+    # the data and the memory, so dim is dictated by the cache, not by a flag.
+    dim = space["k"]
     model = WorldModel(latent_dim=tr.shape[-1], dim=dim, depth=2,
-                       segment_size=a.seg, io_projection=io_projection,
-                       **cfg).to(device)
+                       segment_size=a.seg, **cfg).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     # Train on [V;V] via train_loop, which adds resumable checkpointing and
     # optional truncated BPTT. With bptt_window=None and no --ckpt this is the
@@ -175,7 +174,7 @@ def run(a, device) -> dict:
                 leak=a.leak if a.cascade else None,
                 readout=(a.readout if a.cascade else None),
                 topology=(a.topology if a.cascade else None),
-                dim=dim, io_projection=io_projection, space=space,
+                dim=dim, space=space,
                 eta_init=getattr(a, "eta_init", None),
                 bptt_window=getattr(a, "bptt_window", None),
                 normalize_hidden=getattr(a, "normalize_hidden", None),
@@ -235,7 +234,7 @@ def main() -> None:
     r = run(a, dev)
     r["elapsed_s"] = time.time() - t0
     sp = r["space"]
-    tag = (f"PCA k={sp['k']}" if sp["kind"] == "pca" else "standardized")
+    tag = f"PCA k={sp['k']}"
     print(f"[{r['elapsed_s']:.0f}s] {a.label} K={r['horizon']} s{r['seed']} "
           f"seg={r['seg']} dim={r['dim']} [{tag}] PR={r['pr']:.1f}", flush=True)
     print(f"  memory_gain {r['memory_gain']:+.4f}  "

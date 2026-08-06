@@ -6,7 +6,7 @@ rather than in the long-term memory we actually study, and the projections are f
 to co-adapt with the memory -- which muddies "what did the memory learn?". Fixing a
 PCA basis instead makes the reduction a property of the data: the model then runs
 directly on ``k``-dim latents with no I/O projection at all
-(``WorldModel(io_projection=False)``).
+(the model has no learned I/O projection, so this is the only supported input).
 
 The basis is fitted on **train only** and applied to both splits, matching the
 standardisation convention, and it is stored alongside the reduced latents so any

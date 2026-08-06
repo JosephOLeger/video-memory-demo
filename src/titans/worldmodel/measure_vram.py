@@ -62,7 +62,7 @@ def peak_gib(train: str, val: str, *, horizon: int, batch: int, seg: int = 8,
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         model = WorldModel(latent_dim=tr.shape[-1], dim=space["k"], depth=2,
-                           segment_size=seg, io_projection=False,
+                           segment_size=seg,
                            **build_cfg(a)).to(device)
         opt = torch.optim.Adam(model.parameters(), lr=1e-3)
         for _ in range(steps):

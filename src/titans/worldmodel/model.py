@@ -6,8 +6,12 @@ encoder), predict the *next* latent ``Z_{t+1}`` from everything seen up to ``t``
 The long-term memory of the Titans blocks is what lets the prediction depend on
 far-past context rather than only the last few steps.
 
-Shapes throughout: ``z`` is ``[B, T, latent_dim]``; internally the model works in
-its own width ``dim`` and projects back to ``latent_dim`` at the end.
+Shapes throughout: ``z`` is ``[B, T, dim]`` and the model operates **directly** in
+that latent space -- there is no learned input or output projection. The
+dimensionality reduction is a property of the *dataset* (a fixed PCA basis, see
+:mod:`titans.worldmodel.bottleneck`), so no learned linear map sits between the
+data and the memory. The block's own ``out_proj`` residual (§4.4) still supplies a
+learnable output map inside each MAC block; what is gone is the model-level I/O.
 
     prediction[:, t]  is the model's guess for  z[:, t + 1]
 
@@ -28,23 +32,23 @@ class WorldModel(nn.Module):
 
     Parameters
     ----------
-    latent_dim: width of the input/target latent vectors (e.g. the encoder's
-        feature dimension).
-    dim: internal model width the MAC blocks operate in.
+    latent_dim: width of the input/target latent vectors. Must equal ``dim``: the
+        model has no I/O projection, so the data has to arrive already reduced.
+        Kept as an explicit argument (rather than inferred) so a mismatched cache
+        fails loudly at construction instead of silently later.
+    dim: model width, which is also the latent width.
     depth: number of stacked :class:`~titans.mac.TitansMACBlock` layers.
     segment_size: ``C`` for every block; the sequence length ``T`` must be a
         multiple of this (the blocks raise a clear error otherwise).
-    io_projection: when ``True`` (default) the model learns ``in_proj``
-        (``latent_dim -> dim``) and ``out_norm``/``out_proj`` (``dim -> latent_dim``).
-        When ``False`` all three become identities and the model operates *directly*
-        in the latent space, which then must already equal ``dim``. Use this with a
-        fixed PCA basis (:mod:`titans.worldmodel.bottleneck`): the dimensionality
-        reduction becomes a property of the *dataset* rather than a learned layer, so
-        no learned linear map sits between the data and the memory. Note the block's
-        own ``out_proj`` residual (§4.4) still supplies a learnable output map inside
-        each MAC block, so this removes the model-level I/O, not all output capacity.
     **block_kwargs: forwarded to each ``TitansMACBlock`` (e.g. ``num_heads``,
         ``num_persistent_tokens``, ``memory_num_layers``).
+
+    The learned ``in_proj``/``out_norm``/``out_proj`` were removed on 2026-08-06.
+    At ``dim=64`` over 1024-D latents they held 51% of the model's parameters, which
+    made every memory comparison a comparison of I/O capacity instead; and the RMSNorm
+    pinned every prediction to unit RMS while the targets kept their own scale. Runs
+    in that space are retired -- results quoted against it are not comparable to the
+    PCA space, and the corresponding caches are not usable here.
     """
 
     def __init__(
@@ -53,34 +57,25 @@ class WorldModel(nn.Module):
         dim: int = 128,
         depth: int = 2,
         segment_size: int = 8,
-        io_projection: bool = True,
         **block_kwargs,
     ):
         super().__init__()
+        if latent_dim != dim:
+            raise ValueError(
+                f"latent_dim must equal dim, got {latent_dim} != {dim}. The model runs "
+                "directly in the latent space; reduce the latents first "
+                "(e.g. bottleneck.pca_reduce_splits(k=dim))."
+            )
         self.latent_dim = latent_dim
         self.dim = dim
-        self.io_projection = io_projection
-        if not io_projection and latent_dim != dim:
-            raise ValueError(
-                f"io_projection=False needs latent_dim == dim, got {latent_dim} != {dim}. "
-                "Reduce the latents first (e.g. bottleneck.pca_reduce_splits(k=dim))."
-            )
-
-        self.in_proj = nn.Linear(latent_dim, dim) if io_projection else nn.Identity()
         self.blocks = nn.ModuleList(
             TitansMACBlock(dim, segment_size=segment_size, **block_kwargs)
             for _ in range(depth)
         )
-        # Both are dropped together when io_projection=False: an RMSNorm with no
-        # following projection would pin every prediction to unit RMS while the
-        # PCA targets keep their own scale -- the same scale mismatch documented
-        # for the memory's `normalize_output`.
-        self.out_norm = nn.RMSNorm(dim) if io_projection else nn.Identity()
-        self.out_proj = nn.Linear(dim, latent_dim) if io_projection else nn.Identity()
 
     def forward(self, z: torch.Tensor, carry=None, return_carry: bool = False,
                 return_features: bool = False):
-        """Map latents ``z`` ``[B, T, latent_dim]`` to per-step next-latent guesses.
+        """Map latents ``z`` ``[B, T, dim]`` to per-step next-latent guesses.
 
         Position ``t`` of the output predicts ``z[:, t + 1]``. Within a call the
         memory recurrence ``M_0 -> M_1 -> ...`` already threads across segments
@@ -92,22 +87,17 @@ class WorldModel(nn.Module):
         ``None`` to start fresh). With ``return_carry=True`` the updated per-block
         carry is returned alongside the prediction as ``(pred, carry)``.
 
-        With ``return_features=True`` the pre-output-projection features
-        ``[B, T, dim]`` are returned instead of the latent prediction, so an
-        alternative output head can consume them in place of the linear
-        ``out_proj``. Nothing in the repo uses this today (it was added for a
-        Gaussian-mixture head that has since been removed); it is kept because it
-        is the natural seam for any future non-L1 output objective.
+        ``return_features`` is now a no-op kept for call compatibility: with the I/O
+        projection gone the features *are* the prediction, so both branches return the
+        same tensor. It remains the natural seam for any future non-L1 output head.
         """
         if carry is None:
             carry = [(None, None)] * len(self.blocks)
 
-        h = self.in_proj(z)
+        h = z
         new_carry = []
         for block, (state, S) in zip(self.blocks, carry):
             h, state, S = block(h, state, S)
             new_carry.append((state, S))
 
-        feat = self.out_norm(h)
-        out = feat if return_features else self.out_proj(feat)
-        return (out, new_carry) if return_carry else out
+        return (h, new_carry) if return_carry else h

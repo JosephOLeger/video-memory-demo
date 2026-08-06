@@ -17,7 +17,7 @@ in the full 1024-D space is wasteful in two ways the project cares about:
 Fitting a PCA on the *train* latents and modelling in the reduced (optionally
 whitened) ``k``-dim space makes the reduction a property of the **dataset**: the
 model can then run with no I/O projection at all
-(:class:`~titans.worldmodel.model.WorldModel` with ``io_projection=False``). The
+(:class:`~titans.worldmodel.model.WorldModel`, which has no I/O projection). The
 cost is the reconstruction error -- measured on the 8000-sequence EgoLife cache,
 ``k=128`` keeps 85.7% of the variance and ``k=256`` keeps 92.9%. The transform is
 *fit on train only* (no val leakage) and applied to both splits.
@@ -89,7 +89,7 @@ def pca_reduce_splits(
 
     This is the "just change the dataset" path: the reduction is a **fixed, unlearned
     basis** applied to the data once, so a model can consume the reduced latents with
-    no input/output projection at all (``WorldModel(io_projection=False)``). Contrast
+    no input/output projection at all. Contrast
     the learned ``in_proj``/``out_proj``, which put most of a small model's parameters
     into mapping in and out of the 1024-D encoder space.
 

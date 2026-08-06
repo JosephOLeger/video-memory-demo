@@ -55,7 +55,7 @@ def memory_health(model, z: torch.Tensor, n_probe: int = 8) -> dict:
     blk = model.blocks[0]
     mem = blk.memory
     B = z.shape[0]
-    h = model.in_proj(z)
+    h = z
     C = blk.segment_size
     state, S = mem.init_memory(B)
     for i in range(h.shape[1] // C):
@@ -207,9 +207,10 @@ def run_config(
 
     ``pca_k`` reduces the latents to a **fixed** ``k``-dim PCA basis fitted on train
     (:func:`~titans.worldmodel.bottleneck.pca_reduce_splits`) and, unless the caller
-    overrides them, sets ``dim=k`` and ``io_projection=False`` -- i.e. the model runs
-    directly on the reduced data with no learned input/output projection. The PCA
-    centres (and, whitened, rescales) the data, so it *replaces* ``standardize``.
+    overrides it, sets ``dim=k``. The model has no learned input/output projection,
+    so the latents must arrive already reduced to ``dim``; a raw (unreduced) cache is
+    therefore rejected. The PCA centres (and, whitened, rescales) the data, so it
+    *replaces* ``standardize``.
 
     **Losses under ``pca_k`` live in the PCA space and are not comparable to runs
     without it** -- including the persistence baseline, which is recomputed in the
@@ -226,19 +227,23 @@ def run_config(
                     "explained": float(pre["explained"]), "prereduced": True}
         train_z, val_z = train_raw, val_raw
         model_kwargs.setdefault("dim", pca_info["k"])
-        model_kwargs.setdefault("io_projection", False)
     elif pca_k is not None:
         train_z, val_z, pca = pca_reduce_splits(train_raw, val_raw, pca_k,
                                                 whiten=pca_whiten)
         pca_info = {"k": pca_k, "whiten": pca_whiten, "explained": pca["explained"],
                     "prereduced": False}
         model_kwargs.setdefault("dim", pca_k)
-        model_kwargs.setdefault("io_projection", False)
-    elif standardize:
-        mean, std = train_stats(train_raw)
-        train_z, val_z = _standardize(train_raw, mean, std), _standardize(val_raw, mean, std)
     else:
-        train_z, val_z = train_raw, val_raw
+        # No PCA anywhere: the model cannot absorb a width mismatch any more, so this
+        # is only viable when the cache is already at the model width. Standardisation
+        # (a per-channel affine) does not change the width, so it stays available.
+        if standardize:
+            mean, std = train_stats(train_raw)
+            train_z = _standardize(train_raw, mean, std)
+            val_z = _standardize(val_raw, mean, std)
+        else:
+            train_z, val_z = train_raw, val_raw
+        model_kwargs.setdefault("dim", train_z.shape[-1])
 
     baseline = persistence_baseline_l1(val_z)
     per_seed = []

@@ -32,11 +32,11 @@ def test_titans_is_the_empty_config():
 
 def test_each_config_builds_and_differs_from_the_baseline():
     torch.manual_seed(0)
-    z = torch.randn(2, 16, 32)
+    z = torch.randn(2, 16, 16)
     outs = {}
     for name, cfg in CONFIGS.items():
         torch.manual_seed(1)
-        m = WorldModel(latent_dim=32, dim=16, depth=1, segment_size=8, **cfg)
+        m = WorldModel(latent_dim=16, dim=16, depth=1, segment_size=8, **cfg)
         out = m(z)
         assert out.shape == z.shape
         assert torch.isfinite(out).all(), f"{name} produced non-finite output"
@@ -53,9 +53,9 @@ def test_atlas_cascade_trains_end_to_end():
     gradients through the outer loop -- Newton-Schulz on the cascade readout was
     only wired today, so this path is new."""
     torch.manual_seed(0)
-    m = WorldModel(latent_dim=32, dim=16, depth=1, segment_size=8,
+    m = WorldModel(latent_dim=16, dim=16, depth=1, segment_size=8,
                    **CONFIGS["atlas_cascade"])
-    z = torch.randn(2, 16, 32)
+    z = torch.randn(2, 16, 16)
     loss = (m(z)[:, :-1] - z[:, 1:]).abs().mean()
     loss.backward()
     grads = [p.grad for p in m.parameters() if p.grad is not None]
@@ -75,8 +75,10 @@ def test_run_smoke(tmp_path):
     torch.save(torch.randn(8, 16, 12, generator=g), tr)
     torch.save(torch.randn(4, 16, 12, generator=g), va)
 
+    # dim must match the cache width: the model has no input projection to absorb
+    # a mismatch, it raises instead.
     res = run(tr, va, ["titans", "phi"], seeds=[0], epochs=1, batch_size=4,
-              dim=16, depth=1, segment_size=8)
+              dim=12, depth=1, segment_size=8)
     assert set(res) == {"titans", "phi"}
     for r in res.values():
         assert r["val_l1_mean"] == r["val_l1_mean"]        # finite

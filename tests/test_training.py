@@ -18,7 +18,7 @@ from titans.worldmodel.training import (
 def _model(dim=16, depth=1, seg=4):
     torch.manual_seed(0)
     return WorldModel(latent_dim=dim, dim=dim, depth=depth, segment_size=seg,
-                      io_projection=False)
+                      )
 
 
 def _data(b=4, t=16, d=16, seed=0):

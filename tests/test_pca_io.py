@@ -1,9 +1,10 @@
-"""PCA-reduced latents with no learned I/O projection.
+"""PCA-reduced latents, which is now the only input the model accepts.
 
-The point of `io_projection=False` is that the dimensionality reduction becomes a
-property of the *dataset* (a fixed PCA basis) rather than a learned layer, so these
-tests guard the two things that would silently break that contract: that no learned
-input/output map survives, and that the reduction is fitted on train only.
+The dimensionality reduction is a property of the *dataset* (a fixed PCA basis)
+rather than a learned layer, so these tests guard the two things that would silently
+break that contract: that no learned input/output map survives, and that the
+reduction is fitted on train only. The learned-projection mode was removed
+2026-08-06; a width mismatch must now be an error, never an implicit projection.
 """
 
 import pytest
@@ -21,24 +22,26 @@ def _latents(n=6, t=16, d=32, seed=0):
     return coef @ basis + 0.05 * torch.randn(n, t, d, generator=g)
 
 
-def test_no_learned_io_when_disabled():
-    m = WorldModel(latent_dim=16, dim=16, depth=1, segment_size=4, io_projection=False)
-    assert isinstance(m.in_proj, torch.nn.Identity)
-    assert isinstance(m.out_proj, torch.nn.Identity)
-    assert isinstance(m.out_norm, torch.nn.Identity)
+def test_no_learned_io_survives():
+    m = WorldModel(latent_dim=16, dim=16, depth=1, segment_size=4)
+    assert not hasattr(m, "in_proj") and not hasattr(m, "out_proj")
+    assert not hasattr(m, "out_norm")
     named = {n for n, _ in m.named_parameters()}
     assert not any(n.startswith(("in_proj", "out_proj.", "out_norm")) for n in named)
+    # every remaining parameter belongs to a block, i.e. to the memory or attention
+    assert all(n.startswith("blocks.") for n in named)
 
 
 def test_dim_mismatch_is_rejected():
-    with pytest.raises(ValueError, match="latent_dim == dim"):
-        WorldModel(latent_dim=64, dim=16, depth=1, segment_size=4, io_projection=False)
+    """No silent projection: a cache at the wrong width must fail at construction."""
+    with pytest.raises(ValueError, match="latent_dim must equal dim"):
+        WorldModel(latent_dim=64, dim=16, depth=1, segment_size=4)
 
 
 def test_forward_shape_and_trainability_without_io():
     k = 16
     z = _latents(n=4, t=8, d=k)
-    m = WorldModel(latent_dim=k, dim=k, depth=1, segment_size=4, io_projection=False)
+    m = WorldModel(latent_dim=k, dim=k, depth=1, segment_size=4)
     out = m(z)
     assert out.shape == z.shape
     assert torch.isfinite(out).all()
@@ -72,17 +75,8 @@ def test_end_to_end_pca_then_model():
     k = 16
     tr, va = _latents(n=8, t=8, d=48, seed=4), _latents(n=4, t=8, d=48, seed=5)
     tr_r, va_r, _ = pca_reduce_splits(tr, va, k)
-    m = WorldModel(latent_dim=k, dim=k, depth=1, segment_size=4, io_projection=False)
+    m = WorldModel(latent_dim=k, dim=k, depth=1, segment_size=4)
     assert m(va_r).shape == va_r.shape
-
-
-def test_io_projection_default_unchanged():
-    """Default path keeps the learned projections, so old results stay comparable."""
-    m = WorldModel(latent_dim=48, dim=16, depth=1, segment_size=4)
-    assert isinstance(m.in_proj, torch.nn.Linear)
-    assert isinstance(m.out_proj, torch.nn.Linear)
-    z = _latents(n=2, t=8, d=48)
-    assert m(z).shape == z.shape
 
 
 def test_prereduced_cache_is_autodetected(tmp_path):
@@ -100,5 +94,5 @@ def test_prereduced_cache_is_autodetected(tmp_path):
                    depth=1, segment_size=4, batch_size=2, device="cpu")
     # the harness recognised the reduction and configured the model for it
     assert r["pca"]["prereduced"] is True and r["pca"]["k"] == 8
-    assert r["config"]["dim"] == 8 and r["config"]["io_projection"] is False
+    assert r["config"]["dim"] == 8
     assert r["val_l1_mean"] == r["val_l1_mean"]  # finite, not NaN

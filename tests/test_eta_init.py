@@ -60,7 +60,7 @@ def test_plumbed_through_block_and_world_model():
     blk = TitansMACBlock(16, eta_init=0.99)
     assert _resting_eta(blk.memory) == pytest.approx(0.99, abs=1e-5)
     wm = WorldModel(latent_dim=16, dim=16, depth=1, segment_size=4,
-                    io_projection=False, eta_init=0.98)
+                    eta_init=0.98)
     assert _resting_eta(wm.blocks[0].memory) == pytest.approx(0.98, abs=1e-5)
     assert torch.isfinite(wm(torch.randn(2, 8, 16))).all()
 

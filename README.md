@@ -251,9 +251,15 @@ Measured with `sane_ns` at depth 2:
 | PCA `k=256`, no I/O | 1.98 M | **0 %** | **33.2 %** |
 
 `bottleneck.py` + `make_pca_cache.py` fit a PCA on **train only** and write reduced
-caches; `WorldModel(io_projection=False)` then runs directly on them with `in_proj`,
-`out_norm` and `out_proj` all identities. The reduction becomes a property of the
-*dataset*.
+caches; `WorldModel` runs directly on them. The reduction is a property of the
+*dataset*, not a learned layer.
+
+**The learned I/O projection was removed on 2026-08-06** (`in_proj`, `out_norm`,
+`out_proj` are gone, not identities). A PCA cache is now the only accepted input:
+`latent_dim` must equal `dim`, and a raw 1024-D cache raises rather than being
+standardised into a model whose results are comparable to nothing. Runs in the old
+learned-projection space are retired — they are also where 12 of the 15 non-finite
+echo runs came from.
 
 ```bash
 python -m titans.worldmodel.make_pca_cache \
@@ -265,11 +271,11 @@ On the 8000-sequence cache this takes **~20 s per k** (SVD 17 s): `k=128` keeps
 **85.7 %** of the variance, `k=256` keeps **92.9 %**. The basis is stored with the
 latents so any prediction is invertible to the 1024-D space (`inverse_pca`).
 
-The harness **auto-detects** a pre-reduced cache from its metadata and sets `dim`,
-`io_projection=False` and skips standardisation — deliberately detected from the
-data rather than trusted to a flag, because this repo has shipped flags that were
-silently inert. Note `out_norm` is dropped together with `out_proj`: an RMSNorm
-with no projection after it would pin every prediction to unit RMS while the
+The harness **auto-detects** a pre-reduced cache from its metadata and sets `dim`
+from it — deliberately detected from the data rather than trusted to a flag, because
+this repo has shipped flags that were silently inert. `out_norm` went with
+`out_proj`: an RMSNorm with no projection after it would pin every prediction to
+unit RMS while the
 targets keep their own scale.
 
 **L1 values in PCA space are not comparable to non-PCA runs.** `format_comparison`
@@ -381,8 +387,8 @@ be easy to break:
 * the echo probe's defining property: the two scored halves are bit-identical while
   the prefixes differ, and a deliberately memoryless predictor scores exactly
   `memory_gain = 0`;
-* PCA is fitted on train only, and `io_projection=False` really leaves no learned
-  I/O parameter behind;
+* PCA is fitted on train only, no learned I/O parameter survives (every parameter
+  is under `blocks.`), and a width mismatch raises instead of being projected away;
 * `normalize_hidden` holds `‖h₀‖` to its target *and* leaves `M(k)`'s scale free —
   the pair of properties that separate it from `normalize_output` (§8.8);
 * cropping a cache preserves both content order and the `pca` metadata the harness

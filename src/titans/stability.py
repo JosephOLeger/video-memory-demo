@@ -74,7 +74,10 @@ def weighted_gram_lambda_max(X: torch.Tensor, w: torch.Tensor) -> float:
     because ``m`` (the chunk, 8) is far smaller than ``d``.
     """
     Xd = X.detach().double()
-    r = w.detach().double().clamp_min(0).sqrt().unsqueeze(-1)
+    # chunk_weights builds on CPU (it is m-long and device-free by construction);
+    # X comes off whatever device the model runs on, so align here rather than
+    # threading a device argument through every caller.
+    r = w.detach().to(Xd.device).double().clamp_min(0).sqrt().unsqueeze(-1)
     G = (r * Xd) @ (r * Xd).T
     return float(2.0 * torch.linalg.eigvalsh(G).max())
 
