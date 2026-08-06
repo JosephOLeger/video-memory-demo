@@ -186,8 +186,10 @@ def trace_forward(mem, x: torch.Tensor, chunk_size: int, b: int = 0) -> list[dic
     k, v, q, alpha, eta, theta = mem._project(x)[:6]
     gamma = mem._gamma(x)
     B, N = x.shape[0], x.shape[1]
-    state = mem.memory.init_state(B)
-    S = {kk: torch.zeros_like(vv) for kk, vv in state.items()}
+    # init_memory, not zeros_like(state): under the cascade S carries a trailing
+    # reservoir axis [..., K] the weight tensors do not have, so zeros_like gives
+    # a shape cascade_step rejects.
+    state, S = mem.init_memory(B)
     out = []
     for c, start in enumerate(range(0, N, chunk_size)):
         end = min(start + chunk_size, N)
