@@ -163,3 +163,25 @@ def test_run_reports_the_prefix_swap_fields(tmp_path):
     assert r["second_repeat"] == r["second"]
     assert r["memory_gain"] == pytest.approx(r["second_cross"] - r["second_repeat"])
     assert r["second_cross"] == r["second_cross"]     # not NaN
+
+
+def test_frozen_out_writes_a_loadable_artifact(tmp_path):
+    """A sweep cell must leave something inference can use with no config flags."""
+    from titans.worldmodel.frozen import load_frozen
+
+    tp, vp = tmp_path / "tr.pt", tmp_path / "va.pt"
+    torch.save({"latents": _latents(n=8, t=16, d=48)}, tp)
+    torch.save({"latents": _latents(n=4, t=16, d=48, seed=1)}, vp)
+    info = build(tp, vp, k=8, out_prefix=tmp_path / "red")
+
+    a = _args(info["train"], info["val"])
+    a.frozen_out = str(tmp_path / "f.pt")
+    a.cascade, a.leak, a.leak_rate = True, "surprise", 0.1
+    r = run(a, "cpu")
+
+    model, meta = load_frozen(a.frozen_out)
+    assert meta["cfg"]["cascade_leak"] == "surprise"
+    assert meta["cfg"]["cascade_leak_rate"] == 0.1
+    assert meta["meta"]["seed"] == r["seed"]
+    assert not any(p.requires_grad for p in model.parameters())
+    assert r["leak_rate"] == 0.1

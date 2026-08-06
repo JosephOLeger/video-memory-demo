@@ -57,6 +57,7 @@ import torch
 import torch.nn.functional as F
 
 from .atlas import CONFIGS
+from .frozen import build_cfg as _build_cfg, save_frozen
 from .harness import memory_health
 from .model import WorldModel
 from .train import load_latent_cache
@@ -93,27 +94,21 @@ def per_copy_l1_K(model, seq, T, K, reset, batch=8, margin=4):
 
 
 def build_cfg(a) -> dict:
-    """SANE-only base (`sane_ns`) plus the cascade overrides the sweep varies."""
-    cfg = dict(CONFIGS["sane_ns"])            # healthy no-cascade SANE base
-    if getattr(a, "eta_init", None) is not None:
-        cfg["eta_init"] = a.eta_init
-    if getattr(a, "theta_scale", None) is not None:
-        cfg["theta_scale"] = a.theta_scale
-    if getattr(a, "normalize_hidden", None) is not None:
-        # L2-bound the last layer's Gauss-Newton curvature, 2||h_0||^2. Unlike
-        # normalize_output (which SANE removes) this leaves M(k)'s scale free.
-        cfg["normalize_hidden"] = a.normalize_hidden
-    if a.cascade:
-        cfg["memory_use_cascade"] = True
-        cfg["cascade_reservoirs"] = a.reservoirs
-        cfg["cascade_leak"] = a.leak
-        cfg["cascade_topology"] = a.topology
-        if a.readout != "none":
-            cfg["cascade_readout"] = a.readout
-        if a.selective:
-            cfg["cascade_selective"] = True
-        cfg["cascade_gate_signal"] = a.gate
-    return cfg
+    """SANE-only base (`sane_ns`) plus the overrides the sweep varies.
+
+    Delegates to :func:`titans.worldmodel.frozen.build_cfg` so that this module,
+    ``long_run.py`` and the frozen artifacts cannot drift into building three
+    slightly different models from the same flag names.
+    """
+    return _build_cfg(
+        "sane_ns",
+        eta_init=getattr(a, "eta_init", None),
+        theta_scale=getattr(a, "theta_scale", None),
+        normalize_hidden=getattr(a, "normalize_hidden", None),
+        cascade=a.cascade, reservoirs=a.reservoirs, leak=a.leak,
+        leak_rate=getattr(a, "leak_rate", 1.0), readout=a.readout,
+        selective=a.selective, gate=a.gate, topology=a.topology,
+    )
 
 
 def prepare_data(train_path, val_path):
@@ -161,6 +156,13 @@ def run(a, device) -> dict:
                ckpt_path=getattr(a, "ckpt", None),
                ckpt_every=getattr(a, "ckpt_every", 0),
                label=a.label, seed=a.seed, horizon_K=K)
+    if getattr(a, "frozen_out", None):
+        # Written before evaluation so a cell that dies in eval still leaves a usable
+        # artifact -- training is the expensive part and must not have to be redone.
+        save_frozen(model, cfg, a.frozen_out,
+                    meta={"label": a.label, "seed": a.seed, "steps": a.steps,
+                          "horizon_K": K, "train": str(a.train)})
+
     va = va[:a.n_eval]
     other = torch.roll(va, 1, 0)          # a different held-out video per row
     vv = double(va)                       # [V1 ; V1]
@@ -172,6 +174,7 @@ def run(a, device) -> dict:
     return dict(label=a.label, seed=a.seed, horizon=K, T=T, seg=a.seg,
                 cascade=a.cascade, reservoirs=a.reservoirs if a.cascade else 0,
                 leak=a.leak if a.cascade else None,
+                leak_rate=(getattr(a, "leak_rate", 1.0) if a.cascade else None),
                 readout=(a.readout if a.cascade else None),
                 topology=(a.topology if a.cascade else None),
                 dim=dim, space=space,
@@ -205,6 +208,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--cascade", action="store_true")
     ap.add_argument("--reservoirs", type=int, default=4)
     ap.add_argument("--leak", default="none")
+    ap.add_argument("--leak-rate", type=float, default=1.0, dest="leak_rate",
+                    help="rate of the surprise-driven leak: u <- exp(-r*theta_t) u. "
+                         "Below ~0.1 it is indistinguishable from leak=none.")
     ap.add_argument("--readout", default="mean")     # "none" -> leave default
     ap.add_argument("--selective", action="store_true")
     ap.add_argument("--gate", default="content")
@@ -223,6 +229,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--ckpt", default=None,
                     help="checkpoint path; an existing one is resumed from")
     ap.add_argument("--ckpt-every", type=int, default=0, dest="ckpt_every")
+    ap.add_argument("--frozen-out", default=None, dest="frozen_out",
+                    help="also write a self-describing frozen artifact (frozen.py), "
+                         "so downstream inference needs no config flags")
     ap.add_argument("--out", default=None)
     return ap
 

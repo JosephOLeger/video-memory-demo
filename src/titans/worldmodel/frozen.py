@@ -39,7 +39,8 @@ def build_cfg(config: str = "sane_ns", *, eta_init: Optional[float] = None,
               normalize_hidden: Optional[float] = None,
               cascade: bool = False, reservoirs: int = 6, leak: str = "none",
               leak_rate: float = 1.0, readout: str = "gated",
-              selective: bool = False, gate: str = "surprise") -> dict:
+              selective: bool = False, gate: str = "surprise",
+              topology: str = "chain") -> dict:
     """The kwargs a :class:`WorldModel` needs, from the sweep's own flag names.
 
     Kept in one place so ``echo.py``, ``long_run.py`` and this module cannot drift
@@ -55,7 +56,7 @@ def build_cfg(config: str = "sane_ns", *, eta_init: Optional[float] = None,
     if cascade:
         cfg.update(memory_use_cascade=True, cascade_reservoirs=reservoirs,
                    cascade_leak=leak, cascade_leak_rate=leak_rate,
-                   cascade_gate_signal=gate)
+                   cascade_gate_signal=gate, cascade_topology=topology)
         if readout != "none":
             cfg["cascade_readout"] = readout
         if selective:
@@ -121,6 +122,7 @@ def add_config_flags(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     ap.add_argument("--readout", default="gated")
     ap.add_argument("--selective", action="store_true")
     ap.add_argument("--gate", default="surprise")
+    ap.add_argument("--topology", default="chain")
     return ap
 
 
@@ -128,7 +130,8 @@ def cfg_from_args(a) -> dict:
     return build_cfg(a.config, eta_init=a.eta_init, theta_scale=a.theta_scale,
                      normalize_hidden=a.normalize_hidden, cascade=a.cascade,
                      reservoirs=a.reservoirs, leak=a.leak, leak_rate=a.leak_rate,
-                     readout=a.readout, selective=a.selective, gate=a.gate)
+                     readout=a.readout, selective=a.selective, gate=a.gate,
+                     topology=getattr(a, "topology", "chain"))
 
 
 def main() -> None:
