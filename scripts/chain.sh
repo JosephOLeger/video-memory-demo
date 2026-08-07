@@ -81,6 +81,14 @@ fi
 if pgrep -f "[f]rozen-every" >/dev/null; then
   exit 0                      # convergence trajectories still running
 fi
+# Score the snapshots. Nothing else does, and without it the trajectories are
+# written and never read.
+if [ ! -f cv_converge.json ] && ls frozen_cv/*_at*.pt >/dev/null 2>&1; then
+  echo "$(date '+%F %T') chain: convergence, lecture des instantanes" >> "$LOG"
+  CUDA_VISIBLE_DEVICES=0 $P -m titans.worldmodel.converge \
+      --frozen 'frozen_cv/*_at*.pt' --val "$VAL" --out cv_converge.json >> "$LOG" 2>&1
+  exit 0
+fi
 
 # --- phase 5: the denominator ------------------------------------------------
 # Every run in the PCA space so far is at seg=8 with the memory on, so neither
@@ -121,4 +129,28 @@ fi
 if [ -s jobs_cap.txt ]; then
   JOBS=jobs_cap.txt GUARD=13000 PREFIX=K SETTLE=120 TMO=21600 WORKERS=8 \
     bash "$HERE/keepalive.sh"
+  exit 0
 fi
+if pgrep -f "[w]orldmodel.echo" >/dev/null; then
+  exit 0
+fi
+
+# --- phase 8: retention curves on everything that has been trained since ------
+# The episodic horizon is the metric the project is actually about, so it must be
+# read on the long-stream and capacity artifacts too, not only on the V;V ones.
+# Evaluation only. Each arm's lowest seed, skipping what is already measured.
+for d in frozen_long frozen_base frozen_cap; do
+  [ -d "$d" ] || continue
+  for lab in $(ls $d/*.pt 2>/dev/null | sed 's|.*/||; s|_s[0-9]*\.pt$||' | sort -u); do
+    out="retention_out/${d#frozen_}_${lab}.json"
+    [ -f "$out" ] && continue
+    f=$(ls $d/${lab}_s*.pt 2>/dev/null | sort -V | head -1)
+    [ -n "$f" ] || continue
+    v="$VAL"
+    [ "$d" = frozen_long ] && v=cache/egolife_long256_val.pt
+    echo "$(date '+%F %T') chain: retention $lab" >> "$LOG"
+    CUDA_VISIBLE_DEVICES=0 $P -m titans.worldmodel.retention --frozen "$f" \
+        --val "$v" --n-eval 48 --out "$out" >> "$LOG" 2>&1
+    exit 0                    # one per cron tick, so a card is never monopolised
+  done
+done
