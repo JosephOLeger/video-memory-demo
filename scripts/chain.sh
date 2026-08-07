@@ -42,10 +42,16 @@ if [ ! -f vv_margins.json ] && ls frozen_vv/*.pt >/dev/null 2>&1; then
 
   # One length probe per arm (not per seed): the drift is an architecture property
   # and 46 of them would cost more than the sweep that produced them.
+  #
+  # The arm's *lowest available* seed, not seed 0: arms whose seed grid starts
+  # elsewhere (the eta top-ups start at 3) matched nothing under a `*_s0.pt` glob
+  # and were silently skipped. Already-computed probes are skipped too, so a
+  # re-run after adding cells costs only the new arms.
   : > jobs_vvlong.txt
-  for f in frozen_vv/*_s0.pt; do
-    [ -e "$f" ] || continue
-    lab=$(basename "$f" _s0.pt)
+  for lab in $(ls frozen_vv/*.pt 2>/dev/null | sed 's|.*/||; s|_s[0-9]*\.pt$||' | sort -u); do
+    [ -f "vvlong_${lab}.json" ] && continue
+    f=$(ls frozen_vv/${lab}_s*.pt 2>/dev/null | sort -V | head -1)
+    [ -n "$f" ] || continue
     echo "$P -m titans.worldmodel.long_run --frozen $f --val $VAL --reps 1000 --pool 4 --diag-every 10 --label $lab --out vvlong_${lab}.json" >> jobs_vvlong.txt
   done
   echo "$(date '+%F %T') chain: $(wc -l < jobs_vvlong.txt) sondes de longueur en file" >> "$LOG"
