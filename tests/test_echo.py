@@ -185,3 +185,30 @@ def test_frozen_out_writes_a_loadable_artifact(tmp_path):
     assert meta["meta"]["seed"] == r["seed"]
     assert not any(p.requires_grad for p in model.parameters())
     assert r["leak_rate"] == 0.1
+
+
+def test_cost_profile_separates_constant_state_from_growing_context():
+    """The motivating claim, made measurable: the memory's state does not grow with
+    the context, the KV cache does. An arm that matches the score at 8x the state is
+    not a counterexample, so the cost has to be on the record."""
+    from titans.worldmodel.echo import cost_profile
+    from titans.worldmodel.frozen import build_cfg
+    from titans.worldmodel.model import WorldModel
+
+    def prof(seg, **kw):
+        torch.manual_seed(0)
+        m = WorldModel(latent_dim=16, dim=16, depth=1, segment_size=seg,
+                       memory_num_layers=2, **build_cfg("sane_ns", **kw))
+        return cost_profile(m, T=64, device="cpu")
+
+    narrow, wide = prof(8), prof(32)
+    # the memory state is a property of the memory, not of the window
+    assert narrow["state_bytes"] == wide["state_bytes"] > 0
+    # the attention window's KV is not
+    assert wide["kv_bytes"] > narrow["kv_bytes"]
+    # and a full-context baseline is the thing the claim is really against
+    assert narrow["kv_bytes_full"] > narrow["kv_bytes"]
+
+    off = prof(8, use_memory=False)
+    assert off["state_bytes"] == 0
+    assert off["attn_window"] < narrow["attn_window"]

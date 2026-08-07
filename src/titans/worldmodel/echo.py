@@ -162,6 +162,40 @@ def evaluate(model, va: torch.Tensor, T: int, K: int, n_eval: int = 96) -> dict:
                 pr=h["pr"])
 
 
+def cost_profile(model, T: int, device) -> dict:
+    """What this architecture costs, so a memory arm can be compared to a wider window.
+
+    The motivating claim is that keeping long-term memory in *weights* is far cheaper
+    than keeping it in *context*. Testing it needs the cost on the record, not
+    assumed: an attention window that reaches the same score at 8x the state is not a
+    counterexample.
+
+    ``state_bytes`` is the memory carry -- weights plus momentum, **constant in
+    sequence length**. ``kv_bytes`` is what the attention window holds for the same
+    forward, which grows with ``segment_size``; ``kv_bytes_full`` is what a
+    full-context transformer would hold over ``T``, the baseline the claim is really
+    against.
+    """
+    blk = model.blocks[0]
+    C, dim, depth = blk.segment_size, model.dim, len(model.blocks)
+    el = 4                                            # float32
+    if blk.use_memory:
+        state, S = blk.memory.init_memory(1)
+        sb = sum(v.numel() for v in state.values()) + sum(v.numel() for v in S.values())
+        state_bytes = int(sb * el * depth)
+    else:
+        state_bytes = 0
+    # K and V over the block's own window: [persistent ; retrieved ; segment]
+    win = blk.persistent(1).shape[1] + (C if blk.use_memory else 0) + C
+    return {
+        "params": sum(p.numel() for p in model.parameters()),
+        "segment_size": C, "attn_window": int(win),
+        "state_bytes": state_bytes,
+        "kv_bytes": int(2 * win * dim * el * depth),
+        "kv_bytes_full": int(2 * T * dim * el * depth),
+    }
+
+
 def run(a, device) -> dict:
     tr, va, space = prepare_data(a.train, a.val)
     T = tr.shape[1]
@@ -175,6 +209,10 @@ def run(a, device) -> dict:
     model = WorldModel(latent_dim=tr.shape[-1], dim=dim, depth=2,
                        segment_size=a.seg, **cfg).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    cost = cost_profile(model, T, device)
+    if str(device).startswith("cuda"):
+        torch.cuda.reset_peak_memory_stats()
+    t_train = time.time()
     # Train on [V;V] via train_loop, which adds resumable checkpointing and
     # optional truncated BPTT. With bptt_window=None and no --ckpt this is the
     # same computation as the original inline loop.
@@ -210,7 +248,12 @@ def run(a, device) -> dict:
                     meta={"label": a.label, "seed": a.seed, "steps": a.steps,
                           "horizon_K": K, "train": str(a.train)})
 
-    return dict(**evaluate(model, va, T, K, a.n_eval),
+    cost["train_s"] = time.time() - t_train
+    cost["s_per_step"] = cost["train_s"] / max(a.steps, 1)
+    if str(device).startswith("cuda"):
+        cost["peak_vram_gib"] = torch.cuda.max_memory_allocated() / 2 ** 30
+
+    return dict(**evaluate(model, va, T, K, a.n_eval), cost=cost,
                 label=a.label, seed=a.seed, horizon=K, T=T, seg=a.seg,
                 cascade=a.cascade, reservoirs=a.reservoirs if a.cascade else 0,
                 leak=a.leak if a.cascade else None,
@@ -225,7 +268,7 @@ def run(a, device) -> dict:
                 bptt_window=getattr(a, "bptt_window", None),
                 normalize_hidden=getattr(a, "normalize_hidden", None),
                 theta_scale=cfg.get("theta_scale"),
-                params=sum(p.numel() for p in model.parameters()))
+                params=cost["params"])
 
 
 def build_parser() -> argparse.ArgumentParser:
