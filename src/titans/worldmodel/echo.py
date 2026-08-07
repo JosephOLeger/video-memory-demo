@@ -134,6 +134,31 @@ def prepare_data(train_path, val_path):
     return tr, va, space
 
 
+@torch.no_grad()
+def evaluate(model, va: torch.Tensor, T: int, K: int, n_eval: int = 96) -> dict:
+    """The [V;V] echo scores for a model, with no training involved.
+
+    Split out of :func:`run` so a *saved* model can be scored -- which is what a
+    convergence check needs: the same metric at several training steps, without
+    re-training once per point.
+    """
+    va = va[:n_eval]
+    other = torch.roll(va, 1, 0)          # a different held-out video per row
+    vv = double(va)                       # [V1 ; V1]
+    cross = double(other, va)             # [V2 ; V1]  -- same second half as vv
+    f, s = per_copy_l1_K(model, vv, T, K, reset=False)
+    _, s_off = per_copy_l1_K(model, vv, T, K, reset=True)
+    _, s_cross = per_copy_l1_K(model, cross, T, K, reset=False)
+    h = memory_health(model, va[:4])
+    return dict(first=f, second=s, echo_gain=f - s,
+                second_memoff=s_off, echo_gain_memoff=f - s_off,
+                # prefix-swap probe: identical scored content, only the prefix differs
+                second_repeat=s, second_cross=s_cross,
+                memory_gain=s_cross - s,           # >0 => the memory retained V1
+                mem_effect=s_off - s,              # >0 => threaded memory helps
+                pr=h["pr"])
+
+
 def run(a, device) -> dict:
     tr, va, space = prepare_data(a.train, a.val)
     T = tr.shape[1]
@@ -150,12 +175,31 @@ def run(a, device) -> dict:
     # Train on [V;V] via train_loop, which adds resumable checkpointing and
     # optional truncated BPTT. With bptt_window=None and no --ckpt this is the
     # same computation as the original inline loop.
-    train_loop(model, tr, steps=a.steps, opt=opt, batch_size=a.batch,
-               transform=double,
-               horizon=K, window=getattr(a, "bptt_window", None),
-               ckpt_path=getattr(a, "ckpt", None),
-               ckpt_every=getattr(a, "ckpt_every", 0),
-               label=a.label, seed=a.seed, horizon_K=K)
+    every = getattr(a, "frozen_every", 0)
+    if every and getattr(a, "frozen_out", None):
+        # Numbered snapshots along one training run, rather than N separate runs to
+        # N step counts: the convergence question is "does this trajectory settle",
+        # and re-training per point would cost the sum of the points instead of the
+        # largest, and answer a slightly different question (a fresh trajectory each).
+        base = a.frozen_out[:-3] if a.frozen_out.endswith(".pt") else a.frozen_out
+        done = 0
+        while done < a.steps:
+            chunk = min(every, a.steps - done)
+            train_loop(model, tr, steps=chunk, opt=opt, batch_size=a.batch,
+                       transform=double, horizon=K,
+                       window=getattr(a, "bptt_window", None),
+                       label=a.label, seed=a.seed, horizon_K=K)
+            done += chunk
+            save_frozen(model, cfg, f"{base}_at{done}.pt",
+                        meta={"label": a.label, "seed": a.seed, "steps": done,
+                              "horizon_K": K, "train": str(a.train)})
+    else:
+        train_loop(model, tr, steps=a.steps, opt=opt, batch_size=a.batch,
+                   transform=double,
+                   horizon=K, window=getattr(a, "bptt_window", None),
+                   ckpt_path=getattr(a, "ckpt", None),
+                   ckpt_every=getattr(a, "ckpt_every", 0),
+                   label=a.label, seed=a.seed, horizon_K=K)
     if getattr(a, "frozen_out", None):
         # Written before evaluation so a cell that dies in eval still leaves a usable
         # artifact -- training is the expensive part and must not have to be redone.
@@ -163,15 +207,8 @@ def run(a, device) -> dict:
                     meta={"label": a.label, "seed": a.seed, "steps": a.steps,
                           "horizon_K": K, "train": str(a.train)})
 
-    va = va[:a.n_eval]
-    other = torch.roll(va, 1, 0)          # a different held-out video per row
-    vv = double(va)                       # [V1 ; V1]
-    cross = double(other, va)             # [V2 ; V1]  -- same second half as vv
-    f, s = per_copy_l1_K(model, vv, T, K, reset=False)
-    _, s_off = per_copy_l1_K(model, vv, T, K, reset=True)
-    _, s_cross = per_copy_l1_K(model, cross, T, K, reset=False)
-    h = memory_health(model, va[:4])
-    return dict(label=a.label, seed=a.seed, horizon=K, T=T, seg=a.seg,
+    return dict(**evaluate(model, va, T, K, a.n_eval),
+                label=a.label, seed=a.seed, horizon=K, T=T, seg=a.seg,
                 cascade=a.cascade, reservoirs=a.reservoirs if a.cascade else 0,
                 leak=a.leak if a.cascade else None,
                 leak_rate=(getattr(a, "leak_rate", 1.0) if a.cascade else None),
@@ -182,14 +219,7 @@ def run(a, device) -> dict:
                 bptt_window=getattr(a, "bptt_window", None),
                 normalize_hidden=getattr(a, "normalize_hidden", None),
                 theta_scale=cfg.get("theta_scale"),
-                params=sum(p.numel() for p in model.parameters()),
-                first=f, second=s, echo_gain=f - s,
-                second_memoff=s_off, echo_gain_memoff=f - s_off,
-                # prefix-swap probe: identical scored content, only the prefix differs
-                second_repeat=s, second_cross=s_cross,
-                memory_gain=s_cross - s,           # >0 => the memory retained V1
-                mem_effect=s_off - s,              # >0 => threaded memory helps
-                pr=h["pr"])
+                params=sum(p.numel() for p in model.parameters()))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -229,6 +259,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--ckpt", default=None,
                     help="checkpoint path; an existing one is resumed from")
     ap.add_argument("--ckpt-every", type=int, default=0, dest="ckpt_every")
+    ap.add_argument("--frozen-every", type=int, default=0, dest="frozen_every",
+                    help="also save a numbered frozen snapshot every N steps, for a "
+                         "convergence check along one trajectory")
     ap.add_argument("--frozen-out", default=None, dest="frozen_out",
                     help="also write a self-describing frozen artifact (frozen.py), "
                          "so downstream inference needs no config flags")
