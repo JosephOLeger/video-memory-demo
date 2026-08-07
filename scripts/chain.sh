@@ -98,7 +98,23 @@ if pgrep -f "[w]orldmodel.echo" >/dev/null; then
   exit 0
 fi
 
-# --- phase 6: capacity -------------------------------------------------------
+# --- phase 6: the long-stream study, which is what tests the motivating claim --
+# Contiguous 256-latent streams rebuilt from EgoLife's own segments, full BPTT over
+# the doubled 512 so the echo's copy distance actually receives gradient. At T=256
+# a full context's KV weighs 512 KiB against 516 KiB of memory state -- exactly the
+# crossover, and 4x past where every earlier measurement sat.
+# GUARD 15000 and WORKERS 4: a cell peaks at 12.9 GiB, so one per card. TMO 36000
+# because 2500 steps at 9.5 s is 6.6 h, past the usual 6 h timeout.
+if [ -s jobs_long.txt ]; then
+  JOBS=jobs_long.txt GUARD=15000 PREFIX=G SETTLE=180 TMO=36000 WORKERS=4 \
+    bash "$HERE/keepalive.sh"
+  exit 0
+fi
+if pgrep -f "[l]ong256" >/dev/null; then
+  exit 0
+fi
+
+# --- phase 7: capacity -------------------------------------------------------
 # How many items an associative memory holds has never been measured. The memory
 # MLP's width is the direct axis; the retention curve read off these artifacts
 # afterwards gives capacity x horizon together.
