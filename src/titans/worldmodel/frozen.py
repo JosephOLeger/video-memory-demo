@@ -40,13 +40,26 @@ def build_cfg(config: str = "sane_ns", *, eta_init: Optional[float] = None,
               cascade: bool = False, reservoirs: int = 6, leak: str = "none",
               leak_rate: float = 1.0, readout: str = "gated",
               selective: bool = False, gate: str = "surprise",
-              topology: str = "chain") -> dict:
+              topology: str = "chain", use_memory: bool = True,
+              memory_hidden_dim: Optional[int] = None,
+              memory_chunk_size: Optional[int] = None) -> dict:
     """The kwargs a :class:`WorldModel` needs, from the sweep's own flag names.
 
     Kept in one place so ``echo.py``, ``long_run.py`` and this module cannot drift
     into building three slightly different models from the same flags.
     """
     cfg = dict(CONFIGS[config])
+    if not use_memory:
+        # The ablation the whole claim is measured against: same block, memory branch
+        # removed. Without it "the memory helps" has no denominator.
+        cfg["use_memory"] = False
+    if memory_hidden_dim is not None:
+        cfg["memory_hidden_dim"] = memory_hidden_dim
+    if memory_chunk_size is not None:
+        # Pinning m while segment_size varies is what isolates "wider attention
+        # window" from "longer inner-loop chunk"; left to its default (= seg) the
+        # two move together and the arm cannot be interpreted.
+        cfg["memory_chunk_size"] = memory_chunk_size
     if eta_init is not None:
         cfg["eta_init"] = eta_init
     if theta_scale is not None:
@@ -123,6 +136,12 @@ def add_config_flags(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     ap.add_argument("--selective", action="store_true")
     ap.add_argument("--gate", default="surprise")
     ap.add_argument("--topology", default="chain")
+    ap.add_argument("--no-memory", action="store_true", dest="no_memory",
+                    help="ablate the memory branch entirely (attention-only control)")
+    ap.add_argument("--memory-hidden", type=int, default=None, dest="memory_hidden_dim",
+                    help="width of the memory MLP's hidden layer (capacity axis)")
+    ap.add_argument("--memory-chunk", type=int, default=None, dest="memory_chunk_size",
+                    help="inner-loop chunk m; defaults to segment_size")
     return ap
 
 
@@ -131,7 +150,10 @@ def cfg_from_args(a) -> dict:
                      normalize_hidden=a.normalize_hidden, cascade=a.cascade,
                      reservoirs=a.reservoirs, leak=a.leak, leak_rate=a.leak_rate,
                      readout=a.readout, selective=a.selective, gate=a.gate,
-                     topology=getattr(a, "topology", "chain"))
+                     topology=getattr(a, "topology", "chain"),
+                     use_memory=not getattr(a, "no_memory", False),
+                     memory_hidden_dim=getattr(a, "memory_hidden_dim", None),
+                     memory_chunk_size=getattr(a, "memory_chunk_size", None))
 
 
 def main() -> None:

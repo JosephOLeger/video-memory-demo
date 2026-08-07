@@ -126,3 +126,33 @@ def test_topology_actually_changes_the_computation():
         with torch.no_grad():
             outs.append(m(z))
     assert not torch.allclose(outs[0], outs[1])
+
+
+def test_no_memory_ablation_removes_the_branch():
+    """The denominator for every 'the memory helps' claim in the project."""
+    cfg = build_cfg("sane_ns", use_memory=False)
+    m = WorldModel(latent_dim=8, dim=8, depth=1, segment_size=4,
+                   memory_num_layers=2, **cfg)
+    assert m.blocks[0].use_memory is False
+    z = torch.randn(2, 8, 8)
+    assert torch.isfinite(m(z)).all()
+
+
+def test_memory_hidden_dim_reaches_the_mlp():
+    """The capacity axis: it must change the stored weights, not just be accepted."""
+    small = WorldModel(latent_dim=8, dim=8, depth=1, segment_size=4,
+                       memory_num_layers=2, **build_cfg("sane_ns", memory_hidden_dim=16))
+    big = WorldModel(latent_dim=8, dim=8, depth=1, segment_size=4,
+                     memory_num_layers=2, **build_cfg("sane_ns", memory_hidden_dim=64))
+    assert small.blocks[0].memory.memory.params["w0"].shape[0] == 16
+    assert big.blocks[0].memory.memory.params["w0"].shape[0] == 64
+
+
+def test_memory_chunk_can_be_pinned_independently_of_the_segment():
+    """Isolating 'wider attention window' from 'longer inner chunk': without this
+    the two move together and a seg sweep cannot be interpreted."""
+    cfg = build_cfg("sane_ns", memory_chunk_size=8)
+    m = WorldModel(latent_dim=8, dim=8, depth=1, segment_size=32,
+                   memory_num_layers=2, **cfg)
+    assert m.blocks[0].segment_size == 32
+    assert m.blocks[0].memory_chunk_size == 8

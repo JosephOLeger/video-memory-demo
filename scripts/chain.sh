@@ -76,4 +76,33 @@ fi
 if [ -s jobs_cv.txt ]; then
   JOBS=jobs_cv.txt GUARD=11000 PREFIX=C SETTLE=120 TMO=36000 WORKERS=3 \
     bash "$HERE/keepalive.sh"
+  exit 0
+fi
+if pgrep -f "[f]rozen-every" >/dev/null; then
+  exit 0                      # convergence trajectories still running
+fi
+
+# --- phase 5: the denominator ------------------------------------------------
+# Every run in the PCA space so far is at seg=8 with the memory on, so neither
+# ablating the memory nor widening the attention window has ever been measured
+# here. Without both, "the memory helps" has no comparison point and the claim
+# that matters -- distant events *without widening the context* -- has never been
+# put against the trivial alternative, which is to widen the context.
+# GUARD 13000: seg=64 holds a 4x wider attention window than the reference cell.
+if [ -s jobs_base.txt ]; then
+  JOBS=jobs_base.txt GUARD=13000 PREFIX=B SETTLE=120 TMO=21600 WORKERS=8 \
+    bash "$HERE/keepalive.sh"
+  exit 0
+fi
+if pgrep -f "[w]orldmodel.echo" >/dev/null; then
+  exit 0
+fi
+
+# --- phase 6: capacity -------------------------------------------------------
+# How many items an associative memory holds has never been measured. The memory
+# MLP's width is the direct axis; the retention curve read off these artifacts
+# afterwards gives capacity x horizon together.
+if [ -s jobs_cap.txt ]; then
+  JOBS=jobs_cap.txt GUARD=13000 PREFIX=K SETTLE=120 TMO=21600 WORKERS=8 \
+    bash "$HERE/keepalive.sh"
 fi

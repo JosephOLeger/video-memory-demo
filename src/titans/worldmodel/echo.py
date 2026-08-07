@@ -108,6 +108,9 @@ def build_cfg(a) -> dict:
         cascade=a.cascade, reservoirs=a.reservoirs, leak=a.leak,
         leak_rate=getattr(a, "leak_rate", 1.0), readout=a.readout,
         selective=a.selective, gate=a.gate, topology=a.topology,
+        use_memory=not getattr(a, "no_memory", False),
+        memory_hidden_dim=getattr(a, "memory_hidden_dim", None),
+        memory_chunk_size=getattr(a, "memory_chunk_size", None),
     )
 
 
@@ -214,6 +217,9 @@ def run(a, device) -> dict:
                 leak_rate=(getattr(a, "leak_rate", 1.0) if a.cascade else None),
                 readout=(a.readout if a.cascade else None),
                 topology=(a.topology if a.cascade else None),
+                use_memory=not getattr(a, "no_memory", False),
+                memory_hidden_dim=getattr(a, "memory_hidden_dim", None),
+                memory_chunk=getattr(a, "memory_chunk_size", None),
                 dim=dim, space=space,
                 eta_init=getattr(a, "eta_init", None),
                 bptt_window=getattr(a, "bptt_window", None),
@@ -245,6 +251,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--selective", action="store_true")
     ap.add_argument("--gate", default="content")
     ap.add_argument("--topology", default="chain")
+    ap.add_argument("--no-memory", action="store_true", dest="no_memory",
+                    help="ablate the memory branch: the attention-only control that "
+                         "gives 'the memory helps' a denominator")
+    ap.add_argument("--memory-hidden", type=int, default=None, dest="memory_hidden_dim")
+    ap.add_argument("--memory-chunk", type=int, default=None, dest="memory_chunk_size")
     ap.add_argument("--theta-scale", type=float, default=None, dest="theta_scale",
                     help="inner-step scale; 0.01 fixes the NaN divergence, 0.03 is SANE's default")
     ap.add_argument("--eta-init", type=float, default=None, dest="eta_init",
