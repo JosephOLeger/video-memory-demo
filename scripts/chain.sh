@@ -62,4 +62,18 @@ fi
 if [ -s jobs_vvlong.txt ]; then
   JOBS=jobs_vvlong.txt GUARD=6000 PREFIX=L SETTLE=30 TMO=21600 WORKERS=4 \
     bash "$HERE/keepalive.sh"
+  exit 0
+fi
+if pgrep -f "[w]orldmodel.long_run" >/dev/null; then
+  exit 0
+fi
+
+# --- phase 4: convergence, one long trajectory per arm -----------------------
+# TMO 36000, not the usual 21600: these are 10000 steps, ~6.2 h at the reference
+# cell's rate, so a 6 h timeout would kill and requeue every one of them forever --
+# the treadmill that ate an entire sweep on 2026-07-29. WORKERS 3 because there are
+# three arms and nothing is gained by more.
+if [ -s jobs_cv.txt ]; then
+  JOBS=jobs_cv.txt GUARD=11000 PREFIX=C SETTLE=120 TMO=36000 WORKERS=3 \
+    bash "$HERE/keepalive.sh"
 fi
