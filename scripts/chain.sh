@@ -149,6 +149,18 @@ if pgrep -f "[s]teps 10000" >/dev/null; then
   exit 0
 fi
 
+# --- phase 7c: the honest full-attention baseline ----------------------------
+# The nomem arms of the denominator study score 0.0000 by *construction*:
+# memory_gain contrasts [V;D;V] with [U;D;V], which differ only in the first block,
+# so an attention window that does not span the boundary cannot see the difference.
+# seg >= 2T is required for the comparison to mean anything -- and then it becomes a
+# comparison of cost, which is the actual claim.
+if [ -s jobs_fair.txt ]; then
+  JOBS=jobs_fair.txt GUARD=8000 PREFIX=F SETTLE=60 TMO=21600 WORKERS=6 \
+    bash "$HERE/keepalive.sh"
+  exit 0
+fi
+
 # --- phase 8: retention curves on everything that has been trained since ------
 # The episodic horizon is the metric the project is actually about, so it must be
 # read on the long-stream and capacity artifacts too, not only on the V;V ones.
