@@ -165,7 +165,7 @@ fi
 # The episodic horizon is the metric the project is actually about, so it must be
 # read on the long-stream and capacity artifacts too, not only on the V;V ones.
 # Evaluation only. Each arm's lowest seed, skipping what is already measured.
-for d in frozen_long frozen_base frozen_cap; do
+for d in frozen_10k frozen_fair frozen_long frozen_base frozen_cap; do
   [ -d "$d" ] || continue
   for lab in $(ls $d/*.pt 2>/dev/null | sed 's|.*/||; s|_s[0-9]*\.pt$||' | sort -u); do
     out="retention_out/${d#frozen_}_${lab}.json"
@@ -174,6 +174,7 @@ for d in frozen_long frozen_base frozen_cap; do
     [ -n "$f" ] || continue
     v="$VAL"
     [ "$d" = frozen_long ] && v=cache/egolife_long256_val.pt
+    case "$lab" in *_T256) v=cache/egolife_long256_val.pt ;; esac
     echo "$(date '+%F %T') chain: retention $lab" >> "$LOG"
     CUDA_VISIBLE_DEVICES=0 $P -m titans.worldmodel.retention --frozen "$f" \
         --val "$v" --n-eval 48 --out "$out" >> "$LOG" 2>&1
