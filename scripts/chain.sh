@@ -135,6 +135,20 @@ if pgrep -f "[w]orldmodel.echo" >/dev/null; then
   exit 0
 fi
 
+# --- phase 7b: the comparison redone at a converged step count ---------------
+# Convergence (2026-08-12) showed memory_gain still doubling between 2500 and 10000
+# steps with no plateau, and the margin degrading 3-5x over the same interval. Every
+# number in the project was a snapshot on a steep curve, so the arms that carry
+# claims are rerun at 10000. TMO 36000: 6.2 h a cell.
+if [ -s jobs_10k.txt ]; then
+  JOBS=jobs_10k.txt GUARD=11000 PREFIX=T SETTLE=120 TMO=36000 WORKERS=8 \
+    bash "$HERE/keepalive.sh"
+  exit 0
+fi
+if pgrep -f "[s]teps 10000" >/dev/null; then
+  exit 0
+fi
+
 # --- phase 8: retention curves on everything that has been trained since ------
 # The episodic horizon is the metric the project is actually about, so it must be
 # read on the long-stream and capacity artifacts too, not only on the V;V ones.
