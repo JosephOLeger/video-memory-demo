@@ -22,7 +22,7 @@ chunked block "quadratic"; it isn't.
 | | |
 |---|---|
 | settled | the gate/normalisation set that works (`SANE`, §8.1); memory beats a memory-off control at distance 0 and loses past it (§8.10); the ATLAS bound does not cover this architecture (§8.5); 2500 steps ≈ ⅓ of the asymptote, `τ_train` ≈ 8 900 (§8.8) |
-| live | why the cascade sits past the stability bound, and whether readout dilution explains it (§8.11); where `τ*` sits, i.e. how large `1/(1−η)` can get before long streams break (§8.9) |
+| live | **`eta_init` is not `η`** — the outer loop moves the momentum gate bimodally, to ~0 or back to its start, so most "η = 0.9" arms have no momentum at all (see the note opening §8). Re-scoring the sweeps on the *measured* gate is the first thing to do; why the cascade sits past the stability bound, and whether readout dilution explains it (§8.11); where `τ*` sits (§8.9) |
 | refuted | the stability *margin* as a survival criterion — three independent tests, one of them blind (§8.9). Use `d log‖S‖/dt` instead |
 | abandoned | the synthetic MQAR/copy/needle benchmark and its `membench` package, removed 2026-08-14. EgoLifeQA is the benchmark; **we do not invent new ones** |
 | next | graft the memory block into a pretrained VLM (LLaVA). That is the paper's main claim; everything here is the evidence that the block is sound |
@@ -425,6 +425,33 @@ That last class — "does the flag do anything?" — is the one worth extending 
 adding a flag.
 
 ## 8. Results
+
+> **Read every "η = x" label below as "`eta_init` = x", not as the momentum the
+> model ended up using.** Measured 2026-08-14 on 58 frozen artefacts: the outer loop
+> moves the momentum gate far off its initialisation, and it does so **bimodally** —
+> either back to ~0 or roughly to where it started, nothing between.
+>
+> | `eta_init` | learned `η` per seed |
+> |---|---|
+> | 0.7 | 0.000, 0.000, 0.043 |
+> | 0.9 | 0.001, 0.000, 0.961, 0.631, 0.032, 0.000 (6 seeds) |
+> | 0.95-0.97 | 0.93-0.98 on two seeds, 0.05 on the third |
+> | 0.995-0.999 | 0.98-0.997 on all seeds |
+>
+> So `eta_init` selects a **basin**, it does not set `η`, and the boundary sits near
+> 0.95. Two consequences, both unresolved at the time of writing: any statement here
+> of the form "at η = 0.9, so `τ_acc` = 10 tokens" is about a model whose real
+> `τ_acc` is ~1 for most seeds; and the `τ*` bracket of §8.9 is computed on that
+> mislabelled axis, so its *numbers* are provisional even though the transition it
+> brackets is real. Worse for §8.8: the single 40 000-step arm has `η = 6e-6` **and**
+> `α = 2e-6`, i.e. no momentum and no forgetting — a pure accumulator on `M`. Its
+> convergence numbers are measured and stand; the mechanism attributed to them does
+> not.
+>
+> Note also the anticorrelation, which is the §8.11 compensation loop appearing on the
+> scalar arm: the seeds that keep `η ≈ 0.96` train `θ_max ≈ 0.004`, those that drop to
+> `η ≈ 0` train `θ_max ≈ 0.024-0.043`. Momentum and step size are substitutes, and the
+> outer loop picks one.
 
 ### 8.1 The gate/normalisation set (SANE) is what matters
 
