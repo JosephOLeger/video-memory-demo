@@ -108,9 +108,11 @@ def build_cfg(a) -> dict:
         cascade=a.cascade, reservoirs=a.reservoirs, leak=a.leak,
         leak_rate=getattr(a, "leak_rate", 1.0), readout=a.readout,
         selective=a.selective, gate=a.gate, topology=a.topology,
+        beta1=getattr(a, "cascade_beta1", None), g=getattr(a, "cascade_g", None),
         use_memory=not getattr(a, "no_memory", False),
         memory_hidden_dim=getattr(a, "memory_hidden_dim", None),
         memory_chunk_size=getattr(a, "memory_chunk_size", None),
+        num_heads=getattr(a, "num_heads", None),
     )
 
 
@@ -255,6 +257,10 @@ def run(a, device) -> dict:
 
     return dict(**evaluate(model, va, T, K, a.n_eval), cost=cost,
                 label=a.label, seed=a.seed, horizon=K, T=T, seg=a.seg,
+                # On the record because 2500 was never an equilibrium (memory_gain
+                # still doubling at 10000), so a result is uninterpretable without
+                # the step count it was taken at.
+                steps=a.steps,
                 cascade=a.cascade, reservoirs=a.reservoirs if a.cascade else 0,
                 leak=a.leak if a.cascade else None,
                 leak_rate=(getattr(a, "leak_rate", 1.0) if a.cascade else None),
@@ -263,6 +269,7 @@ def run(a, device) -> dict:
                 use_memory=not getattr(a, "no_memory", False),
                 memory_hidden_dim=getattr(a, "memory_hidden_dim", None),
                 memory_chunk=getattr(a, "memory_chunk_size", None),
+                num_heads=cfg.get("num_heads", 1),
                 dim=dim, space=space,
                 eta_init=getattr(a, "eta_init", None),
                 bptt_window=getattr(a, "bptt_window", None),
@@ -293,12 +300,20 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--readout", default="mean")     # "none" -> leave default
     ap.add_argument("--selective", action="store_true")
     ap.add_argument("--gate", default="content")
+    ap.add_argument("--cascade-beta1", type=float, default=None, dest="cascade_beta1",
+                    help="coupling scale; the default 0.5 gives a first edge of "
+                         "beta1*g^-1 = 0.25, i.e. reservoir 0 sheds a quarter of its "
+                         "mass per token into the deeper ones")
+    ap.add_argument("--cascade-g", type=float, default=None, dest="cascade_g",
+                    help="geometric falloff of the couplings with depth (default 2)")
     ap.add_argument("--topology", default="chain")
     ap.add_argument("--no-memory", action="store_true", dest="no_memory",
                     help="ablate the memory branch: the attention-only control that "
                          "gives 'the memory helps' a denominator")
     ap.add_argument("--memory-hidden", type=int, default=None, dest="memory_hidden_dim")
     ap.add_argument("--memory-chunk", type=int, default=None, dest="memory_chunk_size")
+    ap.add_argument("--heads", type=int, default=None, dest="num_heads",
+                    help="attention heads; the block's default is 1 (head_dim = dim)")
     ap.add_argument("--theta-scale", type=float, default=None, dest="theta_scale",
                     help="inner-step scale; 0.01 fixes the NaN divergence, 0.03 is SANE's default")
     ap.add_argument("--eta-init", type=float, default=None, dest="eta_init",

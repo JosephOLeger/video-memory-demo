@@ -52,11 +52,29 @@ def write_csv(path, header, rows):
     return path
 
 
+# Every echo-shaped study, newest last. A study missing from this list is simply
+# absent from the report -- which is how the 10k rerun and the full-attention
+# baseline stayed invisible for a day after they finished.
+ECHO_STUDIES = (
+    ("vv_*.json", "V;V (T=64)"),
+    ("base_*.json", "denominateur (T=64)"),
+    ("cap_*.json", "capacite (T=64)"),
+    ("L_*.json", "flux longs (T=256)"),
+    ("K_*.json", "convergence 10000 pas (T=64)"),
+    ("F_*.json", "attention pleine seg>=2T"),
+)
+
+
 def section_echo(root, out_dir, lines):
-    """memory_gain and cost per arm, over every sweep that used the echo cells."""
+    """mem_effect (headline) and memory_gain per arm, over every echo-shaped sweep.
+
+    ``mem_effect = L1(memory off) - L1(repeat)`` is the half of ``memory_gain`` that
+    is authentic recall; ``memory_gain`` also counts the noise the memory injects in
+    the mismatched condition, which is a third of it. Both are reported, mem_effect
+    first, because the comparative ordering is the same but the amplitude is not.
+    """
     rows = []
-    for pat, study in (("vv_*.json", "V;V (T=64)"), ("base_*.json", "denominateur (T=64)"),
-                       ("cap_*.json", "capacite (T=64)"), ("L_*.json", "flux longs (T=256)")):
+    for pat, study in ECHO_STUDIES:
         for r in load_dicts(os.path.join(root, pat)):
             if not isinstance(r.get("memory_gain"), (int, float)):
                 continue
@@ -69,18 +87,24 @@ def section_echo(root, out_dir, lines):
 
     out = []
     for (study, label), v in sorted(g.items()):
-        mg, sem, n = agg([x["memory_gain"] for x in v])
+        me, me_sem, n = agg([x.get("mem_effect") for x in v])
+        mg, sem, _ = agg([x["memory_gain"] for x in v])
         c = v[0].get("cost") or {}
-        out.append([study, label, n, round(mg, 4), round(sem, 4),
+        out.append([study, label, n,
+                    round(me, 4) if me is not None else "",
+                    round(me_sem, 4) if me_sem is not None else "",
+                    round(mg, 4), round(sem, 4),
+                    v[0].get("steps") or (v[0].get("cost") or {}).get("steps") or "",
                     c.get("segment_size"), v[0].get("use_memory"),
                     c.get("state_bytes"), c.get("kv_bytes"), c.get("kv_bytes_full"),
                     round(c.get("s_per_step", 0), 2), round(c.get("peak_vram_gib", 0), 2)])
     p = write_csv(os.path.join(out_dir, "memory_gain_et_cout.csv"),
-                  ["etude", "bras", "n", "memory_gain", "sem", "seg", "memoire",
+                  ["etude", "bras", "n", "mem_effect", "sem_mem_effect",
+                   "memory_gain", "sem", "pas", "seg", "memoire",
                    "etat_octets", "kv_octets", "kv_plein_octets", "s_par_pas",
                    "vram_gio"], out)
-    lines.append(f"- `{os.path.basename(p)}` : memory_gain et coût par bras "
-                 f"({len(out)} bras).")
+    lines.append(f"- `{os.path.basename(p)}` : mem_effect (métrique de tête) et "
+                 f"memory_gain par bras, avec le coût ({len(out)} bras).")
 
 
 def section_margins(root, out_dir, lines):
@@ -144,6 +168,76 @@ def section_converge(root, out_dir, lines):
                  f"l'entraînement — dit si 2500 pas est un équilibre.")
 
 
+GAPS = (0, 64, 128, 256, 512, 1024, 2048)
+
+
+def section_retention(root, out_dir, lines):
+    """The retention curve read in ``mem_effect``, with the survivor count kept.
+
+    ``retention_gain`` (= memory_gain at a distance) stayed positive out to 2048
+    latents, but it is a *difference of two conditions that are both degraded*. The
+    curve that answers "is carrying a memory across this stream worth it at all" is
+    ``mem_effect(n) = l1_repeat_memoff - l1_repeat``, and it is already stored in
+    every retention file -- switching metric costs no GPU.
+
+    Seeds that went non-finite are dropped from the mean and counted separately
+    rather than folded in, so a column that looks good on one surviving seed cannot
+    be read as a column that looks good.
+    """
+    rows = load_dicts(os.path.join(root, "retention_all.json"))
+    if not rows:
+        for p in glob.glob(os.path.join(root, "retention_out", "*.json")):
+            rows += load_dicts(p)
+    per = defaultdict(lambda: defaultdict(list))
+    seen = set()
+    for r in rows:
+        if "curve" not in r:
+            continue
+        # The same artifact is scored by more than one job (the chain's per-arm
+        # pass and the later per-seed one both cover seed 0), and counting it
+        # twice inflates the survivor denominator the whole table is read against.
+        key = (r.get("file"), r.get("T"), r.get("horizon"))
+        if key in seen:
+            continue
+        seen.add(key)
+        # Keyed on (arm, T): the long-stream study reuses the arm names of the
+        # T=64 sweep, so keying on the name alone silently averaged a 256-latent
+        # model into a 64-latent one and inflated the survivor counts.
+        arm = f"{r.get('arm', '?')}@T{r.get('T', '?')}"
+        for c in r["curve"]:
+            per[arm][c["gap_latents"]].append(
+                (c["l1_repeat_memoff"] - c["l1_repeat"], c["retention_gain"],
+                 c.get("status")))
+    if not per:
+        return
+    out = []
+    for arm, by_gap in sorted(per.items()):
+        row = [arm]
+        for g in GAPS:
+            v = by_gap.get(g)
+            if not v:
+                row += ["", "", "", ""]
+                continue
+            me, _, n_ok = agg([x[0] for x in v])
+            rg, _, _ = agg([x[1] for x in v])
+            # "sain" is only available on curves scored after the health probe was
+            # added; older files report finiteness only, and say so by leaving the
+            # column blank rather than by claiming every finite seed was healthy.
+            st = [x[2] for x in v if x[2]]
+            n_sain = f"{sum(s == 'sain' for s in st)}/{len(st)}" if st else ""
+            row += [round(me, 4) if me is not None else "NaN",
+                    round(rg, 4) if rg is not None else "NaN",
+                    f"{n_ok}/{len(v)}", n_sain]
+        out.append(row)
+    header = ["bras"] + [f"{k}_+{g}" for g in GAPS
+                         for k in ("mem_effect", "retention_gain", "graines_finies",
+                                   "graines_saines")]
+    p = write_csv(os.path.join(out_dir, "retention_mem_effect.csv"), header, out)
+    lines.append(f"- `{os.path.basename(p)}` : rétention en mem_effect (métrique de "
+                 f"tête) et en retention_gain, avec le nombre de graines finies "
+                 f"par écart ({len(out)} bras).")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", required=True, help="folder holding the pulled JSONs")
@@ -152,7 +246,8 @@ def main() -> None:
     os.makedirs(a.out_dir, exist_ok=True)
 
     lines = []
-    for fn in (section_echo, section_margins, section_length, section_converge):
+    for fn in (section_echo, section_retention, section_margins, section_length,
+               section_converge):
         try:
             fn(a.root, a.out_dir, lines)
         except Exception as e:                     # one broken study must not

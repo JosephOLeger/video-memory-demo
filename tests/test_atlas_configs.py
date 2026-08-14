@@ -89,3 +89,48 @@ def test_run_smoke(tmp_path):
 def test_unknown_config_is_rejected_by_name():
     with pytest.raises(KeyError):
         describe("not_a_config")
+
+
+# --- the head count is a real axis, not an accepted-and-inert flag ----------
+# Four options in this repo were once found to be accepted and to change nothing.
+# --heads exists because every run so far silently used a single head, so it gets
+# the same guard as the rest.
+
+def test_heads_flag_changes_the_attention_and_defaults_to_one():
+    from titans.worldmodel.frozen import build_cfg
+    from titans.worldmodel.model import WorldModel
+
+    assert "num_heads" not in build_cfg("sane_ns")
+    assert build_cfg("sane_ns", num_heads=8)["num_heads"] == 8
+
+    torch.manual_seed(0)
+    one = WorldModel(latent_dim=16, dim=16, depth=1, segment_size=4,
+                     **build_cfg("sane_ns"))
+    torch.manual_seed(0)
+    many = WorldModel(latent_dim=16, dim=16, depth=1, segment_size=4,
+                      **build_cfg("sane_ns", num_heads=4))
+    assert one.blocks[0].attn.num_heads == 1
+    assert many.blocks[0].attn.num_heads == 4
+    assert many.blocks[0].attn.head_dim == 4
+
+    z = torch.randn(2, 8, 16)
+    assert not torch.allclose(one(z), many(z), atol=1e-6)
+
+
+def test_cascade_beta1_flag_reaches_the_edge_couplings():
+    """beta1 was reachable in NeuralMemory but not from any sweep, so every cascade
+    run so far drained a quarter of reservoir 0 per token. Pin the wiring, not the value."""
+    from titans.worldmodel.frozen import build_cfg
+    from titans.worldmodel.model import WorldModel
+
+    default = build_cfg("sane_ns", cascade=True, leak="surprise", leak_rate=0.1)
+    assert "cascade_beta1" not in default          # absent => NeuralMemory's own 0.5
+
+    cfg = build_cfg("sane_ns", cascade=True, leak="surprise", leak_rate=0.1, beta1=0.1)
+    assert cfg["cascade_beta1"] == 0.1
+    m_lo = WorldModel(latent_dim=32, dim=32, **cfg).blocks[0].memory
+    m_hi = WorldModel(latent_dim=32, dim=32, **default).blocks[0].memory
+    b_lo = float(m_lo.cascade.base_betas[0])
+    b_hi = float(m_hi.cascade.base_betas[0])
+    assert b_lo < b_hi                              # less mass leaves reservoir 0
+    assert b_hi == pytest.approx(0.25)   # beta1 * g^-1, not beta1

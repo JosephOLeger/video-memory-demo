@@ -42,7 +42,39 @@ import re
 import torch
 
 from .frozen import load_frozen
+from .harness import memory_health
 from .train import load_latent_cache
+
+# A seed that reaches a distance without going NaN is not thereby a seed whose
+# memory still works: the recurring failure here is the state collapsing to a
+# near-rank-1, near-constant map, which stays perfectly finite. Counting those as
+# survivors is what let "positive out to 2048 latents" be reported. Both criteria
+# are relative to the *same artifact at gap 0*, so they do not assume a healthy
+# value that depends on the memory's width.
+COLLAPSE_PR_FRAC = 0.25    # participation ratio fallen to a quarter of its gap-0 value
+COLLAPSE_COS = 0.95        # retrievals for distinct queries nearly parallel
+
+
+def classify(curve: list[dict]) -> list[dict]:
+    """Tag each gap ``sain`` / ``collapse`` / ``diverge``, in place, and return it.
+
+    ``diverge`` dominates ``collapse``: a non-finite state is not a collapsed one.
+    """
+    ref = None
+    for c in curve:
+        pr, cos = c.get("pr"), c.get("cos_ret")
+        finite = c.get("health_finite", True) and all(
+            isinstance(v, float) and v == v for v in (c["l1_repeat"], c["l1_cross"]))
+        if ref is None and pr is not None and pr == pr:
+            ref = pr
+        if not finite:
+            c["status"] = "diverge"
+        elif pr is not None and ref and (
+                pr < COLLAPSE_PR_FRAC * ref or (cos is not None and cos > COLLAPSE_COS)):
+            c["status"] = "collapse"
+        else:
+            c["status"] = "sain"
+    return curve
 
 
 def spaced(v: torch.Tensor, first: torch.Tensor, distractors) -> torch.Tensor:
@@ -81,12 +113,22 @@ def last_block_l1(model, seq: torch.Tensor, T: int, K: int, reset: bool,
 
 @torch.no_grad()
 def retention_curve(model, va: torch.Tensor, T: int, K: int, gaps,
-                    batch: int = 8, margin: int = 4) -> list[dict]:
-    """``retention_gain`` at each gap, plus the memory-off floor at that gap.
+                    batch: int = 8, margin: int = 4, health_seqs: int = 4) -> list[dict]:
+    """``retention_gain`` at each gap, plus the memory-off floor and the state's health.
 
     Distractors come from ``torch.roll`` at distinct offsets, so every row of the
     batch gets different intervening videos and none of them is that row's ``V`` or
     ``U``. They are built once per gap and shared by both conditions.
+
+    ``mem_effect = l1_repeat_memoff - l1_repeat`` is the headline: it says whether
+    carrying a memory across this stream is worth anything at all, where
+    ``retention_gain`` only says whether a trace of ``V`` specifically survived --
+    both conditions can be degraded and the difference still positive.
+
+    The health triple (``pr``, ``norm``, ``cos_ret``) is measured on the *same*
+    spaced sequence, so it reports the state the scored forward actually ran with.
+    It costs one extra block-0 pass over ``health_seqs`` sequences per gap, against
+    four full-model passes over ``n_eval``.
     """
     out = []
     for n in gaps:
@@ -101,6 +143,11 @@ def retention_curve(model, va: torch.Tensor, T: int, K: int, gaps,
         # collapse to ~0. It is the floor the curve has to be read against.
         l_rep_off = last_block_l1(model, rep, T, K, True, batch, margin)
         l_crs_off = last_block_l1(model, crs, T, K, True, batch, margin)
+        try:
+            h = memory_health(model, rep[:health_seqs])
+        except Exception:                    # a NaN state can trip svdvals
+            h = {"pr": float("nan"), "norm": float("nan"),
+                 "cos_ret": float("nan"), "finite": False}
         out.append({
             "gap_blocks": int(n), "gap_latents": int(n * T),
             "seq_len": int((n + 2) * T),
@@ -108,8 +155,11 @@ def retention_curve(model, va: torch.Tensor, T: int, K: int, gaps,
             "retention_gain": l_crs - l_rep,
             "l1_repeat_memoff": l_rep_off, "l1_cross_memoff": l_crs_off,
             "gain_memoff": l_crs_off - l_rep_off,
+            "mem_effect": l_rep_off - l_rep,
+            "pr": h["pr"], "w1_norm": h["norm"], "cos_ret": h["cos_ret"],
+            "health_finite": bool(h["finite"]),
         })
-    return out
+    return classify(out)
 
 
 def arm_of(path: str) -> str:
@@ -157,14 +207,24 @@ def main() -> None:
     if ok:
         gaps_seen = [c["gap_latents"] for c in ok[0]["curve"]]
         print()
-        print("retention_gain = l1(cross) - l1(repeat) ; > 0 => V est encore retenu")
-        print("%-18s" % "bras" + "".join("%10s" % f"+{g}" for g in gaps_seen))
-        print("-" * (18 + 10 * len(gaps_seen)))
+        print("mem_effect = l1(memoire coupee) - l1(repeat) ; > 0 => porter la memoire "
+              "vaut mieux que ne pas en avoir")
+        print("statut : . sain / c collapse (pr ou cos_ret) / X diverge")
+        print("%-18s" % "bras" + "".join("%11s" % f"+{g}" for g in gaps_seen))
+        print("-" * (18 + 11 * len(gaps_seen)))
         for r in sorted(ok, key=lambda r: (not r["cascade"], r["arm"])):
             line = "%-18s" % r["arm"]
             for c in r["curve"]:
-                line += "%10.4f" % c["retention_gain"]
+                tag = {"sain": ".", "collapse": "c", "diverge": "X"}[c["status"]]
+                line += "%10.4f%s" % (c.get("mem_effect", float("nan")), tag)
             print(line)
+        print()
+        print("retention_gain = l1(cross) - l1(repeat) ; > 0 => une trace de V survit")
+        print("%-18s" % "bras" + "".join("%11s" % f"+{g}" for g in gaps_seen))
+        print("-" * (18 + 11 * len(gaps_seen)))
+        for r in sorted(ok, key=lambda r: (not r["cascade"], r["arm"])):
+            print("%-18s" % r["arm"] + "".join(
+                "%11.4f" % c["retention_gain"] for c in r["curve"]))
         print()
         print("%-18s" % "(memoire coupee)" + "".join(
             "%10.4f" % c["gain_memoff"] for c in ok[0]["curve"]))

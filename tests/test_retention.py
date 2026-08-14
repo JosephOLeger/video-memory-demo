@@ -6,8 +6,8 @@ import torch
 from titans.worldmodel.echo import double, per_copy_l1_K
 from titans.worldmodel.frozen import build_cfg
 from titans.worldmodel.model import WorldModel
-from titans.worldmodel.retention import (arm_of, last_block_l1, retention_curve,
-                                         spaced)
+from titans.worldmodel.retention import (arm_of, classify, last_block_l1,
+                                         retention_curve, spaced)
 
 
 def _model(d=8):
@@ -106,3 +106,50 @@ def test_collect_pools_seeds_and_reports_a_sem():
     assert m == pytest.approx(0.25) and n == 2 and sem == pytest.approx(0.05)
     assert floor[0][0] == pytest.approx(0.0)
     assert meta["a"]["cascade"] is True
+
+
+# --- the survivor/collapse distinction -------------------------------------
+# A seed that stays finite is not a seed whose memory still works. Counting a
+# collapsed state as a survivor is what let "positive out to 2048 latents" be
+# reported, so the classifier gets its own tests rather than being trusted.
+
+def test_curve_reports_mem_effect_and_health_at_every_gap():
+    m, va = _model(), _va()
+    for c in retention_curve(m, va, T=16, K=4, gaps=[0, 1], batch=4):
+        assert c["mem_effect"] == pytest.approx(c["l1_repeat_memoff"] - c["l1_repeat"])
+        for k in ("pr", "w1_norm", "cos_ret", "health_finite", "status"):
+            assert k in c
+
+
+def test_a_healthy_curve_is_tagged_sain():
+    curve = classify([
+        dict(l1_repeat=0.5, l1_cross=0.6, pr=40.0, cos_ret=0.2, health_finite=True),
+        dict(l1_repeat=0.5, l1_cross=0.6, pr=38.0, cos_ret=0.3, health_finite=True),
+    ])
+    assert [c["status"] for c in curve] == ["sain", "sain"]
+
+
+def test_a_rank_collapse_is_not_counted_as_a_survivor():
+    """Finite, scoreable -- and rank-1. It must not read as 'sain'."""
+    curve = classify([
+        dict(l1_repeat=0.5, l1_cross=0.6, pr=40.0, cos_ret=0.2, health_finite=True),
+        dict(l1_repeat=0.5, l1_cross=0.6, pr=1.2, cos_ret=0.3, health_finite=True),
+    ])
+    assert curve[1]["status"] == "collapse"
+
+
+def test_a_constant_retrieval_is_a_collapse_even_at_full_rank():
+    curve = classify([
+        dict(l1_repeat=0.5, l1_cross=0.6, pr=40.0, cos_ret=0.2, health_finite=True),
+        dict(l1_repeat=0.5, l1_cross=0.6, pr=39.0, cos_ret=0.99, health_finite=True),
+    ])
+    assert curve[1]["status"] == "collapse"
+
+
+def test_divergence_dominates_collapse():
+    curve = classify([
+        dict(l1_repeat=0.5, l1_cross=0.6, pr=40.0, cos_ret=0.2, health_finite=True),
+        dict(l1_repeat=float("nan"), l1_cross=0.6, pr=1.0, cos_ret=1.0,
+             health_finite=False),
+    ])
+    assert curve[1]["status"] == "diverge"

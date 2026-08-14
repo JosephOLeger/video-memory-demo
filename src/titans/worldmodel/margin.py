@@ -98,14 +98,20 @@ def measure(model, z: torch.Tensor, info: dict) -> dict:
         "cascade": bool(cfg.get("memory_use_cascade")),
         "leak": cfg.get("cascade_leak"), "leak_rate": cfg.get("cascade_leak_rate"),
         "eta_init": cfg.get("eta_init"), "theta_scale": cfg.get("theta_scale"),
+        # The two axes of the dilution study: which reservoirs are read, and how fast
+        # reservoir 0 drains into the deeper ones. Without them the audit rows are only
+        # separable by label, which is one rename away from being unreadable.
+        "readout": cfg.get("cascade_readout"), "beta1": cfg.get("cascade_beta1"),
+        "reservoirs": cfg.get("cascade_reservoirs"),
         "label": info["meta"].get("label"), "seed": info["meta"].get("seed"),
     }
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--frozen", required=True,
-                    help="a frozen artifact, or a glob matching several")
+    ap.add_argument("--frozen", required=True, action="append",
+                    help="a frozen artifact, or a glob matching several; repeatable, "
+                         "so one audit can span several sweep directories")
     ap.add_argument("--val", required=True)
     ap.add_argument("--nseq", type=int, default=8)
     ap.add_argument("--out", default=None, help="write one JSON list for all inputs")
@@ -117,7 +123,17 @@ def main() -> None:
         raise SystemExit(f"{a.val} is not a PCA cache.")
     z = va[:a.nseq].to(a.device)
 
-    paths = sorted(glob.glob(a.frozen)) or [a.frozen]
+    # A glob that matches nothing is a directory the sweep has not filled yet, not an
+    # error: the audit runs on a timer while cells are still landing. A literal path
+    # that does not exist IS an error, and falls through to the per-artifact handler.
+    paths = []
+    for pat in a.frozen:
+        hits = sorted(glob.glob(pat))
+        if hits:
+            paths.extend(hits)
+        elif not any(c in pat for c in "*?["):
+            paths.append(pat)
+    paths = list(dict.fromkeys(paths))
     out = []
     for p in paths:
         try:

@@ -40,9 +40,11 @@ def build_cfg(config: str = "sane_ns", *, eta_init: Optional[float] = None,
               cascade: bool = False, reservoirs: int = 6, leak: str = "none",
               leak_rate: float = 1.0, readout: str = "gated",
               selective: bool = False, gate: str = "surprise",
+              beta1: Optional[float] = None, g: Optional[float] = None,
               topology: str = "chain", use_memory: bool = True,
               memory_hidden_dim: Optional[int] = None,
-              memory_chunk_size: Optional[int] = None) -> dict:
+              memory_chunk_size: Optional[int] = None,
+              num_heads: Optional[int] = None) -> dict:
     """The kwargs a :class:`WorldModel` needs, from the sweep's own flag names.
 
     Kept in one place so ``echo.py``, ``long_run.py`` and this module cannot drift
@@ -55,6 +57,15 @@ def build_cfg(config: str = "sane_ns", *, eta_init: Optional[float] = None,
         cfg["use_memory"] = False
     if memory_hidden_dim is not None:
         cfg["memory_hidden_dim"] = memory_hidden_dim
+    if num_heads is not None:
+        # Every run of this project so far has used TitansMACBlock's default of a
+        # SINGLE attention head (WorldModel never passed one), i.e. head_dim = dim.
+        # That is not only a baseline question: the attention output y_i is what
+        # *writes* into the memory, and README 8.1 already traced a rank-1 momentum
+        # to attention outputs being near-collinear. One head is the same risk by a
+        # different route, so the head count is exposed as a swept axis rather than
+        # silently inherited.
+        cfg["num_heads"] = num_heads
     if memory_chunk_size is not None:
         # Pinning m while segment_size varies is what isolates "wider attention
         # window" from "longer inner-loop chunk"; left to its default (= seg) the
@@ -74,6 +85,18 @@ def build_cfg(config: str = "sane_ns", *, eta_init: Optional[float] = None,
             cfg["cascade_readout"] = readout
         if selective:
             cfg["cascade_selective"] = True
+        # The edge couplings were reachable in NeuralMemory but not from any sweep,
+        # so every cascade run so far used beta1=0.5, i.e. a first edge coupling of
+        # beta1*g^-1 = 0.25: reservoir 0 sheds a quarter of its mass per token into the
+        # deeper ones. With the shallow-ish readouts that is a
+        # standing dilution of the visible momentum, and the cascade arms end up ~19x
+        # higher than the scalar ones on theta*lambda_hidden -- the product the
+        # stability bound is written in (theta alone is only ~3x, and the per-seed
+        # spread makes the two groups overlap). Exposed so the drainage is swept.
+        if beta1 is not None:
+            cfg["cascade_beta1"] = beta1
+        if g is not None:
+            cfg["cascade_g"] = g
     return cfg
 
 
@@ -135,6 +158,11 @@ def add_config_flags(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     ap.add_argument("--readout", default="gated")
     ap.add_argument("--selective", action="store_true")
     ap.add_argument("--gate", default="surprise")
+    ap.add_argument("--cascade-beta1", type=float, default=None, dest="cascade_beta1",
+                    help="coupling scale; NeuralMemory's default 0.5 gives a first edge "
+                         "of 0.25, draining a quarter of reservoir 0 per token")
+    ap.add_argument("--cascade-g", type=float, default=None, dest="cascade_g",
+                    help="geometric falloff of the couplings with depth (default 2)")
     ap.add_argument("--topology", default="chain")
     ap.add_argument("--no-memory", action="store_true", dest="no_memory",
                     help="ablate the memory branch entirely (attention-only control)")
@@ -142,6 +170,8 @@ def add_config_flags(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
                     help="width of the memory MLP's hidden layer (capacity axis)")
     ap.add_argument("--memory-chunk", type=int, default=None, dest="memory_chunk_size",
                     help="inner-loop chunk m; defaults to segment_size")
+    ap.add_argument("--heads", type=int, default=None, dest="num_heads",
+                    help="attention heads; the block's default is 1, i.e. head_dim = dim")
     return ap
 
 
@@ -150,10 +180,13 @@ def cfg_from_args(a) -> dict:
                      normalize_hidden=a.normalize_hidden, cascade=a.cascade,
                      reservoirs=a.reservoirs, leak=a.leak, leak_rate=a.leak_rate,
                      readout=a.readout, selective=a.selective, gate=a.gate,
+                     beta1=getattr(a, "cascade_beta1", None),
+                     g=getattr(a, "cascade_g", None),
                      topology=getattr(a, "topology", "chain"),
                      use_memory=not getattr(a, "no_memory", False),
                      memory_hidden_dim=getattr(a, "memory_hidden_dim", None),
-                     memory_chunk_size=getattr(a, "memory_chunk_size", None))
+                     memory_chunk_size=getattr(a, "memory_chunk_size", None),
+                     num_heads=getattr(a, "num_heads", None))
 
 
 def main() -> None:
