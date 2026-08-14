@@ -287,60 +287,121 @@ Deux corollaires immédiats :
   fait bien monter le rang — 1,12 → 1,81 — mais en payant le prix habituel : τ_max chute
   de 1 200 à 15,7 pas. Même arbitrage que tous les autres leaks.
 
-**Réserve importante :** tout ceci vaut pour un `B` **fixe**. La revendication propre de
+> **Le §5bis supersède cette section.** Le rang effectif n'est pas le bon diagnostic :
+> Benna-Fusi ne cherche pas K filtres séparables mais une décroissance en loi de
+> puissance du seul `u₁`. Un PR ≈ 1 est attendu. Ce qui reste valide ici, c'est le
+> constat que le mode `λ=1` égalise les réservoirs — et le §5bis en donne la cause
+> (les `C_k` manquants) et le correctif.
+
+**Réserve :** tout ceci vaut pour un `B` **fixe**. La revendication propre de
 la cascade (`selective=True`, `B_t` par arête, non commutatif) est précisément ce qu'un
 banc de filtres fixe ne peut pas reproduire, et le PR ne la mesure pas. Ce calcul borne
 le **plancher** de la cascade, il ne la réfute pas.
 
-### La cause est la symétrie de B, et elle se corrige
+### 5bis. Confrontation à Benna & Fusi 2016 — trois écarts structurels
 
-`B` est construit symétrique et doublement stochastique : la masse **remonte** des
-réservoirs profonds vers les superficiels. C'est ce reflux qui égalise les noyaux. En
-coupant le retour — chaîne **dirigée** `0 → 1 → … → K−1`, `u[e] ← (1−b_e)u[e] +
-b_{e−1}u[e−1]` — la réponse du réservoir k devient la convolution de k exponentielles,
-c'est-à-dire une **bosse de type gamma qui culmine à un décalage propre à k** :
+*(Benna & Fusi, « Computational principles of synaptic memory consolidation »,
+Nat. Neurosci. 19(12), 2016 — le papier dont la cascade est tirée.)*
 
-| K=6, g=2 | rang effectif | décalage du pic, par réservoir |
+**Le bon diagnostic n'est pas le rang, c'est l'exposant de décroissance.** Benna-Fusi ne
+revendique jamais K échelles séparables. `u₁` **est** le poids synaptique et c'est le seul
+readout ; les autres variables n'existent que pour *façonner la décroissance de `u₁` en
+loi de puissance* `t^(−1/2)` — le décay le plus lent qu'on puisse tenir sans faire diverger
+la variance du poids. Un PR ≈ 1 est donc le design, pas un bug ; §5 mesurait la mauvaise
+quantité. La bonne mesure est la pente de `u₁(t)` en log-log, cible **−0,5**.
+
+Contrôle du code : chaîne homogène (Fig 2a du papier, C_k=1, g=1/8, m=31) → pente
+**−0,493**. La diffusion 1D pure est bien reproduite.
+
+| | pente sur 10³–10⁵ |
+|---|---|
+| **notre chaîne** (C_k = 1, pas de fuite terminale) | **−0,066** |
+| + fuite terminale seule | −0,264 |
+| + beakers `C_k = 2^k` → **Benna-Fusi Fig 2c** | **−0,500** |
+
+**Écart n°1, et c'est le principal : il manque les `C_k`.** L'équation du papier est
+`C_k du_k/dt = g_{k−1,k}(u_{k−1}−u_k) + g_{k,k+1}(u_{k+1}−u_k)` — les `C_k` sont les
+*sections des béchers*, qui croissent géométriquement (`C_k = 2^k`). Notre `cascade_step`
+applique le flux `b_e(u_{e+1}−u_e)` **symétriquement** aux deux réservoirs : c'est
+`C_k ≡ 1`, des béchers tous de la même taille. Or c'est exactement l'asymétrie qui fait
+le mécanisme : un bécher profond est énorme, son niveau bouge à peine quand il reçoit, et
+il retient. Nous avons les tubes (`geometric_betas`) sans les béchers — une combinaison
+que le papier n'utilise nulle part (Fig 2a = béchers égaux + tubes égaux ; Fig 2c = les
+deux géométriques).
+
+La loi de conception est simple, et elle reproduit le `O(n²)` de l'éq. (6) du papier :
+
+| `C_k = c^k` \ `g_e = β₁·gg^(−e)` | gg=1 | gg=2 | gg=4 |
+|---|---|---|---|
+| **c=1** *(notre modèle)* | −17,2 | **−0,26** | −0,10 |
+| **c=2** | −2,60 | **−0,500** | −0,343 |
+| **c=4** | −0,998 | −0,676 | **−0,523** |
+
+**`c = gg` donne −0,5.** Un seul paramètre, et c'est le `g` qu'on expose déjà.
+
+**Écart n°2 : pas de fuite terminale.** Benna-Fusi pose `u_{m+1} = 0`, ce qui donne au
+bécher le plus profond une fuite propre. Nous n'en avons aucune — d'où le mode `λ = 1`
+diagnostiqué au §5. C'est le même bug vu sous un autre angle.
+
+**Écart n°3 : notre fuite est au mauvais endroit et beaucoup trop forte.** Le papier ne
+fait fuir que `u_m` ; nos modes `full`, `surprise`, `slow` multiplient l'**état entier**
+par `exp(−r·θ_t)`, ce qui impose une enveloppe exponentielle à tout — précisément ce
+qu'une mémoire en loi de puissance ne doit pas avoir.
+
+Sur la chaîne corrigée, jusqu'où `r` peut monter :
+
+| r | pente 10³–10⁵ | |
 |---|---|---|
-| chaîne symétrique (actuelle) | **1,12** | 0, 0, 0, 0, 0, 0 — le réservoir 0 domine partout |
-| chaîne **dirigée** | **3,75** | **0, 5, 15, 36, 77, 660** |
+| 0 | −0,500 | loi de puissance intacte |
+| 10⁻⁶ | −0,529 | intacte |
+| 10⁻⁵ | −0,792 | dégradée |
+| 10⁻⁴ | −3,43 | détruite |
+| **0,1 (notre défaut)** | **NaN** (−10,5 déjà sur 10–10³) | **détruite** |
 
-**×3,3 sur le rang effectif, sans rien perdre sur l'horizon** (le mode λ=1 subsiste, la
-masse s'accumule dans le dernier réservoir au lieu de se répartir). Les τ deviennent
-exactement l'échelle géométrique visée, `g^k/beta1` = 4, 8, 16, 32, 64, ∞, là où la
-version symétrique les écrasait sur 1,7 → 93.
+La fuite étant `exp(−r·θ_t)`, le taux effectif est `r·θ_t` ; avec les `θ_max` mesurés sur
+les artefacts (0,004 à 0,043) cela fait 4·10⁻⁴ à 4·10⁻³, soit **encore 400 à 4 000 fois
+trop** devant le seuil de 10⁻⁶. L'intuition « r est trop grand » est confirmée, et de
+loin.
 
-Stabilité : `B` dirigée est triangulaire inférieure, ses valeurs propres **sont** sa
-diagonale `[1−b_0, …, 1−b_{K−2}, 1]`, toutes dans (0, 1]. Rayon spectral 1 exactement,
-comme la version symétrique — l'argument de stabilité du docstring tient encore, par un
-chemin plus simple.
+**Écart n°4, mineur : le readout.** Le papier lit `u₁`, point. Sur la chaîne corrigée
+seul `shallow` a la bonne pente :
 
-Le changement est de deux lignes dans `cascade_step` : supprimer `inflow_from_right`, ne
-garder que le flux descendant.
+| readout | pente 10³–10⁵ |
+|---|---|
+| **`shallow` = u₁** | **−0,500** |
+| `mean` / `sum` | −0,397 |
+| `deep` | +5,17 (croît) |
 
-**Et K se choisit alors par la fenêtre**, pas par la portée : le rang dirigé monte à 4,08
-à K=10 puis **retombe à 2,82 à K=17**, parce que les réservoirs 8 à 16 culminent au-delà
-de la fenêtre de 660 pas — ils y ressemblent tous à des rampes. Règle : *le réservoir le
-plus profond doit culminer à l'intérieur de la fenêtre d'entraînement*. À g=2, cela donne
-**K=10** (pic le plus profond à 649 pas ≈ la fenêtre).
+`shallow` est déjà le défaut de la topologie `chain`. *(Le §5 concluait à `mean` sur la
+base d'un span de dimension 1,1 où `mean ≈ u₁` ; une fois les `C_k` en place les
+réservoirs se différencient et l'équivalence tombe.)*
+
+### Ce que j'abandonne : la chaîne dirigée
+
+**Retirée.** La bidirectionnalité est *la* contribution du papier : « the interactions
+between fast and slow variables are bidirectional », et c'est elle qui fait passer la
+capacité de `√N` (le modèle cascade de 2005, réf. 9) à ~`N`. Une chaîne dirigée est
+exactement le modèle antérieur, moins bon. Le gain de rang ×3,3 que je mesurais achetait
+une propriété dont le papier montre qu'elle ne sert pas, au prix de celle qui sert.
 
 ### Ce qui est retenu
 
 | | valeur | raison |
 |---|---|---|
-| topologie | **chaîne dirigée** (à implémenter) | rang effectif ×3,3, horizon inchangé |
-| K | **10** | le pic le plus profond doit tomber dans la fenêtre |
-| g, beta1 | 2, 0,5 | échelle géométrique `g^k/beta1` = 4 … 2048 |
-| readout | **mean** | capte 99,93 % du span ; moins cher et plus stable que `gated` |
-| leak | `surprise`, r ≈ 0,1 | inchangé |
+| topologie | `chain`, **bidirectionnelle** | contribution centrale de Benna-Fusi |
+| **`C_k = g^k`** | **à implémenter** | l'ingrédient manquant : −0,066 → −0,500 |
+| **fuite terminale** (`u_{K}=0`) | **à implémenter** | tue le mode λ=1 |
+| `leak_rate` r | **≤ 10⁻⁶** (contre 0,1) | au-delà, l'enveloppe exponentielle écrase la loi de puissance |
+| readout | **`shallow`** (déjà le défaut) | seul mode à −0,5 |
+| K | 12 | couvre 10⁵ pas ≈ 28 h à 1 fps ; K ≈ log(T)/(2 log g) |
+| g, β₁ | 2 ; 0,5 | `c = gg = 2` donne l'exposant −1/2 |
 
-L'option B (K=17, g=2) est abandonnée : elle coûtait 2,3× la VRAM de `sane_ns`, réduisait
-la fenêtre de 532 à 416 frames, et sur la chaîne dirigée elle *dégrade* le rang.
+L'option B (K=17, g=2) est abandonnée : 2,3× la VRAM de `sane_ns`, fenêtre réduite de 532
+à 416 frames, pour une portée que les `C_k` fournissent à K=12.
 
-Le mécanisme longue distance reste **`α`** (τ_ret = 1/α), pas la cascade. C'est quand même
-un **critère de conception** pour K et g dérivé du banc, comme `α`, au lieu du balayage
-qui n'a jamais rien donné — et il explique après coup pourquoi ce balayage n'a jamais rien
-donné.
+**Le critère de validation change aussi** : ce n'est plus « la cascade bat-elle le
+scalaire sur `memory_gain` », c'est **la pente de `u₁(t)` vaut-elle −0,5 sur plusieurs
+décades**. C'est mesurable sur un artefact gelé, sans réentraîner.
 
 ### La contrainte qui mord vraiment : les réservoirs lents ne sont jamais excités
 
