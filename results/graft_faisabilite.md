@@ -210,19 +210,64 @@ mode `λ = 1` exactement (masse conservée : le réservoir le plus profond n'a p
 fuite propre). C'est le gate `α` de la mémoire qui borne ce mode — à `alpha_init = 1e-5`,
 à 100 000 pas, soit 28 h. Les deux mécanismes s'emboîtent proprement.
 
-**Le critère n'est pas la portée mais la densité.** Option A atteint bien 10⁵ pas, mais
-avec des trous d'un facteur 10 entre réservoirs consécutifs : rien entre 105 et 1 076
-pas, c'est-à-dire rien entre 2 min et 18 min. Option B espace ses τ d'un facteur 2 sur
-toute l'étendue, de 1,7 pas à 303 000 pas — la couverture est uniforme et englobe le
-banc entier de bout en bout.
+### Mais la cascade ne donne pas K échelles de temps — elle en donne ~1,7
+
+La portée n'est pas la bonne mesure. Ce que le readout peut réellement construire, c'est
+l'espace engendré par les noyaux de réponse `R[k,n] = (Bⁿ)[k,0]` : le gradient est injecté
+dans le réservoir 0, et `S_t[k] = Σ_i R[k, t−i]·g_i`, donc un readout linéaire de poids
+`w` réalise le noyau effectif `Σ_k w_k R[k,·]`. **Le nombre de filtres temporels
+distinguables est le rang effectif de ce banc**, pas le nombre de réservoirs.
+
+Rang effectif = participation ratio du spectre singulier des `R[k,·]` normalisés :
+
+| config | τ lent fini | PR sur 660 pas | PR sur 100 000 pas |
+|---|---|---|---|
+| défaut K=6, g=2 | 93 | **1,12** | 1,00 |
+| option A K=6, g=9 | 106 752 | **1,40** | 1,13 |
+| option C K=10, g=3 | 53 704 | **1,54** | 1,11 |
+| option B K=17, g=2 | 303 030 | **1,70** | 1,26 |
+
+**Dix-sept réservoirs valent 1,7 filtre indépendant, et un seul à longue distance.** La
+cause est le mode `λ = 1` : à grand décalage, la réponse de *tous* les réservoirs converge
+vers le vecteur propre uniforme, donc les K noyaux deviennent colinéaires. Le réservoir 0
+domine d'ailleurs la réponse à **toutes** les distances — aucun réservoir profond n'a de
+régime où il porte le pic.
+
+Et le leak ne corrige rien : `full`, `surprise`, `slow` et `none` multiplient l'état
+**entier** par un scalaire, ce qui envoie `B → cB` — enveloppe commune, formes relatives
+inchangées. Vérifié : le rang ne bouge qu'en raccourcissant l'horizon (c=0,9 → PR 2,23,
+mais τ divisé par 10). Seul `shallow`, qui ne draine que le réservoir 0, est non uniforme
+(η=0,5 → PR 3,08) — au prix du même raccourcissement.
+
+| levier | PR à K=6 | effet sur l'horizon |
+|---|---|---|
+| K : 6 → 17 | 1,12 → 1,70 | ×3 260 |
+| leak uniforme c : 1 → 0,9 | 1,12 → 2,23 | ÷10 |
+| leak `shallow` η : 1 → 0,5 | 1,12 → 3,08 | ÷10 |
+| `topology=independent`, K=6 | 1,59 | — |
+
+Même le banc de filtres « indépendants » — K exponentielles à taux distincts, l'hypothèse
+nulle du docstring — plafonne à PR 1,59 (K=6) et 2,03 (K=17). Ce n'est donc pas un défaut
+de la cascade : **tout banc d'exponentielles est mal conditionné** (l'inversion de Laplace
+est un problème mal posé). Aucune architecture de ce type ne donnera K échelles séparables.
+
+**Portée** *(les gaps de l'option A entre 105 et 1 076 pas sont réels, mais secondaires :
+il n'y a de toute façon pas 6 filtres à séparer)*.
+
+**Réserve importante :** tout ceci vaut pour un `B` **fixe**. La revendication propre de
+la cascade (`selective=True`, `B_t` par arête, non commutatif) est précisément ce qu'un
+banc de filtres fixe ne peut pas reproduire, et le PR ne la mesure pas. Ce calcul borne
+le **plancher** de la cascade, il ne la réfute pas.
 
 **Retenu : option B, `K=17, g=2`, `beta1=0.5`** (contrainte `beta1(1+1/g) = 0,75 ≤ 1`
-respectée, tous les λ positifs, aucun risque de bord à −1). Coût à mesurer : K=6 ajoutait
-1,6 ms/frame sur les 7,2 ms de `sane_ns` ; l'état étant `[B, d_out, d_in, K]`, K=17
-devrait coûter ~4,5 ms → ~56 f/s combiné au lieu de 67, soit une époque à ~62 min.
+respectée, tous les λ positifs, pas de risque de bord à −1) — mais **pour la portée, pas
+pour la résolution**. Ce que K=17 achète, c'est un τ lent de 303 000 pas au lieu de 93 ;
+ce qu'il n'achète pas, c'est 17 échelles séparables. Le mécanisme longue distance reste
+`α` (τ_ret = 1/α), pas la cascade.
 
-C'est surtout un **critère de conception** pour K et g, dérivé du banc comme `α`, au
-lieu du balayage qui n'a jamais rien donné.
+C'est quand même un **critère de conception** pour K et g dérivé du banc, comme `α`, au
+lieu du balayage qui n'a jamais rien donné — et il explique après coup pourquoi ce
+balayage n'a jamais rien donné.
 
 ### La contrainte qui mord vraiment : les réservoirs lents ne sont jamais excités
 
