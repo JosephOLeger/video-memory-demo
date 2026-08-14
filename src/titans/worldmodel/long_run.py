@@ -29,7 +29,7 @@ one clip happening to be easier than another.
 
 **Both a divergence and a collapse must be caught.** A run whose loss goes NaN and a
 run whose memory quietly stops carrying information both fail, and only the first
-shows up in a finiteness check (see README on the MQAR theta ladder). So each
+shows up in a finiteness check. So each
 repetition records a *functional* metric (next-step L1, and the echo advantage over
 repetition 1) alongside the state diagnostics ``pr`` / ``cos_ret`` / ``||w1||`` /
 ``||S||``. A memory that has collapsed to a constant function of the query shows

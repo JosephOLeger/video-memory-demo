@@ -10,6 +10,44 @@ The memory is the research object; the world model is what stresses it.
 
 ---
 
+## 0. Orientation — read this first
+
+**The question.** Can a memory carried in *weights* hold episodic information that
+attention cannot hold at matched cost? Not "is it the best world model" — the object
+is an associative memory, judged on recall, not on prediction loss. Never call our own
+chunked block "quadratic"; it isn't.
+
+**Where the project stands.**
+
+| | |
+|---|---|
+| settled | the gate/normalisation set that works (`SANE`, §8.1); memory beats a memory-off control at distance 0 and loses past it (§8.10); the ATLAS bound does not cover this architecture (§8.5); 2500 steps ≈ ⅓ of the asymptote, `τ_train` ≈ 8 900 (§8.8) |
+| live | why the cascade sits past the stability bound, and whether readout dilution explains it (§8.11); where `τ*` sits, i.e. how large `1/(1−η)` can get before long streams break (§8.9) |
+| refuted | the stability *margin* as a survival criterion — three independent tests, one of them blind (§8.9). Use `d log‖S‖/dt` instead |
+| abandoned | the synthetic MQAR/copy/needle benchmark and its `membench` package, removed 2026-08-14. EgoLifeQA is the benchmark; **we do not invent new ones** |
+| next | graft the memory block into a pretrained VLM (LLaVA). That is the paper's main claim; everything here is the evidence that the block is sound |
+
+**Standing constraints on new experiments.**
+
+* Every new arm is a **delta on `sane_ns`** — no runs outside the SANE gate set.
+* Cascade results must never rest on **r = 0 pure accumulators** (`cas_none`,
+  `cas_r0.03`); they are diagnostics of the no-leak limit, not the architecture.
+* The BPTT window must **exceed the copy length `T`**, or `memory_gain` measures
+  nothing (§6.1).
+* The GPUs are shared. Size the VRAM guard on the **heaviest** arm, never extrapolate
+  from the lightest (§10).
+* Register predictions **before** launching anything that could be read either way —
+  `results/predictions_*.md`. The margin was refuted this way and it is the reason we
+  trust the refutation.
+
+**Where things are.** Code here; real runs on the workstation
+(`~/work/titans-mac`, synced by rsync — verify with `md5sum`, not `git status`).
+Raw JSON is mirrored into `results/box/`, and `scripts/nightly_report.sh` renders the
+CSVs, figures and `ETAT.md` into Josep's results folder every 30 minutes. Multi-phase
+sweeps self-drive from one cron entry through `scripts/tau_chain.sh` (§10).
+
+---
+
 ## 1. What the memory is
 
 The long-term memory `M` is a small MLP whose **weights are the state**, updated
@@ -327,18 +365,7 @@ means the threaded memory helps at all.
 > written before the change still carry the field; they are historical and not
 > comparable to `memory_gain`.
 
-### 6.2 MQAR — `membench/`
-
-`associative_recall`: show `num_pairs` (key, value) pairs, then query one key.
-Sequences are padded far beyond `segment_size`, so the only pathway from an early
-pair to the late query is the threaded memory. Scored by held-out accuracy against
-a known chance level.
-
-`accuracy_by_distance` buckets accuracy by how far the answer sits from its
-dependency, which separates "solved inside the attention window" from "solved by
-the memory" — the distinction that turned out to explain an earlier plateau.
-
-### 6.3 Memory health — `harness.memory_health`
+### 6.2 Memory health — `harness.memory_health`
 
 `pr` (participation ratio of `w1`'s singular values; 1.0 = rank-1 collapse), `norm`,
 and `cos_ret` (mean pairwise cosine of retrievals for distinct probe queries;
@@ -349,9 +376,9 @@ actually produces.
 **Health has repeatedly failed to predict task performance** — see §8. It is kept
 as a diagnostic of *what broke*, not as a target.
 
-### 6.4 Inner-loop stability — `stability.py`
+### 6.3 Inner-loop stability — `stability.py`
 
-Not a memory metric: a probe for §8.5. It samples **per chunk**, which is the
+Not a memory metric: a probe for §8.4. It samples **per chunk**, which is the
 granularity the recurrence advances at — the divergence happens inside a single
 forward, so anything sampled per optimisation step reads it as gradual and misses it.
 
@@ -359,7 +386,7 @@ forward, so anything sampled per optimisation step reads it as gradual and misse
 candidate curvatures `λ_max(2 Xᵀ diag(w) X)` for `X = K` (ATLAS's Gram) and
 `X = H₀` (the deep one), `‖h₀‖`, `‖W₀‖₂`, `‖W₁‖₂`, `‖S‖`, the realised gates, `κ`,
 and the resulting `ϱ(B)`. It uses the **per-token** weights `w_i` rather than a
-chunk-level Gram, for the reason in §8.6 — the identity `Σ_i w_i = κ` is a test.
+chunk-level Gram, for the reason in §8.5 — the identity `Σ_i w_i = κ` is a test.
 
 Every raw quantity is returned, not just the derived `ϱ`, so a spectral radius can
 be recomputed offline under a corrected formula without re-running anything. Sanity
@@ -390,7 +417,7 @@ be easy to break:
 * PCA is fitted on train only, no learned I/O parameter survives (every parameter
   is under `blocks.`), and a width mismatch raises instead of being projected away;
 * `normalize_hidden` holds `‖h₀‖` to its target *and* leaves `M(k)`'s scale free —
-  the pair of properties that separate it from `normalize_output` (§8.8);
+  the pair of properties that separate it from `normalize_output` (§8.7);
 * cropping a cache preserves both content order and the `pca` metadata the harness
   keys on, so a cropped corpus cannot silently stop being pre-reduced.
 
@@ -453,31 +480,7 @@ cascade's earlier apparent win was compensating for broken gates, which SANE fix
 at the root. Caveat: next-step L1 is nearly blind to retention, which is precisely
 why the echo benchmark exists.
 
-### 8.3 MQAR — out-of-window memory from 0.23 to 0.99
-
-`sane_ns` at 12 pairs, where plain Titans fails to learn the task on half its seeds:
-
-| | in-window (control) | out-of-window (memory) |
-|---|---|---|
-| `sane_ns`, seed 1 | 1.0000 | **0.9941** |
-| `sane_ns`, seed 0 | 1.0000 | **0.9858** |
-| same config, **memory branch off** | 1.0000 | **0.0531 / 0.0731** |
-| `titans` | 1.0000 | 0.132 |
-
-*(chance = 0.0625)*
-
-The anti-leak control is the point: disable the memory branch and out-of-window
-accuracy falls to **exactly chance** while in-window stays at 1.0. Nothing but the
-threaded memory can carry the answer. Full unsegmented attention scores 0.997 — so
-in its good mode the memory does as well as seeing the entire sequence.
-
-**It is bimodal, and that is the open problem.** Roughly half the seeds reach the
-high mode; the rest sit at the Titans baseline. The two modes are
-**indistinguishable by rank** (PR 25.15 vs 25.18), so the bimodality is not the
-collapse. The memory is healthy either way; one seed learns to use it and the other
-does not. The open question is an optimisation one.
-
-### 8.4 Echo sweep, 14 configs × 2 horizons × 3 seeds (75/84 usable cells)
+### 8.3 Echo sweep, 14 configs × 2 horizons × 3 seeds (75/84 usable cells)
 
 Measured on the **superseded** `content_specificity` metric (§6.1), at `K=24`,
 which is the horizon where any signal exists (`K=8` gives ~+0.004 for every config):
@@ -514,7 +517,7 @@ cascade configs on the same videos, so the bias largely cancels; the
 cascade-vs-no-cascade ranking is more exposed and is being re-measured with
 `memory_gain`.
 
-### 8.5 SANE's failure mode: an abrupt in-forward divergence
+### 8.4 SANE's failure mode: an abrupt in-forward divergence
 
 `normalize_output=False` is SANE's fragile ingredient. On some seeds and not
 others, at the same dim, a run diverges to all-NaN. Localised per-step:
@@ -546,14 +549,14 @@ the same NaN bit-for-bit, so a failed cell must be replaced with a *different* s
 never retried. It affected ~13 % of echo-sweep cells, and it is what invalidated an
 earlier capacity sweep — so **memory capacity remains unmeasured**.
 
-**Reproducing it needs the right task.** The cell above is `sane_ns`, `dim=32`,
-`segment_size=8`, `num_pairs=8`, batch 32, and **`key_vocab = val_vocab = 64`**.
-That last one is not incidental: re-running at `vocab=16` (chance 1/16 instead of
-1/64) is an easier task with a different key geometry and gave **0 divergences in
-25 cells**. `membench/nan_sweep.py` is the runnable cell, with those values as
+**It was characterised on a synthetic recall task, now retired.** That harness
+(`titans.membench`) was deleted in 2026-08 once the project settled on video latents;
+the divergence has **never been reproduced in PCA space** — 0 NaN in 160+ runs — so
+nothing here can currently trigger it. The characterisation below is kept because it
+is what `theta_scale` and `normalize_hidden` were designed against. Its parameters as
 defaults.
 
-### 8.6 Why ATLAS's bound does not cover this
+### 8.5 Why ATLAS's bound does not cover this
 
 `θ` sat at 0.021-0.022 against ATLAS's inner-loop bound `2/λ_max(K Kᵀ)` — a
 *factor ~10 inside* it — yet halving `θ` prevents the blow-up. Working out why is a
@@ -597,15 +600,15 @@ as one mechanism: `normalize_output=True` bounds the residual so `2Jᵀr` cannot
 inherit `‖h₀‖`'s growth (at the cost of the associative signal, §8.1), and halving
 `θ_scale` attacks the same product `θλ` from the other side.
 
-`stability.py` measures all of it per chunk (§6.4), and `normalize_hidden` bounds
-`‖h₀‖` directly (§8.8).
+`stability.py` measures all of it per chunk (§6.3), and `normalize_hidden` bounds
+`‖h₀‖` directly (§8.7).
 
-### 8.7 Initialising the momentum gate matches a whole cascade — and it replicates
+### 8.6 Initialising the momentum gate matches a whole cascade — and it replicates
 
 On `memory_gain` (§6.1), `T=64`, `K=24`, full BPTT, batch 8, 2500 steps, PCA `k=128`.
 `nocas_eta10` is `nocas` plus one changed bias: `--eta-init 0.9`, i.e. a momentum
 horizon `1/(1-η)` of 10 tokens instead of the default 2.1. Permutation tests, paired
-by seed. **0 NaN in either sweep** — the PCA representation appears to suppress §8.5.
+by seed. **0 NaN in either sweep** — the PCA representation appears to suppress §8.4.
 
 | arm | small corpus, 0.38 M latents (n=24) | full EgoLife, 2.80 M latents (n=8) |
 |---|---|---|
@@ -635,9 +638,9 @@ resolution rather than the volume; separating them needs a run at matched
 resolution. And "not significantly different" is not "equal" — resolving the
 residual gap at 3 SE would need ~120 seeds per arm.
 
-### 8.8 `normalize_hidden`: free on plain SANE, expensive on `eta_init`
+### 8.7 `normalize_hidden`: free on plain SANE, expensive on `eta_init`
 
-§8.6 says the unbounded quantity is `‖h₀‖`, so bound it: `normalize_hidden`
+§8.5 says the unbounded quantity is `‖h₀‖`, so bound it: `normalize_hidden`
 L2-normalises the memory's hidden activation, making `λ_max(H_GN^(W1)) = 2‖h₀‖²` a
 constant. **L2, not RMS** — an RMSNorm leaves `‖h₀‖ = √d_h ≈ 22` at ATLAS's
 expansion 4, against a threshold near 2, so it would not bound the quantity that
@@ -669,15 +672,142 @@ paired permutation tests:
 3. **It halves that arm's seed variance** (SD 0.0295 → 0.0127, back to `nocas`'s
    0.0120). Consistent with — not proof of — part of `eta_init`'s gain coming from
    operating near the instability edge: `κ` is 28.6 at `eta_init=0.9` against 14.6 at
-   rest, and §8.6 puts the resting point already past the predicted threshold there.
+   rest, and §8.5 puts the resting point already past the predicted threshold there.
    The theory said `eta10` is where the fix would bite hardest, and it is.
 
-The controls reproduced §8.7 to four decimals, which also confirms the flag is inert
+The controls reproduced §8.6 to four decimals, which also confirms the flag is inert
 when off.
 
 **What this does not yet show is that it prevents the divergence it was built for.**
-PCA space gives 0 NaN everywhere, so the sweep above had nothing to prevent; that
-question lives on MQAR (§8.5) and is open.
+PCA space gives 0 NaN everywhere, so the sweep above had nothing to prevent. With the
+synthetic harness retired, that question is closed by abandonment rather than
+answered — and `normalize_hidden` has since found a different job (§8.11).
+
+### 8.8 2500 steps was not an equilibrium — 40 000 is
+
+`--steps 2500` entered the repo as an unjustified default and every number in §8.3-8.7
+was measured there. One trajectory (`nocas` η=0.9, snapshots every 5000 steps, **n=1
+seed**) says what that cost:
+
+| steps | `mem_effect` | L1 (2nd copy) | margin | PR | train/val gap |
+|---|---|---|---|---|---|
+| 5 000 | 0.2321 | 0.4719 | 11.46 | 54.3 | −0.0037 |
+| 10 000 | 0.3557 | 0.3512 | 5.42 | 50.1 | +0.0024 |
+| 20 000 | 0.4719 | 0.2418 | 3.42 | 49.9 | +0.0068 |
+| 40 000 | **0.5331** | **0.1753** | **1.44** | 56.1 | +0.0089 |
+
+A saturating exponential fits to RMS 0.005: **asymptote 0.530, `τ_train` ≈ 8 900
+steps.** So 40 000 steps is converged (100.7 % of the asymptote), 10 000 reaches only
+**67 %**, and 2500 about 30 %. Read every number in §8.3-8.7 as roughly a third of its
+converged value. The *orderings* held all along the trajectory; the magnitudes did not.
+
+**No overfitting at 53 epochs.** The train/val gap on `mem_effect` is +0.0089, i.e.
+1.7 % of the signal. Criterion "stop before you memorise" never bites on this corpus.
+
+**The margin falls as `steps^-1.00`** (an exact power law) while survival does not
+move at all — see §8.9. It is not a stopping criterion.
+
+### 8.9 Divergence and collapse are different failures, and the margin certifies neither
+
+Two distinct ways the memory stops working, and only one shows up in a finiteness
+check:
+
+| | divergence | collapse |
+|---|---|---|
+| `‖S‖` | grows geometrically → NaN | bounded |
+| PR | — | falls to ~5 from ~55 |
+| when | within 200-400 tokens | over 10 000s of tokens |
+
+Long-stream probes (`long_run`, `loop` = one clip repeated, `cycle` = a rotating set,
+the harsher one). Scalar arms up to η=0.95 hold 64 000 tokens and **collapse**; η≥0.98
+**diverge** before 400 tokens. The memory-off control holds PR at 54.27 exactly over
+300 repetitions, so the instrument is clean.
+
+**`τ*`, the critical accumulation horizon** (`τ_acc = 1/(1−η)`), is bracketed between
+**20 and 50 tokens** on `loop` and between **3 and 10** on `cycle` — it depends on the
+input statistics, so a single number would be wrong. The sweep that narrows it runs
+from `scripts/tau_chain.sh`.
+
+**The margin was tested blind and refused.** Nine predictions written before the runs,
+**7 wrong**: two arms with margin < 8 held 64 000 tokens, one with margin 5.81 died at
+384. Then a monotone control: along the §8.8 trajectory the margin fell **×8** (11.46 →
+1.44) and survival did not move a token (300/300 finite at every step count). Use it as
+a within-family diagnostic, never as a stability certificate.
+
+**What does discriminate**: `d log‖S‖/dt` on a short probe — ~0 for survivors,
++0.013 to +0.065 for divergent arms. Two orders of magnitude, no overlap, ~27 s for
+1920 tokens.
+
+**Training longer does not fix collapse.** Across 5 000 → 40 000 steps the final PR is
+4-6 regardless. What training buys is that the surviving directions stay useful:
+`cos_ret` at the end of the stream rises 0.29 → 0.64 and the tail penalty halves. Rank
+collapse and functional collapse are not the same thing.
+
+### 8.10 Past distance 0 the memory is a net cost, and it is interference not decay
+
+Scored with the memory-off control (`mem_effect = L1(memory off) − L1(repeat)`), at
+10 000 steps, distractors between the two presentations of V:
+
+| gap (latents) | +0 | +64 | +128 | +2048 |
+|---|---|---|---|---|
+| `mem_eta0.9` | **+0.3475** | −0.2895 | −0.3940 | −0.5977 |
+
+The memory-off L1 is **0.7068 at every gap, exactly constant** — so the degradation is
+not the model losing the thread. At gap 0, i.e. exactly the training length with no
+drift possible, the *cross* condition already costs +26 % over memory-off. The
+dominant term is **content interference**, not length-driven state decay.
+
+Two controls worth knowing before designing anything here. A **full-attention baseline**
+with `seg ≥ 2T` scores `memory_gain` between −9e-5 and +1e-4 with random sign, and
+trains in 21 s against ~6 h for a memory arm. And **8 attention heads change nothing**
+(`mem_effect` 0.0832 vs 0.0849 at 1 head) while *lowering* PR (56.0 vs 63.7) — the
+head count is not the fix for anything measured here.
+
+### 8.11 The cascade sits past the bound because the outer loop puts it there
+
+`B` is doubly stochastic — spectral radius exactly 1 — so the cascade **cannot** grow
+geometrically on its own. Yet every cascade arm dies within 200-400 tokens with
+`d log‖S‖/dt` between +0.013 and +0.065. An audit of the gates the outer loop *chose*
+(58 frozen artefacts, `margin.py`) locates the cause:
+
+| separator | cascade (real leak, n=18) | scalar (n=40) | Cohen d |
+|---|---|---|---|
+| `θ_max` | 0.0630 ± 0.0305 | 0.0165 ± 0.0132 | **1.98** |
+| `‖h₀‖ max` | 2.185 ± 0.560 | 1.194 ± 0.480 | **1.90** |
+| `α` mean | 0.00040 | 0.00120 | −1.20 |
+| `θ·λ_hidden` | 3.25 | 0.144 | 1.16 |
+
+`cas_none` and `cas_r0.03` are excluded as pure accumulators (r = 0, and r < 0.1 where
+the surprise leak does nothing); excluding them *strengthens* the separation.
+
+**Raising the leak rate cannot fix this, because the outer loop compensates it.**
+`cas_r1.0` leaks 33× harder than `cas_r0.03` and ends with 2.3× the `θ` and 4.5× less
+margin. That is why sweeping r ∈ {0, 0.03, 0.1, 0.3, 1.0} is flat in survival: every
+increment of leak is repaid in step size.
+
+**Working hypothesis, under test.** In the `chain` topology the gradient enters
+reservoir 0 only, which then sheds `beta1·g⁻¹ = 0.25` of its mass per token to the
+deeper ones, and every readout except `sum` stays at single-filter scale. The outer
+loop would be paying for that dilution in `θ`. The arms that change the *structure* and
+leave `θ`/`α` freely learned (`readout=sum`, `beta1=0.1`, `normalize_hidden`) are
+queued in phase 3 of `tau_chain.sh`; predictions and the falsifier were registered
+before launch in `results/predictions_cascade_dilution.md`.
+
+**`normalize_hidden`'s second life.** It was built to stop a divergence PCA space never
+produced (§8.7), and on the scalar arm it costs 16 % of `mem_effect` for nothing. But
+it bounds `‖h₀‖` by construction, and `‖h₀‖` is where the cascade's excess actually
+sits (d = 1.90 above) — the one place it was never tested. That is arm `casE_nh`.
+
+Note the two divergence mechanisms are **not** the same: scalar arms diverge by η
+accumulation with *small* θ; cascade arms by θ compensation with margin < 1. They do
+not belong on one axis.
+
+### 8.12 Seed variance is larger than most tables here admit
+
+Measured across 6 seeds per arm: `cas_none` spans a factor **24** on `θ_max`. Several
+headline tables in this README are n=1 or n=3, including the §8.8 trajectory. Treat
+any single-seed number as a direction, not a magnitude, and prefer spending budget on
+seeds over arms.
 
 ## 9. Data/parameter proportions: an accepted deviation
 
@@ -694,8 +824,9 @@ But the ratio is weak evidence here and should not be over-read. It is an
 LLM-scaling heuristic assuming near-independent tokens, and consecutive video
 latents are massively redundant. Empirically it mis-predicts: at a ratio of 0.01 the
 measured train/val gap was 0.043 and the model beat the persistence baseline. The
-honest indicator is the measured generalisation gap, not the ratio. On MQAR the
-question is moot — tasks are generated on the fly.
+honest indicator is the measured generalisation gap, not the ratio — and it has since
+been measured directly along a 40 000-step trajectory (§8.8): +0.9 % at 40 000 steps,
+i.e. **no overfitting at 53 epochs**, which settles the question for this corpus.
 
 The intrinsic dimensionality of the V-JEPA-2 latents, measured on 128k vectors:
 
@@ -761,16 +892,17 @@ JOBS=jobs_ref64.txt GUARD=13000 PREFIX=S bash scripts/keepalive.sh
 crontab -l | { cat; echo "*/10 * * * * JOBS=jobs_ref64.txt GUARD=13000 PREFIX=S /bin/bash \$HOME/work/titans-mac/scripts/keepalive.sh"; } | crontab -
 ```
 
-The MQAR divergence cells are the same shape of job, and cheap (under a GiB each,
-8-25 min depending on whether Muon is on):
+**Multi-phase studies run from one cron entry.** `scripts/tau_chain.sh` is the live
+example: each phase is gated on the previous one's jobs being *gone* (`pgrep`), not on
+its queue file being empty — the in-flight cells of a drained queue still hold cards,
+and starting the next phase then is what caused the OOMs of 2026-07-29. A phase that
+builds its own queue from earlier results (`build_traj_queue.py`) must refuse to emit
+anything when the input does not support it, rather than queue a plausible-looking
+sweep.
 
-```bash
-python -m titans.membench.nan_sweep --config sane_ns --seed 0 --out cell.json
-python -m titans.membench.nan_sweep --config sane_ns --seed 0 --normalize-hidden 1.0
-```
-
-Arms must share the seed grid: the divergence is deterministic per seed, so a NaN
-rate only means something against a control at the *same* seeds. Raise `WORKERS`
+Arms must share the seed grid: the inner-loop divergence is deterministic per seed, so
+a failure rate only means something against a control at the *same* seeds. Raise
+`WORKERS`
 for these — twelve fit where two echo jobs would.
 
 `scripts/pool4.sh` is the worker: a free-VRAM guard, one requeue on failure then a
@@ -791,7 +923,18 @@ group) and its `timeout … python …` child survives to finish and write its J
 while the worker stops pulling new work. Give the replacements a new `PREFIX` or the
 keepalive's `pgrep` will think they are already running.
 
-## 11. Not built
+## 11. Not built, and retired
+
+**Retired 2026-08-14: the synthetic benchmark.** `src/titans/membench/` (MQAR,
+associative recall, copy, needle-in-a-haystack) and its tests are deleted. It served
+its purpose — it is where the SANE gate set was found (§8.1) and where the in-forward
+divergence was first characterised (§8.4) — but the project is judged on real video
+latents and, eventually, on EgoLifeQA. Two consequences to know: the `normalize_hidden`
+divergence question is closed by abandonment rather than answered (§8.7), and any
+sub-2500-step number quoted from that era is on a different task. **We do not build
+replacement benchmarks.**
+
+Never built:
 
 * The **MAG** and **MAL** variants (only MAC is implemented).
 * **Per-channel** memory gates — `α`/`η`/`θ` are one scalar per token, via a
@@ -803,7 +946,7 @@ keepalive's `pgrep` will think they are already running.
   memory into a pretrained open multimodal model (frozen backbone, zero-init output
   gate, memory on a per-frame pooled stream) is the natural next scope; sketched, not
   started.
-* A **bound on the first layer's curvature**. `normalize_hidden` (§8.8) bounds the
+* A **bound on the first layer's curvature**. `normalize_hidden` (§8.7) bounds the
   last layer's block by construction; the first layer's
   `≤ 2‖k‖²‖W₁ diag σ′‖²` still depends on `‖W₁‖`, which nothing constrains.
 * **Open problems from the theory note**: lifting the linearisation to genuinely

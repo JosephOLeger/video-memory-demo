@@ -20,7 +20,7 @@ Stability axis: the margin ``2.37 / max_chunk(theta_t * lambda_hidden)`` from
 
 **Health is printed next to both.** A memory that has quietly stopped carrying
 anything has an excellent margin, and would otherwise read as the most stable arm on
-the board (README; the MQAR theta ladder made exactly this mistake).
+the board -- a mistake this project has actually made.
 
     python -m titans.worldmodel.vv_compare --glob 'vv_*.json' --margins vv_margins.json
 """

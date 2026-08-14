@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "titans-mac"
 version = "0.1.0"
-description = "From-scratch PyTorch reimplementation of Titans neural long-term memory + MAC (arXiv:2501.00663), an ATLAS Omega-rule sliding-window memory extension (arXiv:2505.23735), a Titans-MAC world model over frozen V-JEPA-2 video latents with long-term-memory ablations, and a synthetic associative-recall/copy/needle memory benchmark."
+description = "From-scratch PyTorch reimplementation of Titans neural long-term memory + MAC (arXiv:2501.00663), an ATLAS Omega-rule sliding-window memory extension (arXiv:2505.23735), a Titans-MAC world model over frozen V-JEPA-2 video latents with long-term-memory ablations, and a metaplastic momentum cascade of our own."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -14,8 +14,9 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=7.0"]
-# Needed to run src/titans/worldmodel/ against real video (encoder + Kinetics-mini /
-# EgoLife loaders); titans.membench is pure torch and needs none of this. `decord`
+# Needed only to (re-)encode real video into latents (encoder + EgoLife loaders). The
+# sweeps themselves read a cached latent tensor and are pure torch, so day-to-day work
+# needs none of this. `decord`
 # is what actually works for video decoding in this environment; `torchcodec` (a
 # more modern alternative) failed to load here because the system has no `ffmpeg` /
 # `libavutil.so.56` -- with a working ffmpeg it may be a viable swap-in, but nothing

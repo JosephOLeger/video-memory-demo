@@ -82,8 +82,8 @@ def newton_schulz5(
     "spread" across directions instead of being dominated by whichever direction
     the accumulated momentum happens to have reinforced most.
 
-    Motivation here: diagnosed directly on this project's memory (see the needle/
-    collapse probes) -- accumulating momentum from many sequential outer-product
+    Motivation here: diagnosed directly on this project's memory (the rank/PR
+    collapse ``long_run.py`` still measures) -- accumulating momentum from many sequential outer-product
     gradients (``-theta_t * grad``) over a long threaded sequence can drift the
     weight update toward an (approximately) rank-1 matrix, so the memory's output
     *direction* stops depending on the query even though its *magnitude* still

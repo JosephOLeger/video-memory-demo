@@ -44,8 +44,10 @@ OMEGA = dict(memory_window_size=4)
 MUON = dict(memory_orthogonalize_momentum=True, memory_update_bias=False)
 CASCADE = dict(memory_use_cascade=True, cascade_leak="none", cascade_readout="mean")
 # The gate/normalisation set that follows ATLAS's own bounds (p25) rather than
-# patching around them. Each piece is inert or harmful alone; together they take
-# MQAR's out-of-attention-window memory from 0.23 to 0.99 (see README).
+# patching around them. Each piece is inert or harmful alone; together they took
+# out-of-attention-window recall from 0.23 to 0.99 on the synthetic recall benchmark
+# this repo used to carry (retired 2026-08; the numbers below are that provenance, not
+# something you can re-run here). SANE is the base of every arm we still train.
 SANE = dict(alpha_init=0.002,          # forget-gate half-life 1 token -> ~346
             theta_scale=0.03,          # inner step under the 2/lambda_max bound
             normalize_qk="l2",         # ||k|| = 1 -> lambda_max ~ m, bound ~0.25
@@ -59,17 +61,15 @@ CONFIGS: dict[str, dict] = {
     "omega": {**PHI, **TABLE7, **OMEGA},
     "atlas": {**PHI, **TABLE7, **OMEGA, **MUON},
     "atlas_cascade": {**PHI, **TABLE7, **OMEGA, **MUON, **CASCADE},
-    # Best configuration found on MQAR. Bimodal there: ~50% of seeds reach
-    # memory ~0.99, the rest sit at the Titans baseline ~0.27, and ~12% die.
-    # Never yet run on video -- the world model's winner is atlas_cascade, and
-    # the two have no ingredient in common beyond Muon.
+    # SANE alone. Kept for the ladder; every run we launch uses sane_ns below.
     "sane": {**SANE},
     "sane_ns": {**SANE, **MUON, "learned_qk_scale": True},
     "sane_ns_cascade": {**SANE, **MUON, "learned_qk_scale": True, **CASCADE},
     # SANE with the inner step halved. normalize_output=False makes the inner
-    # loop diverge to NaN on ~13% of seeds -- abruptly, inside a single forward,
-    # with no precursor (see README 8.5). theta_scale=0.01 prevented it on MQAR
-    # without restoring the output norm, which is what SANE deliberately removes.
+    # loop diverge to NaN on ~13% of seeds -- abruptly, inside a single forward, with
+    # no precursor, and deterministically per seed. theta_scale=0.01 prevented that on
+    # the synthetic benchmark without restoring the output norm, which is what SANE
+    # deliberately removes. On PCA video latents the divergence has never been seen.
     # Note theta already sat ~10x INSIDE ATLAS's 2/lambda_max bound when it
     # diverged, so this margin is empirical, not the paper's condition.
     "sane_ns_theta01": {**SANE, **MUON, "learned_qk_scale": True, "theta_scale": 0.01},
@@ -82,9 +82,10 @@ CONFIGS: dict[str, dict] = {
     # whether this one is free is the point of measuring it.
     "sane_ns_nh": {**SANE, **MUON, "learned_qk_scale": True, "normalize_hidden": True},
     # Union of both tasks' winners: the full ATLAS stack, the cascade, and the
-    # gate/normalisation set. Note SANE removes the output RMSNorm, which on MQAR
-    # killed one seed in four -- on continuous regression that is more exposed,
-    # not less, so this arm may simply diverge. That is itself worth measuring.
+    # gate/normalisation set. Note SANE removes the output RMSNorm, which killed
+    # one seed in four on the synthetic benchmark -- on continuous regression that
+    # is more exposed, not less, so this arm may simply diverge. That is itself
+    # worth measuring.
     # SANE minus normalize_output=False: on continuous video latents, dropping
     # the output norm on top of phi+cascade sends ||M|| to inf at step 0 (NaN,
     # measured). Keep the output norm here; alpha_init + L2 keys + theta_scale +

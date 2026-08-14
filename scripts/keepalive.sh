@@ -37,8 +37,8 @@ launch() {  # $1 jobsfile  $2 gpu  $3 wid  $4 needMiB  $5 timeout
 if [ -s "$JOBS" ]; then
   # Default two per card: one job rarely saturates an A5000, and the guard plus
   # pool4's per-card lock decide whether the second one actually gets to start.
-  # Raise WORKERS for small jobs (MQAR at dim=32 takes under a GiB), lower it for
-  # heavy ones. More workers than a card can actually keep busy buys nothing --
+  # Raise WORKERS for small jobs, lower it for heavy ones. More workers than a
+  # card can actually keep busy buys nothing --
   # a single echo job already sits at ~83% utilisation.
   for ((j = 0; j < WORKERS; j++)); do
     launch "$JOBS" "$((j % 4))" "${PREFIX}${j}" "$GUARD" "$TMO"

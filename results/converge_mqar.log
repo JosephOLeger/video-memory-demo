@@ -1,2 +1,0 @@
-[1671.5s] mqar           num_pairs=4   baseline  acc=0.994 (chance 0.062) params=67336 stopped=max_steps@10000 best=0.997
-[54704.2s] mqar           num_pairs=4   uncoupled acc=0.991 (chance 0.062) params=67336 stopped=ceiling@8500 best=0.991

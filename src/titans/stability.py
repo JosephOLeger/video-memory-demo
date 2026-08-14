@@ -2,7 +2,7 @@
 
 The divergence this project chases happens **inside a single forward**: the outer
 weights are still finite entering it and NaN leaving it, with 30 healthy steps
-before and no precursor (README §8.5). Anything sampled per outer step therefore
+before and no precursor (README §8.4). Anything sampled per outer step therefore
 misreads it as gradual. This module samples per *chunk*, which is the granularity
 the recurrence actually advances at.
 
