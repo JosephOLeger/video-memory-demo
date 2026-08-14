@@ -30,10 +30,13 @@ tokens de réponse (`logits_to_keep`) :
 | 128 | 4 119 | 2,94 Go |
 | 256 | 8 215 | 5,83 Go |
 
-Soit **0,71 Go par millier de tokens**, parfaitement linéaire. Sur une carte dédiée
-(23 − 7,63 = 15,4 Go disponibles) → **~21 700 tokens ≈ 660 frames par fenêtre**, soit
-**11 minutes à 1 fps**. *(Extrapolation : les mesures ont été prises sur une carte
-partagée avec la phase 3, plafonnée à 10,1 Go libres.)*
+Soit **0,71 Go par millier de tokens**, parfaitement linéaire, c'est-à-dire **23,3 Mo par
+frame** (32 tokens visuels). Sur une carte dédiée (23 − 7,63 = 15,4 Go disponibles) →
+**676 frames, soit 11,3 minutes à 1 fps**. *(Extrapolation : les mesures ont été prises
+sur une carte partagée avec la phase 3.)*
+
+**Mais c'est le VLM seul, et le bloc mémoire coûte plus cher que lui** (§2bis) : la
+fenêtre réelle tombe à **8,9 min** avec `sane_ns` et **6,9 min** avec la cascade K=17.
 
 ### Le site d'insertion décide du coût, et c'est le plus bas qui compte
 
@@ -83,6 +86,30 @@ ne rajoute que 18 % par-dessus.
 > Réserve : les 163 f/s sont mesurés avec un `nn.Linear` en guise de branche. Le
 > chiffre combiné suppose que les deux coûts s'additionnent en série, ce qui est le
 > majorant.
+
+### 2bis. Le bloc mémoire coûte plus de VRAM que le VLM
+
+Mesuré séparément, `WorldModel(dim=128, depth=2, seg=8)`, batch 1, 288 → 1152 tokens
+(un token = une frame poolée), fwd+bwd, sur A5000 :
+
+| bloc | Mo/frame | + VLM (23,3) | fenêtre max | pic à 1152 tok |
+|---|---|---|---|---|
+| `sane_ns` seul | 6,34 | 29,6 | **532 frames / 8,9 min** | 7,15 Go |
+| cascade K=6 | 9,10 | 32,4 | 486 frames / 8,1 min | 10,26 Go |
+| cascade K=10 | 11,11 | 34,4 | 458 frames / 7,6 min | 12,51 Go |
+| cascade K=17 | 14,60 | 37,9 | **416 frames / 6,9 min** | 16,45 Go |
+
+Le graphe d'autograd du scan par token, avec Newton-Schulz à chaque pas, est ce qui
+domine — pas le VLM. Un premier essai à 4 608 tokens a fait **OOM à 17 Go**. La VRAM
+croît linéairement en K ; le **temps**, lui, ne bouge pas (22,0 s à K=6 comme à K=17 :
+le scan est vectorisé sur l'axe des réservoirs). La cascade coûte +30 % en temps par
+rapport à `sane_ns`, indépendamment de K.
+
+Stabilité vérifiée sur 4 608 tokens : `finite=True` et dérive de norme ×0,99–1,01 pour
+les quatre configurations. Aucune ne diverge.
+
+*(Ces chiffres sont pris à `depth=2`, soit deux blocs MAC ; la greffe n'en aura qu'un,
+donc compter environ la moitié.)*
 
 ### Budget sur le corpus d'entraînement
 
@@ -251,23 +278,69 @@ nulle du docstring — plafonne à PR 1,59 (K=6) et 2,03 (K=17). Ce n'est donc p
 de la cascade : **tout banc d'exponentielles est mal conditionné** (l'inversion de Laplace
 est un problème mal posé). Aucune architecture de ce type ne donnera K échelles séparables.
 
-**Portée** *(les gaps de l'option A entre 105 et 1 076 pas sont réels, mais secondaires :
-il n'y a de toute façon pas 6 filtres à séparer)*.
+Deux corollaires immédiats :
+
+- **`readout=gated` ne sert à rien.** Le noyau `mean` capte **99,93 %** de la première
+  direction du span, et 100 % des deux premières. Une porte apprise par token n'a rien à
+  arbitrer sur un span de dimension 1,1. Autant prendre `mean`, moins cher et plus stable.
+- **Réserver la fuite aux réservoirs profonds** (« conserver la masse dans le premier »)
+  fait bien monter le rang — 1,12 → 1,81 — mais en payant le prix habituel : τ_max chute
+  de 1 200 à 15,7 pas. Même arbitrage que tous les autres leaks.
 
 **Réserve importante :** tout ceci vaut pour un `B` **fixe**. La revendication propre de
 la cascade (`selective=True`, `B_t` par arête, non commutatif) est précisément ce qu'un
 banc de filtres fixe ne peut pas reproduire, et le PR ne la mesure pas. Ce calcul borne
 le **plancher** de la cascade, il ne la réfute pas.
 
-**Retenu : option B, `K=17, g=2`, `beta1=0.5`** (contrainte `beta1(1+1/g) = 0,75 ≤ 1`
-respectée, tous les λ positifs, pas de risque de bord à −1) — mais **pour la portée, pas
-pour la résolution**. Ce que K=17 achète, c'est un τ lent de 303 000 pas au lieu de 93 ;
-ce qu'il n'achète pas, c'est 17 échelles séparables. Le mécanisme longue distance reste
-`α` (τ_ret = 1/α), pas la cascade.
+### La cause est la symétrie de B, et elle se corrige
 
-C'est quand même un **critère de conception** pour K et g dérivé du banc, comme `α`, au
-lieu du balayage qui n'a jamais rien donné — et il explique après coup pourquoi ce
-balayage n'a jamais rien donné.
+`B` est construit symétrique et doublement stochastique : la masse **remonte** des
+réservoirs profonds vers les superficiels. C'est ce reflux qui égalise les noyaux. En
+coupant le retour — chaîne **dirigée** `0 → 1 → … → K−1`, `u[e] ← (1−b_e)u[e] +
+b_{e−1}u[e−1]` — la réponse du réservoir k devient la convolution de k exponentielles,
+c'est-à-dire une **bosse de type gamma qui culmine à un décalage propre à k** :
+
+| K=6, g=2 | rang effectif | décalage du pic, par réservoir |
+|---|---|---|
+| chaîne symétrique (actuelle) | **1,12** | 0, 0, 0, 0, 0, 0 — le réservoir 0 domine partout |
+| chaîne **dirigée** | **3,75** | **0, 5, 15, 36, 77, 660** |
+
+**×3,3 sur le rang effectif, sans rien perdre sur l'horizon** (le mode λ=1 subsiste, la
+masse s'accumule dans le dernier réservoir au lieu de se répartir). Les τ deviennent
+exactement l'échelle géométrique visée, `g^k/beta1` = 4, 8, 16, 32, 64, ∞, là où la
+version symétrique les écrasait sur 1,7 → 93.
+
+Stabilité : `B` dirigée est triangulaire inférieure, ses valeurs propres **sont** sa
+diagonale `[1−b_0, …, 1−b_{K−2}, 1]`, toutes dans (0, 1]. Rayon spectral 1 exactement,
+comme la version symétrique — l'argument de stabilité du docstring tient encore, par un
+chemin plus simple.
+
+Le changement est de deux lignes dans `cascade_step` : supprimer `inflow_from_right`, ne
+garder que le flux descendant.
+
+**Et K se choisit alors par la fenêtre**, pas par la portée : le rang dirigé monte à 4,08
+à K=10 puis **retombe à 2,82 à K=17**, parce que les réservoirs 8 à 16 culminent au-delà
+de la fenêtre de 660 pas — ils y ressemblent tous à des rampes. Règle : *le réservoir le
+plus profond doit culminer à l'intérieur de la fenêtre d'entraînement*. À g=2, cela donne
+**K=10** (pic le plus profond à 649 pas ≈ la fenêtre).
+
+### Ce qui est retenu
+
+| | valeur | raison |
+|---|---|---|
+| topologie | **chaîne dirigée** (à implémenter) | rang effectif ×3,3, horizon inchangé |
+| K | **10** | le pic le plus profond doit tomber dans la fenêtre |
+| g, beta1 | 2, 0,5 | échelle géométrique `g^k/beta1` = 4 … 2048 |
+| readout | **mean** | capte 99,93 % du span ; moins cher et plus stable que `gated` |
+| leak | `surprise`, r ≈ 0,1 | inchangé |
+
+L'option B (K=17, g=2) est abandonnée : elle coûtait 2,3× la VRAM de `sane_ns`, réduisait
+la fenêtre de 532 à 416 frames, et sur la chaîne dirigée elle *dégrade* le rang.
+
+Le mécanisme longue distance reste **`α`** (τ_ret = 1/α), pas la cascade. C'est quand même
+un **critère de conception** pour K et g dérivé du banc, comme `α`, au lieu du balayage
+qui n'a jamais rien donné — et il explique après coup pourquoi ce balayage n'a jamais rien
+donné.
 
 ### La contrainte qui mord vraiment : les réservoirs lents ne sont jamais excités
 
