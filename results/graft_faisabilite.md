@@ -376,6 +376,98 @@ seul `shallow` a la bonne pente :
 base d'un span de dimension 1,1 où `mean ≈ u₁` ; une fois les `C_k` en place les
 réservoirs se différencient et l'équivalence tombe.)*
 
+### 5ter. Le mode « fuite terminale », chiffré sur le critère du papier
+
+Le bon critère n'est pas la pente seule mais le **SNR de l'observateur idéal** de
+Benna-Fusi : `SNR(t) = √N · r(t) / √(Σ_s r(s)²)`, où `r` est la réponse impulsionnelle de
+`u₁`, le dénominateur est la variance **stationnaire** apportée par toutes les
+modifications passées, et `N` est le nombre de synapses — pour nous la taille de la
+matrice mémoire. La **durée de vie** est le dernier `t` où `SNR > 1`.
+
+C'est ce critère qui arbitre la plasticité contre la rigidité : une fuite forte donne un
+`SNR(0)` élevé et une durée de vie nulle, une fuite nulle l'inverse.
+
+Matrice 128×128 (N = 16 384) :
+
+| configuration | pente 10–10³ | SNR(0) | variance | durée de vie |
+|---|---|---|---|---|
+| accumulateur pur (`r(t)` = cte) | 0,000 | 0,1 | 2,0·10⁶ | **0** |
+| **notre chaîne C_k=1, sans fuite** (= `cas_none`) | −0,216 | 1,1 | 1,4·10⁴ | **0** |
+| **notre chaîne C_k=1 + fuite unif. r=0,1** (défaut) | −10,6 | 84,3 | 2,3 | **30** |
+| **chaîne corrigée C_k=2^k, sans fuite** | −0,497 | 34,4 | 13,9 | **1 060** |
+| chaîne corrigée + fuite uniforme r=10⁻⁶ | −0,497 | 36,8 | 12,1 | 1 216 |
+
+Deux choses tranchées par ce tableau :
+
+- **`cas_none` a une durée de vie de 0**, à peine mieux que l'accumulateur pur. Ta
+  consigne de ne jamais publier de résultat cascade à r=0 est quantitativement justifiée.
+  Mais la cause est le `C_k` manquant, **pas** l'absence de fuite : une fois `C_k = 2^k`
+  en place, *sans aucune fuite*, la durée de vie passe à 1 060 — 35× notre défaut actuel.
+  « Pas de fuite uniforme » et « accumulateur pur » cessent d'être la même chose.
+- **Notre défaut r=0,1 tient 30 pas.** À 1 fps, trente secondes de mémoire.
+
+### La fuite terminale : décisive à petit K, invisible à grand K
+
+Elle n'agit que si la masse **atteint** le dernier bécher dans l'horizon utile, c'est-à-dire
+si `τ_profond = C_K/g_K < horizon`. Matrice 128×128 :
+
+| K | τ du plus profond | sans fuite term. | **avec** | gain |
+|---|---|---|---|---|
+| 4 | 2,6·10² | 1 | **816** | ×816 |
+| **6** | 4,1·10³ | 28 | **1 605** | **×57** |
+| 8 | 6,6·10⁴ | 363 | 1 258 | ×3,5 |
+| 10 | 1,0·10⁶ | 1 026 | 1 065 | ×1,0 |
+| 12 | 1,7·10⁷ | 1 060 | 1 060 | ×1,0 |
+| 16 | 4,3·10⁹ | 1 060 | 1 060 | ×1,0 |
+
+**Et l'optimum est K=6 avec fuite terminale (1 605), pas K=12 (1 060).** Au-delà de K≈8
+les béchers supplémentaires absorbent du signal dans des modes trop lents pour être relus
+dans l'horizon : ils ajoutent de la variance sans ajouter de signal récupérable.
+
+C'est le résultat qui décide : **la fuite terminale vaut d'être implémentée précisément
+parce qu'elle rend K=6 meilleur que K=12** — donc moins de VRAM (9,10 Mo/frame contre
+11,1), et K=6 est déjà notre défaut. Sans elle, il faudrait monter à K=12 pour un
+résultat 35 % moins bon.
+
+### Et c'est la taille de la matrice mémoire, pas K, qui fixe l'horizon
+
+Durée de vie (pas) avec fuite terminale, selon `N` = nombre d'éléments de la matrice :
+
+| matrice | N | K=4 | **K=6** | **K=8** | K=10 | K=12 | K opt |
+|---|---|---|---|---|---|---|---|
+| **128×128** *(actuel)* | 16 384 | 816 | **1 605** | 1 258 | 1 065 | 1 060 | 6 |
+| 256×256 | 65 536 | 1 194 | **5 775** | 5 032 | 4 263 | 4 243 | 6 |
+| **512×512** | 262 144 | 1 572 | 12 170 | **20 127** | 17 055 | 16 975 | 8 |
+| 1024×1024 | 1 048 576 | 1 949 | 18 634 | **76 267** | 68 224 | 67 902 | 8 |
+| 2048×2048 | 4 194 304 | 2 327 | 25 099 | 178 486 | **272 884** | 271 607 | 10 |
+
+La durée de vie croît en **N^0,93** — « almost linearly with the number of synapses »,
+le résultat central du papier, reproduit ici indépendamment. C'est aussi le contrôle le
+plus fort que la simulation est correcte.
+
+Traduit à 1 fps :
+
+| matrice | horizon | K optimal |
+|---|---|---|
+| **128×128** *(notre `dim=128`)* | **27 min** | 6 |
+| 256×256 | 1 h 36 | 6 |
+| **512×512** | **5 h 35** | **8** |
+| 1024×1024 | 21 h | 8 |
+| 2048×2048 | 76 h | 10 |
+
+**Pour atteindre la médiane EgoLifeQA (5,9 h) il faut une matrice 512×512 avec K=8**
+(526×526 exactement). Nous sommes à 128×128 : **facteur 13 sur le côté linéaire, soit 16×
+en surface.**
+
+C'est le §6 reformulé, et c'est une meilleure nouvelle : le risque n'était pas seulement
+la fenêtre d'entraînement, c'est aussi la **capacité**, et la capacité est un choix de
+conception, pas une contrainte de calcul. Mais les deux sont couplés — une matrice 16×
+plus grande coûte de la VRAM par token, donc raccourcit la fenêtre. **À mesurer avant de
+coder quoi que ce soit d'autre** : la VRAM à `dim=512, K=8` (l'extrapolation naïve donne
+~146 Mo/frame, soit une fenêtre de ~105 frames, ce qui serait rédhibitoire — mais seule
+une fraction du coût mesuré vient de l'état de cascade, donc il faut la mesure, pas
+l'extrapolation).
+
 ### Ce que j'abandonne : la chaîne dirigée
 
 **Retirée.** La bidirectionnalité est *la* contribution du papier : « the interactions
