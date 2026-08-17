@@ -13,12 +13,15 @@ Nothing here trains. It answers three questions on the real model, in one pass:
 3. **What is the parameter bill?** As a share of the host, for the paper's
    "we added 0.0x % and touched nothing else".
 
-Text-only inputs are enough for all three: the graft sits in the *text* decoder
-and sees a token stream, so a synthetic stream of the right length exercises
-exactly the code path a video would, without waiting on a video pipeline.
+Two input modes, and the difference matters. Random token ids give exact control
+over the sequence length, which is what the VRAM sweep needs -- but they produce
+activations from a distribution the model never sees, so **nothing about numerical
+stability may be concluded from them**. ``--video`` runs a real clip through the
+vision tower instead; that is the mode that settles whether the memory diverges.
 
-    python -m titans.graft.check_qwen --model Qwen/Qwen2.5-VL-3B-Instruct \\
-        --tokens 512,2048 --out graft_check.json
+    python -m titans.graft.check_qwen --tokens 512,2048 --out graft_check.json
+    python -m titans.graft.check_qwen --video clip.mp4 --frames 16,32,64 \\
+        --basis cache/qwen_l24_pca128.pt --write-stride 1,8
 """
 
 from __future__ import annotations
@@ -55,12 +58,33 @@ def load_host(model_id: str, dtype: torch.dtype, device: str):
 
 
 def text_inputs(model, n_tokens: int, device: str, batch: int = 1) -> dict:
-    """A token stream of exactly ``n_tokens``, inside the embedding table."""
+    """A token stream of exactly ``n_tokens``, inside the embedding table.
+
+    Random ids give control over the length, which is what the VRAM sweep needs.
+    They are *not* a substitute for real input when the question is numerical
+    stability: garbage tokens produce activations from a distribution the model
+    never sees, so anything measured about divergence has to be re-measured on
+    video before it is believed. Use ``--videos`` for that.
+    """
     vocab = int(getattr(model.config, "vocab_size", None)
                 or model.config.text_config.vocab_size)
     g = torch.Generator(device="cpu").manual_seed(0)
     ids = torch.randint(0, vocab, (batch, n_tokens), generator=g).to(device)
     return {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
+
+
+def video_inputs_for(model_id: str, path: str, n_frames: int, max_side: int,
+                     device: str, processor=None) -> dict:
+    """One real video, as the model's forward expects it."""
+    from transformers import AutoProcessor
+
+    from .fit_basis import resize_frames, video_inputs
+    from ..worldmodel.data import load_video_frames
+
+    processor = processor or AutoProcessor.from_pretrained(model_id)
+    frames = resize_frames(load_video_frames(path, num_frames=n_frames), max_side)
+    inputs = video_inputs(processor, frames, "Describe what happens in this video.", 1.0)
+    return {k: (v.to(device) if hasattr(v, "to") else v) for k, v in inputs.items()}
 
 
 @torch.no_grad()
@@ -109,6 +133,12 @@ def main() -> None:
                     help="comma-separated token counts to measure at")
     ap.add_argument("--guard-gb", type=float, default=14.0, dest="guard_gb",
                     help="refuse to start unless this much VRAM is free")
+    ap.add_argument("--video", default=None,
+                    help="a real .mp4; the only input that settles a question about "
+                         "numerical stability")
+    ap.add_argument("--frames", default="16,32,64",
+                    help="with --video: frame counts, in place of --tokens")
+    ap.add_argument("--max-side", type=int, default=256, dest="max_side")
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--no-backward", action="store_true")
@@ -153,11 +183,26 @@ def main() -> None:
     print("\nla note se lit en ECRITURES, pas en tokens : le backward garde un etat "
           "de memoire par ecriture\n", flush=True)
 
-    grid = [(int(t), int(s)) for t in a.tokens.split(",")
-            for s in a.write_stride.split(",")]
-    for n_tok, stride in grid:
+    if a.video:
+        from transformers import AutoProcessor
+        proc = AutoProcessor.from_pretrained(a.model)
+        grid = [(int(f), int(s)) for f in a.frames.split(",")
+                for s in a.write_stride.split(",")]
+        print(f"entrees : vraie video {a.video.split('/')[-1]}", flush=True)
+    else:
+        grid = [(int(t), int(s)) for t in a.tokens.split(",")
+                for s in a.write_stride.split(",")]
+        print("entrees : identifiants de tokens aleatoires "
+              "(longueur controlee, distribution irrealiste)", flush=True)
+
+    for size, stride in grid:
         branch.write_stride = stride
-        inputs = text_inputs(model, n_tok, dev)
+        if a.video:
+            inputs = video_inputs_for(a.model, a.video, size, a.max_side, dev, proc)
+            n_tok = int(inputs["input_ids"].shape[1])
+        else:
+            inputs = text_inputs(model, size, dev)
+            n_tok = size
         base_logits, base_peak, base_t = _forward_peak(model, inputs, dev)
 
         wrapper = graft(model, branch, layer=site)
