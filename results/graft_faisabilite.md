@@ -552,6 +552,67 @@ terminale, donc la variance est finie de toute façon et l'argument ne mord pas.
 Je ne trancherai pas cet axe a priori : il sort de l'échelle d'ablation et devient une
 question séparée, à mesurer sur le score d'écho plutôt qu'à décider sur la théorie.
 
+### 5quinquies. La recette de réglage, en forme close
+
+Les tableaux précédents sont des balayages. En les recoupant, les deux réglages qui
+restaient empiriques — `K` et `leak_rate` — se déduisent tous les deux du **seul** horizon
+visé `T`. Ce n'est pas un ajustement : les deux formules tombent de la dynamique.
+
+**1. La fuite fixe jusqu'où la loi de puissance tient.** La trace est
+`r(t) = t^(−1/2)·e^(−r_eff·t)`, donc la pente locale vaut exactement
+
+> `d log r / d log t = −1/2 − r_eff·t`
+
+L'écart à −1/2 est donc `r_eff·t` : la loi tient jusqu'à `t ≈ tol/r_eff`, et pas au-delà.
+Vérifié à K=16 sur trois décades de `r_eff` — pente −0,60 à `t = 0,1/r_eff` et −1,5 à
+`t = 1/r_eff`, identique à chaque décade, signature d'une loi d'échelle pure. **C'est ce
+qui réconcilie les deux mesures contradictoires** : lue sur 10–10³ ou sur 10³–10⁵, la même
+chaîne donne des verdicts décalés d'une décade en `r`, parce qu'une exponentielle mord
+d'abord aux grands `t`.
+
+> **`r_eff ≤ 0,1 / T`**, soit **`leak_rate ≤ 0,1 / (T · ⟨θ_t⟩)`**
+
+**2. La profondeur fixe jusqu'où la chaîne *peut* aller.** Le bécher le plus profond a
+`τ = C_K/g_K = c^(K−1)/(β₁·g^(−K))`, soit avec `c = g = 2`, `β₁ = 0,5` :
+
+> **`τ_profond = 4^K`** → **`K ≥ log₄(T)`**
+
+Reproduit exactement les `τ` mesurés en §5ter (K=4 → 2,6·10² ; 6 → 4,1·10³ ; 8 → 6,6·10⁴ ;
+10 → 1,0·10⁶ ; 12 → 1,7·10⁷, cinq sur cinq). Et surtout, ça **explique** la colonne
+« K optimal » que j'avais balayée en aveugle sur la taille de matrice :
+
+| matrice | durée de vie | `log₄(T)` | K optimal balayé |
+|---|---|---|---|
+| **128×128** *(actuel)* | 1 605 | 5,3 | **6** |
+| 256×256 | 5 760 | 6,2 | 6 |
+| 512×512 | 20 100 | 7,2 | **8** |
+| 1024×1024 | 75 600 | 8,1 | 8 |
+| 2048×2048 | 273 600 | 9,0 | 10 |
+
+À ±1 sur quatre décades de `N`. Le « K optimal » n'est donc pas un compromis mystérieux :
+c'est **la chaîne la moins profonde dont le dernier bécher atteint l'horizon**. Plus court,
+la masse butte sur la frontière terminale et la trace tombe d'une falaise ; plus long, les
+béchers en trop absorbent du signal dans des modes trop lents pour être relus — ils
+ajoutent de la variance au dénominateur du SNR sans ajouter de signal.
+
+**La recette complète**, pour un horizon `T` visé :
+
+| | règle | à `T` = 1 600 (128², actuel) | à `T` = 21 000 (médiane EgoLifeQA) |
+|---|---|---|---|
+| `K` | `⌈log₄ T⌉` | **6** | 8 |
+| `leak_rate` | `0,1/(T·⟨θ⟩)`, θ = 0,05 | **1,3·10⁻³** | 9,5·10⁻⁵ |
+| `cascade_areas` | `c = g` | **2,0** | 2,0 |
+| fuite terminale | toujours | **oui** | oui |
+| `N` | `T ∝ N^0,93` | 16 384 | 262 144 (512²) |
+
+Le `3·10⁻⁴` retenu en §5quater est un cran sous le plafond `1,3·10⁻³` de la ligne actuelle
+— délibérément, parce que `⟨θ_t⟩` varie d'un facteur 4 entre graines et que le plafond doit
+tenir sur la plus chaude. Il couvre `T ≈ 6 700`, soit 4× l'horizon actuel.
+
+**Ce que ça coûte de se tromper d'axe** : monter `N` sans monter `K` ne sert à rien (la
+chaîne plafonne à `4^K`), et monter `K` sans baisser `leak_rate` ne sert à rien non plus
+(l'enveloppe exponentielle coupe avant le dernier bécher). Les trois bougent ensemble.
+
 ### Ce que j'abandonne : la chaîne dirigée
 
 **Retirée.** La bidirectionnalité est *la* contribution du papier : « the interactions
