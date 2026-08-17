@@ -297,3 +297,117 @@ def test_gated_readout_requires_x_t():
     cas = MetaplasticCascade(4, dim=8, readout="gated")
     with pytest.raises(ValueError):
         cas.readout(torch.randn(2, 4))
+
+
+# --------------------------------------------------------------------------- #
+# Benna-Fusi's two missing ingredients (added 2026-08-14): the beaker areas
+# ``C_k`` and the ``u_{K} = 0`` terminal boundary. Both opt-in.
+# --------------------------------------------------------------------------- #
+
+
+def _impulse_response(K, *, areas=None, terminal=None, beta1=0.5, g=2.0, T=200_000):
+    """r(t) = response of u_1 to a unit modification, the paper's memory trace."""
+    import torch
+    from titans.metaplastic import geometric_betas, cascade_step
+
+    b = geometric_betas(K, beta1, g, dtype=torch.float64)
+    a = None if areas is None else torch.tensor(
+        [areas ** k for k in range(K)], dtype=torch.float64)
+    tb = None if terminal is None else torch.tensor(terminal, dtype=torch.float64)
+    u = torch.zeros(K, dtype=torch.float64)
+    zero = torch.zeros((), dtype=torch.float64)
+    out = torch.empty(T, dtype=torch.float64)
+    u = cascade_step(u, torch.tensor(1.0, dtype=torch.float64), b, a, tb)
+    for t in range(T):
+        out[t] = u[0]
+        u = cascade_step(u, zero, b, a, tb)
+    return out
+
+
+def _loglog_slope(r, lo, hi):
+    import torch
+
+    t = torch.arange(len(r), dtype=torch.float64)
+    m = (t >= lo) & (t <= hi) & (r > 1e-14)
+    x, y = torch.log(t[m]), torch.log(r[m])
+    return float(((x - x.mean()) * (y - y.mean())).sum() / ((x - x.mean()) ** 2).sum())
+
+
+def test_areas_recover_the_power_law_decay():
+    """With C_k = g^k the memory trace decays as t^-1/2, the paper's target.
+
+    This is the single number that says the implementation matches Benna & Fusi
+    2016 (Fig. 2c). Without the areas the same chain gives ~-0.07: the tubes of
+    Fig. 2c on the beakers of Fig. 2a, which is not a model the paper proposes.
+    """
+    with_areas = _impulse_response(12, areas=2.0, terminal=0.5 * 2.0 ** -12)
+    assert abs(_loglog_slope(with_areas, 10, 1e3) + 0.5) < 0.05
+    assert abs(_loglog_slope(with_areas, 1e3, 1e5) + 0.5) < 0.05
+
+    without = _impulse_response(12)
+    assert _loglog_slope(without, 1e3, 1e5) > -0.15   # nearly flat: an accumulator
+
+
+def test_areas_ratio_must_match_the_coupling_ratio():
+    """c = g is what gives -1/2; mismatching them detunes the exponent both ways."""
+    slow = _impulse_response(12, areas=4.0, terminal=0.5 * 2.0 ** -12, g=2.0)
+    fast = _impulse_response(12, areas=1.5, terminal=0.5 * 2.0 ** -12, g=2.0)
+    assert _loglog_slope(slow, 1e3, 1e5) < -0.55      # beakers too big -> too fast
+    assert _loglog_slope(fast, 1e3, 1e5) > -0.45      # beakers too small -> too slow
+
+
+def test_terminal_leak_removes_the_conserved_mode():
+    """Without u_{K}=0 the chain conserves total mass, so B has an eigenvalue 1."""
+    import torch
+    from titans.metaplastic import geometric_betas, cascade_step
+
+    K = 6
+    b = geometric_betas(K, 0.5, 2.0, dtype=torch.float64)
+    zero = torch.zeros((), dtype=torch.float64)
+    tb = torch.tensor(0.5 * 2.0 ** -K, dtype=torch.float64)
+
+    kept = torch.ones(K, dtype=torch.float64)
+    for _ in range(50):
+        kept = cascade_step(kept, zero, b)
+    assert abs(float(kept.sum()) - K) < 1e-9          # mass exactly conserved
+
+    leaked = torch.ones(K, dtype=torch.float64)
+    for _ in range(50):
+        leaked = cascade_step(leaked, zero, b, None, tb)
+    assert float(leaked.sum()) < K - 1e-3             # mass now escapes
+
+
+def test_new_options_are_off_by_default():
+    """Every artefact frozen before 2026-08-14 must still rebuild bit-for-bit."""
+    import torch
+    from titans.metaplastic import MetaplasticCascade, geometric_betas, cascade_step
+
+    c = MetaplasticCascade(6)
+    assert c.base_areas is None and c.terminal_beta is None
+
+    b = geometric_betas(6, 0.5, 2.0)
+    u = torch.randn(3, 6)
+    g = torch.randn(3)
+    torch.testing.assert_close(cascade_step(u, g, b), cascade_step(u, g, b, None, None))
+
+
+def test_areas_and_terminal_leak_reach_the_memory_module():
+    """The flags must survive the NeuralMemory -> MetaplasticCascade plumbing."""
+    from titans.memory import NeuralMemory
+
+    m = NeuralMemory(dim=16, use_cascade_momentum=True, cascade_reservoirs=6,
+                     cascade_areas=2.0, cascade_terminal_leak=True)
+    assert m.cascade.base_areas is not None
+    assert m.cascade.terminal_beta is not None
+    assert m.cascade.base_areas.tolist() == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
+
+
+def test_independent_topology_rejects_chain_only_options():
+    """Beakers and the u_{K}=0 boundary are chain geometry; the filter bank has neither."""
+    import pytest
+    from titans.metaplastic import MetaplasticCascade
+
+    with pytest.raises(ValueError, match="chain properties"):
+        MetaplasticCascade(4, topology="independent", areas=2.0)
+    with pytest.raises(ValueError, match="chain properties"):
+        MetaplasticCascade(4, topology="independent", terminal_leak=True)

@@ -163,6 +163,37 @@ def geometric_decays(
     return 1.0 - beta1 * g ** (-ks)
 
 
+def geometric_areas(
+    num_reservoirs: int,
+    c: float = 2.0,
+    *,
+    dtype: torch.dtype = torch.float64,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """Benna-Fusi beaker cross-sections ``C_k = c^k`` for ``k = 0..K-1``.
+
+    The paper's dynamics are ``C_k du_k/dt = g_{k-1,k}(u_{k-1}-u_k) +
+    g_{k,k+1}(u_{k+1}-u_k)`` (Fig. 1a): the ``C_k`` are the *areas* of the
+    communicating vessels, and they grow geometrically (Fig. 2c, ``C_k = 2^k``).
+    They are what makes the exchange asymmetric -- a deep beaker is huge, so its
+    level barely moves when it receives, and it therefore retains.
+
+    Omitting them (``C_k = 1``, which is what :func:`cascade_step` did before
+    this was exposed) leaves the tubes of Fig. 2c on the beakers of Fig. 2a, a
+    combination the paper never uses, and it costs the whole power law: measured
+    on the impulse response of ``u_1``, the log-log decay exponent is **-0.066**
+    without the areas against the target **-0.500** with them. The design law,
+    swept over both: with ``C_k = c^k`` and ``g_e = beta1 * gg^-e``, the exponent
+    is -1/2 when **c = gg**, which reproduces the ``O(n^2)`` ratio of successive
+    timescales in the paper's Eq. (6).
+    """
+    if num_reservoirs < 1:
+        raise ValueError("num_reservoirs (K) must be >= 1")
+    if c <= 0.0:
+        raise ValueError("beaker area ratio c must be > 0")
+    return c ** torch.arange(0, num_reservoirs, dtype=dtype, device=device)
+
+
 def build_tridiagonal_B(betas: torch.Tensor) -> torch.Tensor:
     """Assemble the ``K x K`` diffusion matrix ``B`` from edge couplings.
 
@@ -202,6 +233,8 @@ def cascade_step(
     u_prev: torch.Tensor,
     grad_t: torch.Tensor,
     betas_t: torch.Tensor,
+    areas: Optional[torch.Tensor] = None,
+    terminal_beta: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """One cascade step ``u_t = B_t u_{t-1} + e_1 grad_t`` (pure, no in-place).
 
@@ -213,6 +246,21 @@ def cascade_step(
     betas_t : ``[..., K-1]`` edge couplings, broadcastable over the leading dims
         of ``u_prev``. For a fixed cascade this is the same every step; for the
         selective cascade it varies with the token.
+    areas : optional ``[K]`` beaker cross-sections ``C_k`` (see
+        :func:`geometric_areas`). ``None`` -- the default, and what every run
+        before 2026-08-14 used -- means ``C_k = 1``, i.e. the flux changes both
+        endpoints of an edge equally. Supplying growing areas is what turns the
+        chain into Benna & Fusi's actual model: the same flux moves a shallow
+        (small) beaker's level far more than a deep (large) one's.
+    terminal_beta : optional scalar coupling to the *nonexistent* reservoir
+        ``K`` (the paper sets ``u_{K} = 0``, giving the deepest beaker a leak of
+        its own). ``None`` -- the previous behaviour -- leaves the deepest
+        reservoir with inflow but no outflow, which is exactly the ``lambda = 1``
+        conserved mode that makes every reservoir's response kernel collinear at
+        long lag. It only bites when mass actually *reaches* the last beaker
+        within the horizon of interest, i.e. when ``C_K / g_K`` is smaller than
+        that horizon: at K=6 it takes the memory lifetime from 28 steps to 1605,
+        at K>=10 it changes nothing.
 
     Implemented via the tridiagonal diffusion flux directly (no ``B`` matmul),
     so it is ``O(K)`` and fully functional -- important because the outer model's
@@ -223,9 +271,20 @@ def cascade_step(
     # Reservoir e gains +f_e (from its right neighbour); reservoir e+1 gains -f_e.
     inflow_from_right = F.pad(flux, (0, 1))  # [..., K], last reservoir gets 0
     inflow_from_left = F.pad(-flux, (1, 0))  # [..., K], first reservoir gets 0
+    inflow = inflow_from_right + inflow_from_left
+    if terminal_beta is not None:
+        # u_{K} = 0, so the deepest beaker sheds terminal_beta * u^(K-1) per step.
+        inflow = inflow - F.pad(
+            terminal_beta * u_prev[..., -1:], (u_prev.shape[-1] - 1, 0)
+        )
+    if areas is not None:
+        # C_k divides only the diffusion terms. The injection is not divided
+        # because C_0 = 1 by construction (geometric_areas starts at c^0), so
+        # the two conventions coincide at the injection site.
+        inflow = inflow / areas
     # Gradient injected only into reservoir 1 (e_1).
     inj = F.pad(grad_t.unsqueeze(-1), (0, u_prev.shape[-1] - 1))
-    return u_prev + inflow_from_right + inflow_from_left + inj
+    return u_prev + inflow + inj
 
 
 def independent_step(
@@ -258,6 +317,8 @@ def cascade_scan(
     betas: torch.Tensor,
     *,
     time_varying: bool = False,
+    areas: Optional[torch.Tensor] = None,
+    terminal_beta: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Sequential scan of :func:`cascade_step` over a time axis.
 
@@ -268,6 +329,8 @@ def cascade_scan(
     betas : edge couplings. If ``time_varying`` is False, a single ``[..., K-1]``
         tensor reused every step (fixed ``B``). If True, ``[T, ..., K-1]`` with a
         leading time axis (selective / data-dependent ``B_t``).
+    areas, terminal_beta : forwarded unchanged to :func:`cascade_step`; both are
+        time-invariant, so they are passed through rather than indexed by ``t``.
     Returns
     -------
     ``[T, ..., K]`` stacked cascade states ``u_1, ..., u_T``.
@@ -282,7 +345,7 @@ def cascade_scan(
     out = []
     for t in range(T):
         b_t = betas[t] if time_varying else betas
-        u = cascade_step(u, grads[t], b_t)
+        u = cascade_step(u, grads[t], b_t, areas, terminal_beta)
         out.append(u)
     return torch.stack(out, dim=0)
 
@@ -354,12 +417,19 @@ class MetaplasticCascade(nn.Module):
         topology: str = "chain",
         readout: Optional[str] = None,
         gate_signal: str = "content",
+        areas: Optional[float] = None,
+        terminal_leak: bool = False,
     ):
         super().__init__()
         if num_reservoirs < 1:
             raise ValueError("num_reservoirs (K) must be >= 1")
         if topology not in ("chain", "independent"):
             raise ValueError("topology must be 'chain' or 'independent'")
+        if topology == "independent" and (areas is not None or terminal_leak):
+            raise ValueError(
+                "areas / terminal_leak are chain properties (the beakers and the "
+                "u_{K}=0 boundary); topology='independent' has neither"
+            )
         if topology == "independent" and selective:
             raise ValueError(
                 "topology='independent' has no coupling to gate -> selective=False"
@@ -390,6 +460,28 @@ class MetaplasticCascade(nn.Module):
         # Diagonal-B decays for the independent topology (unused by the chain).
         decays = geometric_decays(num_reservoirs, beta1, g, dtype=torch.get_default_dtype())
         self.register_buffer("decays", decays)  # [K]
+
+        # Benna-Fusi's two missing ingredients, both opt-in so every artefact
+        # frozen before 2026-08-14 still reproduces bit-for-bit.
+        self.areas_c = areas
+        self.terminal_leak = terminal_leak
+        if areas is not None:
+            self.register_buffer(
+                "base_areas",
+                geometric_areas(num_reservoirs, areas, dtype=torch.get_default_dtype()),
+            )  # [K]
+        else:
+            self.base_areas = None
+        if terminal_leak:
+            # The coupling the (nonexistent) edge K would have carried, i.e. the
+            # next term of the same geometric ladder as ``base_betas``.
+            self.register_buffer(
+                "terminal_beta",
+                torch.tensor(beta1 * g ** (-num_reservoirs),
+                             dtype=torch.get_default_dtype()),
+            )
+        else:
+            self.terminal_beta = None
 
         if selective:
             if num_reservoirs < 2:

@@ -352,6 +352,8 @@ class NeuralMemory(nn.Module):
         cascade_leak: str = "full",
         cascade_slow_decay: float = 0.99,
         cascade_leak_rate: float = 1.0,
+        cascade_areas: Optional[float] = None,
+        cascade_terminal_leak: bool = False,
         update_bias: bool = True,
         orthogonalize_momentum: bool = False,
         feature_degree: int = 1,
@@ -471,6 +473,8 @@ class NeuralMemory(nn.Module):
                 topology=cascade_topology,
                 readout=cascade_readout,
                 gate_signal=cascade_gate_signal,
+                areas=cascade_areas,
+                terminal_leak=cascade_terminal_leak,
             )
 
         self.memory = NeuralMemoryMLP(dim, hidden_dim, num_layers, in_dim=mem_in_dim,
@@ -679,7 +683,10 @@ class NeuralMemory(nn.Module):
                         )
                     else:
                         b = self.cascade.base_betas
-                    new_S[key] = cascade_step(u_prev, injected, b)
+                    new_S[key] = cascade_step(
+                        u_prev, injected, b,
+                        self.cascade.base_areas, self.cascade.terminal_beta,
+                    )
                 s_read = self.cascade.readout(new_S[key], x_t=x_t)
                 if self.orthogonalize_momentum and w.dim() >= 3:
                     # ATLAS Eq 57 orthogonalises whatever plays the role of the

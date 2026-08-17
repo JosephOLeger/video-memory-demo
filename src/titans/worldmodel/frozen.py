@@ -41,6 +41,7 @@ def build_cfg(config: str = "sane_ns", *, eta_init: Optional[float] = None,
               leak_rate: float = 1.0, readout: str = "gated",
               selective: bool = False, gate: str = "surprise",
               beta1: Optional[float] = None, g: Optional[float] = None,
+              areas: Optional[float] = None, terminal_leak: bool = False,
               topology: str = "chain", use_memory: bool = True,
               memory_hidden_dim: Optional[int] = None,
               memory_chunk_size: Optional[int] = None,
@@ -97,6 +98,12 @@ def build_cfg(config: str = "sane_ns", *, eta_init: Optional[float] = None,
             cfg["cascade_beta1"] = beta1
         if g is not None:
             cfg["cascade_g"] = g
+        # Benna-Fusi's beaker areas and u_{K}=0 boundary. Off by default, so every
+        # artefact frozen before 2026-08-14 rebuilds exactly as it was trained.
+        if areas is not None:
+            cfg["cascade_areas"] = areas
+        if terminal_leak:
+            cfg["cascade_terminal_leak"] = True
     return cfg
 
 

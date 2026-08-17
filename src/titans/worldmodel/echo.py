@@ -109,6 +109,8 @@ def build_cfg(a) -> dict:
         leak_rate=getattr(a, "leak_rate", 1.0), readout=a.readout,
         selective=a.selective, gate=a.gate, topology=a.topology,
         beta1=getattr(a, "cascade_beta1", None), g=getattr(a, "cascade_g", None),
+        areas=getattr(a, "cascade_areas", None),
+        terminal_leak=getattr(a, "cascade_terminal_leak", False),
         use_memory=not getattr(a, "no_memory", False),
         memory_hidden_dim=getattr(a, "memory_hidden_dim", None),
         memory_chunk_size=getattr(a, "memory_chunk_size", None),
@@ -262,6 +264,8 @@ def run(a, device) -> dict:
                 # the step count it was taken at.
                 steps=a.steps,
                 cascade=a.cascade, reservoirs=a.reservoirs if a.cascade else 0,
+                cascade_areas=getattr(a, "cascade_areas", None),
+                cascade_terminal_leak=getattr(a, "cascade_terminal_leak", False),
                 leak=a.leak if a.cascade else None,
                 leak_rate=(getattr(a, "leak_rate", 1.0) if a.cascade else None),
                 readout=(a.readout if a.cascade else None),
@@ -304,6 +308,16 @@ def build_parser() -> argparse.ArgumentParser:
                     help="coupling scale; the default 0.5 gives a first edge of "
                          "beta1*g^-1 = 0.25, i.e. reservoir 0 sheds a quarter of its "
                          "mass per token into the deeper ones")
+    ap.add_argument("--cascade-areas", type=float, default=None, dest="cascade_areas",
+                    help="Benna-Fusi beaker areas C_k = c^k (pass c; the paper's "
+                         "Fig 2c has c = g). Off by default = C_k identically 1, "
+                         "which is what every run before 2026-08-14 used and which "
+                         "costs the t^-1/2 decay (measured -0.066 vs -0.500).")
+    ap.add_argument("--cascade-terminal-leak", action="store_true",
+                    dest="cascade_terminal_leak",
+                    help="give the deepest beaker its own leak (the paper's "
+                         "u_{K}=0 boundary), removing the lambda=1 conserved mode. "
+                         "Decisive at K<=8, no effect at K>=10.")
     ap.add_argument("--cascade-g", type=float, default=None, dest="cascade_g",
                     help="geometric falloff of the couplings with depth (default 2)")
     ap.add_argument("--topology", default="chain")

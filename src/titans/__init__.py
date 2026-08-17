@@ -16,6 +16,7 @@ from .metaplastic import (
     cascade_step,
     geometric_betas,
     geometric_decays,
+    geometric_areas,
     independent_step,
 )
 from .persistent import PersistentMemory
@@ -31,6 +32,7 @@ __all__ = [
     "MetaplasticCascade",
     "geometric_betas",
     "geometric_decays",
+    "geometric_areas",
     "build_tridiagonal_B",
     "cascade_step",
     "cascade_scan",
