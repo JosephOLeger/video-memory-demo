@@ -34,7 +34,14 @@ from .qwen import branch_report, default_layer, find_decoder_layers, graft, ungr
 
 
 def load_host(model_id: str, dtype: torch.dtype, device: str):
-    """The frozen VLM. Its text decoder is all the graft touches."""
+    """The frozen VLM. Its text decoder is all the graft touches.
+
+    Frozen here, at load, and not later at ``graft()``: an unfrozen host would make
+    the base backward a full 3.75 B fine-tune, which is not the thing the graft is
+    being compared against and whose peak is *larger* than the grafted one. The
+    honest pair is "host forward" (what inference costs) against "grafted backward"
+    (what training the branch costs).
+    """
     from transformers import AutoModelForCausalLM
 
     try:
@@ -43,6 +50,7 @@ def load_host(model_id: str, dtype: torch.dtype, device: str):
         Cls = AutoModelForCausalLM
     model = Cls.from_pretrained(model_id, dtype=dtype).to(device)
     model.eval()
+    model.requires_grad_(False)
     return model
 
 
@@ -65,13 +73,23 @@ def _forward_peak(model, inputs, device) -> tuple:
 
 
 def _backward_peak(model, inputs, device) -> tuple:
-    """Peak with a real backward -- what training will actually pay."""
+    """Peak with a real backward -- what training will actually pay.
+
+    Returns ``(peak, seconds)``, or ``(None, None)`` on OOM: the point of this
+    sweep is to find where the budget runs out, so hitting the wall is a result to
+    record, not a crash to propagate.
+    """
     torch.cuda.reset_peak_memory_stats(device)
     t0 = time.time()
-    out = model(**inputs).logits
-    out.float().square().mean().backward()
-    torch.cuda.synchronize(device)
-    peak = torch.cuda.max_memory_allocated(device)
+    try:
+        out = model(**inputs).logits
+        out.float().square().mean().backward()
+        torch.cuda.synchronize(device)
+        peak = torch.cuda.max_memory_allocated(device)
+    except torch.OutOfMemoryError:
+        model.zero_grad(set_to_none=True)
+        torch.cuda.empty_cache()
+        return None, None
     model.zero_grad(set_to_none=True)
     return peak, time.time() - t0
 
@@ -82,9 +100,12 @@ def main() -> None:
     ap.add_argument("--layer", type=int, default=None, help="default: 2/3 of depth")
     ap.add_argument("--d-mem", type=int, default=128, dest="d_mem")
     ap.add_argument("--chunk", type=int, default=64)
-    ap.add_argument("--write-stride", type=int, default=1, dest="write_stride")
+    ap.add_argument("--write-stride", default="1", dest="write_stride",
+                    help="comma-separated strides; the grid is tokens x strides")
     ap.add_argument("--tokens", default="256,1024",
                     help="comma-separated token counts to measure at")
+    ap.add_argument("--guard-gb", type=float, default=14.0, dest="guard_gb",
+                    help="refuse to start unless this much VRAM is free")
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--no-backward", action="store_true")
@@ -93,6 +114,12 @@ def main() -> None:
 
     dtype = getattr(torch, a.dtype)
     dev = a.device
+    if dev.startswith("cuda"):
+        free, total = torch.cuda.mem_get_info(dev)
+        print(f"{free / 2**30:.1f} Go libres sur {total / 2**30:.1f}", flush=True)
+        if free / 2**30 < a.guard_gb:
+            raise SystemExit(f"abandon : il faut {a.guard_gb} Go libres "
+                             "(les cartes sont partagees)")
     print(f"loading {a.model} ({a.dtype}) ...", flush=True)
     model = load_host(a.model, dtype, dev)
     layers = find_decoder_layers(model)
@@ -103,19 +130,21 @@ def main() -> None:
     print(f"host: {len(layers)} decoder layers, d_model={d_model}, "
           f"{host_params/1e9:.2f} B params; graft site = layer {site}", flush=True)
 
-    branch = MemoryBranch(d_model, a.d_mem, chunk_size=a.chunk,
-                          write_stride=a.write_stride).to(dev)   # fp32 on purpose
+    branch = MemoryBranch(d_model, a.d_mem, chunk_size=a.chunk).to(dev)  # fp32 on purpose
     rep = {"model": a.model, "layer": site, "d_model": d_model, "d_mem": a.d_mem,
-           "chunk": a.chunk, "write_stride": a.write_stride, "dtype": a.dtype,
-           "n_decoder_layers": len(layers),
+           "chunk": a.chunk, "dtype": a.dtype, "n_decoder_layers": len(layers),
            **branch_report(branch, host_params), "runs": []}
     print(f"branch: {rep['branch_trainable']:,} trainable params "
           f"= {rep['pct_of_host']:.4f} % of the host", flush=True)
+    print("\nla note se lit en ECRITURES, pas en tokens : le backward garde un etat "
+          "de memoire par ecriture\n", flush=True)
 
-    for n_tok in [int(x) for x in a.tokens.split(",")]:
+    grid = [(int(t), int(s)) for t in a.tokens.split(",")
+            for s in a.write_stride.split(",")]
+    for n_tok, stride in grid:
+        branch.write_stride = stride
         inputs = text_inputs(model, n_tok, dev)
         base_logits, base_peak, base_t = _forward_peak(model, inputs, dev)
-        base_bwd = (None, None) if a.no_backward else _backward_peak(model, inputs, dev)
 
         wrapper = graft(model, branch, layer=site)
         try:
@@ -123,35 +152,39 @@ def main() -> None:
             graft_logits, graft_peak, graft_t = _forward_peak(model, inputs, dev)
             same = bool(torch.equal(base_logits, graft_logits))
             diff = float((graft_logits - base_logits).abs().max())
+            del base_logits, graft_logits
+            torch.cuda.empty_cache()
             wrapper.reset()
-            graft_bwd = (None, None) if a.no_backward else _backward_peak(model, inputs, dev)
+            graft_bwd = ((None, None) if a.no_backward
+                         else _backward_peak(model, inputs, dev))
         finally:
             ungraft(model, wrapper)
-            del base_logits, graft_logits
             torch.cuda.empty_cache()
 
         row = {
-            "tokens": n_tok,
+            "tokens": n_tok, "write_stride": stride,
+            "writes": -(-n_tok // stride),
             "identical": same, "max_abs_diff": diff,
+            # The inference floor: the frozen host alone.
             "fwd_peak_base_gb": base_peak / 2**30,
             "fwd_peak_graft_gb": graft_peak / 2**30,
             "fwd_extra_gb": (graft_peak - base_peak) / 2**30,
             "fwd_s_base": base_t, "fwd_s_graft": graft_t,
-            "bwd_peak_base_gb": None if base_bwd[0] is None else base_bwd[0] / 2**30,
+            # What training the branch costs: activations kept from the graft site
+            # up, plus the branch's own graph. Nothing below layer `site` is stored.
             "bwd_peak_graft_gb": None if graft_bwd[0] is None else graft_bwd[0] / 2**30,
-            "bwd_extra_gb": (None if base_bwd[0] is None
-                             else (graft_bwd[0] - base_bwd[0]) / 2**30),
+            "bwd_over_fwd_gb": (None if graft_bwd[0] is None
+                                else (graft_bwd[0] - base_peak) / 2**30),
             "bwd_s_graft": graft_bwd[1],
         }
         rep["runs"].append(row)
         mark = "IDENTIQUE" if same else f"DIFFERENT (max {diff:.3e})"
-        print(f"  {n_tok:>6} tokens : {mark:<24} "
-              f"fwd {row['fwd_peak_graft_gb']:.2f} Go "
-              f"(+{row['fwd_extra_gb']:.3f}) en {graft_t:.2f}s"
-              + ("" if row["bwd_extra_gb"] is None else
-                 f" | bwd {row['bwd_peak_graft_gb']:.2f} Go "
-                 f"(+{row['bwd_extra_gb']:.3f}) en {row['bwd_s_graft']:.2f}s"),
-              flush=True)
+        train = ("OOM" if row["bwd_peak_graft_gb"] is None else
+                 f"{row['bwd_peak_graft_gb']:.2f} Go "
+                 f"(+{row['bwd_over_fwd_gb']:.2f}) en {row['bwd_s_graft']:.1f}s")
+        print(f"  {n_tok:>6} tok /{stride:>4} = {row['writes']:>5} ecritures : "
+              f"{mark:<12} inference {row['fwd_peak_graft_gb']:.2f} Go "
+              f"(+{row['fwd_extra_gb']:.3f}) | entrainement {train}", flush=True)
 
     ok = all(r["identical"] for r in rep["runs"])
     print(f"\nidentite a l'init : {'OK sur tous les points' if ok else 'ECHEC'}")
