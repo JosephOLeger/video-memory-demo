@@ -552,6 +552,20 @@ terminale, donc la variance est finie de toute façon et l'argument ne mord pas.
 Je ne trancherai pas cet axe a priori : il sort de l'échelle d'ablation et devient une
 question séparée, à mesurer sur le score d'écho plutôt qu'à décider sur la théorie.
 
+**Correction, mesurée sur les artefacts du smoke.** Passés au scoreur, `bf2_areas` et
+`bf3_term` donnent une pente conçue de **−0,322**, pas −0,497 : ils héritent de
+`readout=gated`, et `gated` plafonne à −0,32 **quoi qu'on corrige par ailleurs**. Le
+readout n'est donc pas un axe indépendant qu'on peut laisser de côté — c'est une condition
+*nécessaire* de la loi de puissance. Une ablation sans bras `shallow` ne contient aucune
+configuration atteignant −0,5 et reste muette sur la question qu'elle prétend trancher.
+D'où l'ajout de `bf5_shallow` (= `bf4_slow` + `--readout shallow`).
+
+Le scoreur montre aussi que `r_eff ≈ 1,1·10⁻³` sur `bf1`/`bf2`/`bf3` — tous héritent de
+`leak-rate 0.1`. À ce niveau de fuite, **ajouter les `areas` dégrade la durée de vie**
+(1 011 contre 1 630 pour la chaîne sans `areas`) : l'enveloppe exponentielle coupe avant
+que la géométrie ne serve. Prédiction avant résultats : `bf2` et `bf3` ne montreront aucun
+gain sur le score d'écho, et le saut — s'il existe — sera sur `bf4_slow` et `bf5_shallow`.
+
 ### 5quinquies. La recette de réglage, en forme close
 
 Les tableaux précédents sont des balayages. En les recoupant, les deux réglages qui

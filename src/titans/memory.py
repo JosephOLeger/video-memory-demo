@@ -70,7 +70,8 @@ Params = Dict[str, torch.Tensor]
 
 
 def newton_schulz5(
-    G: torch.Tensor, steps: int = 5, eps: float = 1e-7
+    G: torch.Tensor, steps: int = 5, eps: float = 1e-7,
+    rescale: bool = True, clip: Optional[float] = None,
 ) -> torch.Tensor:
     """Orthogonalise a batch of matrices toward the nearest semi-orthogonal one.
 
@@ -95,6 +96,23 @@ def newton_schulz5(
     returns a same-shape tensor with each matrix pushed toward semi-orthogonal.
     Anything with fewer than 3 dims (e.g. a batched bias ``[B, out]``, which has
     no per-example matrix structure to orthogonalise) passes through unchanged.
+
+    ``rescale`` / ``clip`` decide what happens to the *magnitude*, which is the
+    whole stability question:
+
+    * ``rescale=True, clip=None`` (default, and every artefact before 2026-08-17)
+      restores ``||G||_F`` exactly, so this is a purely **directional** operation
+      and bounds nothing -- ``||S|| -> inf`` still gives an update ``-> inf``.
+    * ``rescale=False`` returns the iteration's own output, whose singular values
+      are all ``~1``. This is ATLAS Eq 32/57 literally
+      (``M_t = alpha_t M_{t-1} - eta_t NS-5(S_t)``): the caller's learning rate
+      then bounds the spectral norm of the whole update, *independently of the
+      gradient magnitude*. It is the only hard bound either paper has on the
+      inner loop -- neither states it as one.
+    * ``clip=c`` keeps the direction and caps the magnitude at ``c``:
+      ``N(S)/||N(S)|| * min(||S||, c)``. The compromise: ``theta_t``'s learned
+      scale still reaches the update below the cap, so the surprise mechanism
+      survives, but the tail is bounded.
     """
     if G.dim() < 3:
         return G
@@ -109,13 +127,19 @@ def newton_schulz5(
         X = a * X + B @ X
     if transposed:
         X = X.transpose(-2, -1)
+    if not rescale:
+        # ATLAS's own scale: singular values ~1, so ||X||_2 ~ 1 whatever G was.
+        return X
     # The NS iteration itself changes X's Frobenius norm (pushing singular values
     # toward 1 changes their sum of squares), so re-normalise to unit norm before
     # rescaling to G's original magnitude -- isolates "balance the singular
     # values" from a confounding change in update magnitude (theta_t's learned
     # scale assumes momentum sized like -theta_t*grad, not NS's native scale).
     X = X / (X.norm(dim=(-2, -1), keepdim=True) + eps)
-    return X * G.norm(dim=(-2, -1), keepdim=True)
+    mag = G.norm(dim=(-2, -1), keepdim=True)
+    if clip is not None:
+        mag = mag.clamp(max=clip)
+    return X * mag
 
 
 def mlp_forward(
@@ -355,7 +379,8 @@ class NeuralMemory(nn.Module):
         cascade_areas: Optional[float] = None,
         cascade_terminal_leak: bool = False,
         update_bias: bool = True,
-        orthogonalize_momentum: bool = False,
+        orthogonalize_momentum: "bool | str" = False,
+        orthogonalize_clip: float = 1.0,
         feature_degree: int = 1,
         feature_normalize: bool = True,
         memory_expansion: Optional[int] = None,
@@ -436,6 +461,15 @@ class NeuralMemory(nn.Module):
         # before it updates 2D weight matrices (see newton_schulz5's docstring).
         # Scoped to the plain (non-cascade) path for now.
         self.orthogonalize_momentum = orthogonalize_momentum
+        # Which *magnitude* convention. ``True`` stays "rescale" so every frozen
+        # artefact reproduces bit-for-bit; the value is kept unnormalised on the
+        # attribute for the same reason.
+        mode = "rescale" if orthogonalize_momentum is True else orthogonalize_momentum
+        if mode not in (False, "rescale", "unit", "clip"):
+            raise ValueError("orthogonalize_momentum must be False, True, "
+                             "'rescale', 'unit' or 'clip'")
+        self._orth_mode = mode
+        self.orthogonalize_clip = orthogonalize_clip
 
         # Opt-in metaplastic cascade momentum (default off -> scalar Titans).
         self.use_cascade_momentum = use_cascade_momentum
@@ -648,7 +682,11 @@ class NeuralMemory(nn.Module):
                 # and can provide long retention; "none" = no leak, the downstream
                 # (1-alpha) forget gate supplies the only decay). topology decides how
                 # the gradient is injected/mixed, then readout() feeds S_t.
-                injected = -self._bcast(theta_t, gk) * gk
+                # Under "unit" theta is applied to the orthogonalised readout below
+                # instead of to the gradient here, so the reservoir carries the raw
+                # surprise (same split as the scalar path).
+                injected = (-gk if self._orth_mode == "unit"
+                            else -self._bcast(theta_t, gk) * gk)
                 eta_b = self._bcast(eta_t, S[key])
                 if self.cascade_leak == "full":
                     u_prev = eta_b * S[key]
@@ -688,26 +726,55 @@ class NeuralMemory(nn.Module):
                         self.cascade.base_areas, self.cascade.terminal_beta,
                     )
                 s_read = self.cascade.readout(new_S[key], x_t=x_t)
-                if self.orthogonalize_momentum and w.dim() >= 3:
+                if self._orth_mode == "unit":
+                    s_read = self._bcast(theta_t, gk) * newton_schulz5(
+                        s_read, rescale=False
+                    )
+                elif self._orth_mode and w.dim() >= 3:
                     # ATLAS Eq 57 orthogonalises whatever plays the role of the
                     # visible momentum before it updates M. On the cascade path
                     # that is the readout, not S itself (S carries the [.., K]
                     # reservoir state, which has no weight-matrix structure to
                     # orthogonalise). Previously this branch ignored the flag
                     # entirely, so cascade+NS silently ran as plain cascade.
-                    s_read = newton_schulz5(s_read)
+                    s_read = newton_schulz5(
+                        s_read,
+                        clip=(self.orthogonalize_clip
+                              if self._orth_mode == "clip" else None),
+                    )
                 new_state[key] = self._bcast(1.0 - alpha_t, w) * w + s_read
+            elif self._orth_mode == "unit":
+                # ATLAS Eq 32 / Table 1 literally: the learning rate multiplies the
+                # *orthogonalised* momentum, not the gradient.
+                #     S_t = theta_t S_{t-1} - grad_t        (ATLAS's theta = our eta)
+                #     M_t = alpha_t M_{t-1} - eta_t NS-5(S_t)   (ATLAS's eta = our theta)
+                # NS-5's singular values are ~1, so ||update||_2 ~ theta_t whatever the
+                # gradient did -- the per-step move of M is bounded independently of
+                # ||h_0||, which is the quantity measured to run away (the graft's
+                # curvature feedback). Biases pass through NS unchanged, so they get
+                # theta_t * (eta_t S - g); the scale of S itself differs from the other
+                # modes by construction, which is why this is a separate branch and not
+                # a flag on the same expression.
+                new_S[key] = self._bcast(eta_t, gk) * S[key] - gk
+                update = self._bcast(theta_t, gk) * newton_schulz5(
+                    new_S[key], rescale=False
+                )
+                new_state[key] = self._bcast(1.0 - alpha_t, w) * w + update
             else:
                 new_S[key] = (
                     self._bcast(eta_t, gk) * S[key] - self._bcast(theta_t, gk) * gk
                 )
                 update = new_S[key]
-                if self.orthogonalize_momentum and w.dim() >= 3:
+                if self._orth_mode and w.dim() >= 3:
                     # Only 2D weight matrices (batched: [B, out, in]) have an
                     # orthogonality structure to speak of; bias vectors ([B, out])
                     # pass through untouched (and are usually frozen anyway when
                     # update_bias=False).
-                    update = newton_schulz5(update)
+                    update = newton_schulz5(
+                        update,
+                        clip=(self.orthogonalize_clip
+                              if self._orth_mode == "clip" else None),
+                    )
                 new_state[key] = self._bcast(1.0 - alpha_t, w) * w + update
         return new_state, new_S
 

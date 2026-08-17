@@ -42,6 +42,12 @@ PHI = dict(feature_degree=2)
 TABLE7 = dict(memory_expansion=4, memory_activation="gelu", memory_residual=True)
 OMEGA = dict(memory_window_size=4)
 MUON = dict(memory_orthogonalize_momentum=True, memory_update_bias=False)
+# Same Newton-Schulz, the two other magnitude conventions. "unit" is ATLAS Eq 32
+# taken literally (theta multiplies the orthogonalised momentum, whose singular
+# values are ~1, so the per-step move of M is bounded by theta whatever the
+# gradient did); "clip" keeps theta on the gradient and only caps the tail.
+MUON_UNIT = dict(memory_orthogonalize_momentum="unit", memory_update_bias=False)
+MUON_CLIP = dict(memory_orthogonalize_momentum="clip", memory_update_bias=False)
 CASCADE = dict(memory_use_cascade=True, cascade_leak="none", cascade_readout="mean")
 # The gate/normalisation set that follows ATLAS's own bounds (p25) rather than
 # patching around them. Each piece is inert or harmful alone; together they took
@@ -65,6 +71,13 @@ CONFIGS: dict[str, dict] = {
     "sane": {**SANE},
     "sane_ns": {**SANE, **MUON, "learned_qk_scale": True},
     "sane_ns_cascade": {**SANE, **MUON, "learned_qk_scale": True, **CASCADE},
+    # The bound ATLAS has and we threw away: our newton_schulz5 restores ||G||,
+    # so orthogonalisation was directional only and bounded nothing. Measured
+    # 2026-08-17 on the graft, the divergence is a curvature feedback -- ||h_0||
+    # runs away and drags the effective step with it -- which is exactly what a
+    # gradient-independent bound on ||M_t - M_{t-1}|| would cut. Deltas on sane_ns.
+    "sane_ns_unit": {**SANE, **MUON_UNIT, "learned_qk_scale": True},
+    "sane_ns_clip": {**SANE, **MUON_CLIP, "learned_qk_scale": True},
     # SANE with the inner step halved. normalize_output=False makes the inner
     # loop diverge to NaN on ~13% of seeds -- abruptly, inside a single forward, with
     # no precursor, and deterministically per seed. theta_scale=0.01 prevented that on
