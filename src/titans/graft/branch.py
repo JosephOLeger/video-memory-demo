@@ -44,6 +44,24 @@ explicit ``write_mask``).
 Streaming callers must pass ``token_offset`` -- the absolute index of ``h[:, 0]``
 in the stream -- or the stride's phase silently resets at every call and the write
 cadence stops being uniform.
+
+The input basis is a PCA, not a learned projection
+--------------------------------------------------
+``down`` is meant to carry a **fixed** basis fitted on the frozen host's layer-L
+activations (:func:`titans.worldmodel.bottleneck.fit_pca`), the same move that made
+the reduction a property of the *data* in the world model instead of a bundle of
+parameters free to co-adapt with the memory.
+
+There is a second reason, specific to the zero-init residual. At step 0 the
+gradient reaching ``down`` must pass through ``up``, which is zero, so
+``dL/d(down) = 0`` exactly -- and the same holds for ``q_proj`` and the memory's
+gate heads. A learned ``down`` therefore starts from a random basis that receives
+no gradient on the first step and only bootstraps through whatever ``up`` becomes.
+That is survivable (it is LoRA's ``A`` random / ``B`` zero structure) but it is a
+bootstrap cost a good fixed basis removes outright.
+
+The learned-``down`` path is kept for the ablation, and because the PCA cannot be
+fitted before the host is wired up and its activations sampled.
 """
 
 from __future__ import annotations
@@ -56,6 +74,23 @@ import torch.nn as nn
 from ..memory import NeuralMemory
 
 Params = dict
+
+
+def fold_pca(pca) -> Tuple[torch.Tensor, torch.Tensor]:
+    """The affine map that ``bottleneck.apply_pca`` computes, as ``(W, b)``.
+
+    ``apply_pca`` is ``z = ((h - mean) / std) @ components.T / sv``, which is affine
+    in ``h``; folding it into one ``[k, D]`` matrix and a ``[k]`` bias makes the
+    branch's input a single matmul and lets ``down`` stay an ordinary ``nn.Linear``
+    whose ``state_dict`` shape does not depend on how it was built.
+    """
+    comps = pca["components"].double()                       # [k, D]
+    mean = pca["mean"].double()                              # [D]
+    std = pca["std"].double()                                # [D]
+    sv = pca["sv"].double() if pca["whiten"] else torch.ones_like(comps[:, 0])
+    W = comps / std.unsqueeze(0) / sv.unsqueeze(1)           # [k, D]
+    b = -((mean / std) @ comps.T) / sv                       # [k]
+    return W.float(), b.float()
 
 #: ``sane_ns`` expressed in :class:`~titans.memory.NeuralMemory`'s own argument
 #: names. The standing rule for this project is that every arm is a delta on
@@ -98,6 +133,11 @@ class MemoryBranch(nn.Module):
     normalize_retrieval: RMSNorm on the retrieval before ``up``. SANE's fifth
         ingredient: it bounds what *leaves* the memory without touching the inner
         loss the way ``normalize_output`` does. On by default, as in ``sane_ns``.
+    down_pca: a basis fitted by :func:`titans.worldmodel.bottleneck.fit_pca` on the
+        host's layer-L activations. Its ``k`` must equal ``d_mem``. Frozen unless
+        ``train_down`` says otherwise; passing ``None`` falls back to a learned
+        projection (the ablation, and the only option before a basis exists).
+    train_down: override the freeze. Defaults to ``down_pca is None``.
     **memory_kwargs: forwarded to :class:`~titans.memory.NeuralMemory`, on top of
         :func:`sane_memory_kwargs`. This is where the cascade options land
         (``use_cascade_momentum``, ``cascade_areas``, ``cascade_terminal_leak``,
@@ -106,6 +146,7 @@ class MemoryBranch(nn.Module):
 
     def __init__(self, d_model: int, d_mem: int = 128, *, chunk_size: int = 8,
                  write_stride: int = 1, normalize_retrieval: bool = True,
+                 down_pca=None, train_down: Optional[bool] = None,
                  **memory_kwargs):
         super().__init__()
         if d_model < 1 or d_mem < 1:
@@ -119,13 +160,34 @@ class MemoryBranch(nn.Module):
         self.chunk_size = chunk_size
         self.write_stride = write_stride
 
-        self.down = nn.Linear(d_model, d_mem, bias=False)
+        self.down = nn.Linear(d_model, d_mem, bias=down_pca is not None)
+        self.pca_explained = None
+        if down_pca is not None:
+            if int(down_pca["k"]) != d_mem:
+                raise ValueError(f"basis has k={down_pca['k']}, d_mem is {d_mem}")
+            if down_pca["components"].shape[1] != d_model:
+                raise ValueError(
+                    f"basis was fitted on D={down_pca['components'].shape[1]}, "
+                    f"d_model is {d_model}")
+            W, b = fold_pca(down_pca)
+            with torch.no_grad():
+                self.down.weight.copy_(W)
+                self.down.bias.copy_(b)
+            self.pca_explained = float(down_pca["explained"])
+        if train_down is None:
+            train_down = down_pca is None
+        self.down.requires_grad_(bool(train_down))
+
         self.up = nn.Linear(d_mem, d_model, bias=False)
         # The identity-at-init property the whole measurement rests on.
         nn.init.zeros_(self.up.weight)
         self.norm_r = nn.RMSNorm(d_mem) if normalize_retrieval else None
 
         self.memory = NeuralMemory(dim=d_mem, **sane_memory_kwargs(**memory_kwargs))
+
+    def trainable_parameters(self):
+        """The parameters an optimiser should see -- a frozen ``down`` is excluded."""
+        return (p for p in self.parameters() if p.requires_grad)
 
     # ------------------------------------------------------------------ carry
     def init_carry(self, batch: int) -> Tuple[Params, Params]:
@@ -141,7 +203,22 @@ class MemoryBranch(nn.Module):
                 S: Optional[Params] = None, *, token_offset: int = 0,
                 write_mask: Optional[torch.Tensor] = None,
                 ) -> Tuple[torch.Tensor, Params, Params]:
-        """``h`` -> ``h + up(norm(retrieve(...)))``, carrying the memory forward.
+        """``h + delta(h)``, carrying the memory forward. See :meth:`delta`."""
+        d, state, S = self.delta(h, state, S, token_offset=token_offset,
+                                 write_mask=write_mask)
+        return h + d, state, S
+
+    def delta(self, h: torch.Tensor, state: Optional[Params] = None,
+              S: Optional[Params] = None, *, token_offset: int = 0,
+              write_mask: Optional[torch.Tensor] = None,
+              ) -> Tuple[torch.Tensor, Params, Params]:
+        """What the branch *contributes*, ``up(norm(retrieve(...)))``, before the add.
+
+        Returned separately from the sum because the host runs in bf16 while this
+        branch runs in fp32: the caller casts the delta back and adds it in the
+        host's dtype, so a zero delta leaves the residual stream **bit-identical**
+        rather than merely close. Doing the add here and casting the sum would
+        round every activation through fp32 and lose that guarantee.
 
         ``h`` is ``[B, N, d_model]``; the carry is returned so a long video can be
         streamed segment by segment without materialising the whole sequence.
@@ -177,7 +254,7 @@ class MemoryBranch(nn.Module):
         r = self.memory.retrieve(state, self.memory.q_proj(z))  # [B, N, d_mem]
         if self.norm_r is not None:
             r = self.norm_r(r)
-        return h + self.up(r), state, S
+        return self.up(r), state, S
 
     def _write_positions(self, n: int, offset: int, mask: Optional[torch.Tensor],
                          device) -> torch.Tensor:

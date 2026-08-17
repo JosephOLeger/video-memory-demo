@@ -16,7 +16,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from titans.graft import MemoryBranch, sane_memory_kwargs, stride_for_reach
+from titans.graft import MemoryBranch, fold_pca, sane_memory_kwargs, stride_for_reach
+from titans.worldmodel.bottleneck import apply_pca, fit_pca
 
 
 def make_branch(d_model=16, d_mem=8, *, seed=0, double=True, **kw):
@@ -199,6 +200,92 @@ def test_the_branch_is_built_on_sane_not_on_library_defaults():
 def test_the_retrieval_norm_is_on_by_default_and_optional():
     assert make_branch().norm_r is not None
     assert make_branch(normalize_retrieval=False).norm_r is None
+
+
+# ------------------------------------------------------------- the input basis
+def make_pca(d_model=16, d_mem=8, *, n=512, seed=0):
+    torch.manual_seed(seed)
+    # Channels with wildly different scales, as a residual stream has: the
+    # per-channel standardisation inside fit_pca is what keeps one of them from
+    # swallowing every component.
+    scale = torch.logspace(0, 2, d_model, dtype=torch.float64)
+    return fit_pca((torch.randn(n, d_model, dtype=torch.float64) * scale).float(), d_mem)
+
+
+def test_the_folded_basis_is_exactly_apply_pca():
+    """One matmul must compute what the three-step formula computes."""
+    pca = make_pca()
+    W, b = fold_pca(pca)
+    h = torch.randn(4, 7, 16)
+    assert torch.allclose(h @ W.T + b, apply_pca(h, pca), atol=1e-5)
+
+
+def test_an_unwhitened_basis_folds_too():
+    pca = fit_pca(torch.randn(256, 16), 8, whiten=False)
+    W, b = fold_pca(pca)
+    h = torch.randn(3, 5, 16)
+    assert torch.allclose(h @ W.T + b, apply_pca(h, pca), atol=1e-5)
+
+
+def test_the_branch_projects_through_the_fitted_basis():
+    pca = make_pca()
+    branch = MemoryBranch(16, 8, down_pca=pca)
+    h = torch.randn(2, 6, 16)
+    assert torch.allclose(branch.down(h), apply_pca(h, pca), atol=1e-5)
+    assert branch.pca_explained == pytest.approx(pca["explained"])
+
+
+def test_a_fitted_basis_is_frozen_and_hidden_from_the_optimiser():
+    pca = make_pca()
+    branch = MemoryBranch(16, 8, down_pca=pca)
+    assert not branch.down.weight.requires_grad
+    assert not branch.down.bias.requires_grad
+    names = {n for n, p in branch.named_parameters() if p.requires_grad}
+    assert not any(n.startswith("down.") for n in names)
+    assert sum(1 for _ in branch.trainable_parameters()) < len(list(branch.parameters()))
+    # A learned down is the opposite, and is what we get with no basis.
+    assert MemoryBranch(16, 8).down.weight.requires_grad
+
+
+def test_a_frozen_basis_stays_put_under_training():
+    pca = make_pca()
+    branch = MemoryBranch(16, 8, down_pca=pca).double()
+    before = branch.down.weight.clone()
+    with torch.no_grad():
+        branch.up.weight.normal_(std=0.1)
+    out, _, _ = branch(torch.randn(2, 8, 16, dtype=torch.float64))
+    out.square().mean().backward()
+    assert branch.down.weight.grad is None
+    assert torch.equal(branch.down.weight, before)
+
+
+def test_a_basis_that_does_not_fit_the_graft_is_rejected():
+    with pytest.raises(ValueError, match="k=8"):
+        MemoryBranch(16, 4, down_pca=make_pca(16, 8))
+    with pytest.raises(ValueError, match="fitted on D=16"):
+        MemoryBranch(32, 8, down_pca=make_pca(16, 8))
+
+
+def test_the_basis_does_not_disturb_the_identity_at_init():
+    branch = MemoryBranch(16, 8, down_pca=make_pca()).double()
+    h = torch.randn(2, 8, 16, dtype=torch.float64)
+    out, _, _ = branch(h)
+    assert branch.is_identity() and torch.equal(out, h)
+
+
+def test_at_step_zero_only_up_receives_a_gradient():
+    """Why the basis is fitted rather than learned: the zero-init blocks the rest.
+
+    ``dL/d(down) = dL/dout . up.weight . (...)`` and ``up.weight`` is zero, so every
+    branch parameter upstream of ``up`` sees exactly nothing on the first step.
+    """
+    branch = make_branch()
+    out, _, _ = branch(torch.randn(2, 8, 16, dtype=torch.float64))
+    out.square().mean().backward()
+    assert branch.up.weight.grad.abs().sum() > 0
+    for name, p in branch.named_parameters():
+        if name != "up.weight" and p.grad is not None:
+            assert p.grad.abs().sum() == 0, name
 
 
 # ------------------------------------------------------------------- planning
