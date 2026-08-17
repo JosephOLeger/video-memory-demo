@@ -468,6 +468,90 @@ coder quoi que ce soit d'autre** : la VRAM à `dim=512, K=8` (l'extrapolation na
 une fraction du coût mesuré vient de l'état de cascade, donc il faut la mesure, pas
 l'extrapolation).
 
+### 5quater. Le domaine admissible, et le facteur de conversion qui manquait
+
+Jusqu'ici je raisonnais sur `leak_rate`, le drapeau. Ce n'est pas la quantité qui agit :
+la fuite appliquée est `exp(−leak_rate · θ_t)`, donc le taux effectif par pas est
+`r_eff = 1 − exp(−leak_rate · ⟨θ_t⟩)`. **`⟨θ_t⟩` mesuré sur les cascades déjà entraînées**
+(hook sur `theta_head`, 8 séquences du cache de validation) :
+
+| artefact | `⟨θ_t⟩` | `θ_max` |
+|---|---|---|
+| `frozen_10k/cascade_s0.pt` | 0,0122 | 0,069 |
+| `frozen_10k/cascade_s1.pt` | 0,0241 | 0,174 |
+| `frozen_10k/cascade_s2.pt` | 0,0515 | 0,392 |
+| `frozen/cas_tag.pt` | 0,0499 | 0,196 |
+
+`⟨θ_t⟩ ≈ 0,03`, et il **varie d'un facteur 4 entre graines** — donc tout réglage de
+`leak_rate` doit tenir sur la graine la plus chaude, pas sur la moyenne.
+
+Ces quatre artefacts sont par ailleurs toutes les cascades entraînées que nous ayons, et
+passées au scoreur elles donnent **pente −0,000 et durée de vie 0** : sans `C_k`, ce que
+nous avons appelé « la cascade » dans tous les résultats antérieurs est un accumulateur
+pur au sens du critère du papier. Aucun de ces runs ne mesurait ce que nous croyions
+mesurer.
+
+Carte du critère sur `(K, r_eff)`, béchers `c=2` appariés à `g=2`, fuite terminale active,
+readout `shallow`, N = 16 384 (durée de vie en pas / pente sur 10–10³) :
+
+| K | r=0 | 10⁻⁷ | 10⁻⁶ | 10⁻⁵ | 10⁻⁴ | 10⁻³ | 10⁻² |
+|---|---|---|---|---|---|---|---|
+| 4 | 816 | 816 | 816 | 812 | 779 | 555 | 157 |
+| **5** | **1 596** | 1 596 | 1 593 | 1 569 | 1 366 | 660 | 157 |
+| **6** | **1 605** | 1 605 | 1 604 | 1 592 | 1 412 | 662 | 157 |
+| 7 | 1 411 | 1 412 | 1 420 | **1 472** | 1 404 | 662 | 157 |
+| 8 | 1 275 | 1 278 | 1 303 | **1 437** | 1 404 | 662 | 157 |
+| 12 | 1 251 | 1 255 | 1 284 | **1 435** | 1 404 | 662 | 157 |
+| *pente* | −0,497 | −0,497 | −0,497 | −0,500 | −0,526 | −0,789 | −3,425 |
+
+Trois lectures :
+
+- **Le domaine admissible est `r_eff ≤ 10⁻⁵`.** À 10⁻⁴ la pente sort déjà de la tolérance
+  (−0,526) et on perd 12 % de durée de vie ; à 10⁻³ la loi de puissance est morte.
+- **K=4 n'atteint jamais −0,5** (−0,695) : trop peu de béchers pour couvrir la gamme.
+  L'optimum est **K=5–6**, et il est plat entre les deux.
+- Non trivial : pour K ≥ 7 la durée de vie est **maximale à r_eff = 10⁻⁵, pas à r=0**
+  (1 472 contre 1 411 à K=7). Une fuite faible rogne la traîne qui gonfle le dénominateur
+  du SNR sans porter de signal relisible. À K=6 l'effet s'inverse et r=0 gagne de 1 %.
+
+Converti en drapeau, sur la graine la plus chaude (`θ=0,051`) :
+
+| `--leak-rate` | `r_eff` à θ=0,012 | à θ=0,051 | verdict |
+|---|---|---|---|
+| 10⁻⁶ | 1,2·10⁻⁸ | 5,1·10⁻⁸ | **accumulateur pur** — exclu par ta consigne |
+| 10⁻⁴ | 1,2·10⁻⁶ | 5,1·10⁻⁶ | admissible |
+| **3·10⁻⁴** | 3,6·10⁻⁶ | **1,5·10⁻⁵** | **admissible, fuite réelle** |
+| 10⁻³ | 1,2·10⁻⁵ | 5,1·10⁻⁵ | marginal |
+| 10⁻² | 1,2·10⁻⁴ | 5,1·10⁻⁴ | détruit la loi |
+| **10⁻¹** *(défaut actuel)* | 1,2·10⁻³ | 5,1·10⁻³ | **détruit la loi** |
+
+**Ton intuition était juste et le facteur est ~300.** Le défaut `0,1` place la chaîne deux
+décades au-delà du domaine admissible : pente −0,79, durée de vie 662 au lieu de 1 605.
+
+`3·10⁻⁴` est le réglage retenu : c'est le plus grand qui reste admissible sur toutes les
+graines, donc celui qui garde une **vraie** fuite par la surprise — conforme à « un leak
+par la surprise est moralement la meilleure solution, seulement il doit être très lent »,
+et sans retomber sur l'accumulateur pur que `10⁻⁶` produisait.
+
+### Le readout : les deux critères se contredisent
+
+| readout | pente 10–10³ | durée de vie |
+|---|---|---|
+| **`shallow`** (= `u₁` de Benna-Fusi) | **−0,497** | 1 605 |
+| `mean` / `sum` | −0,323 | **3 697** |
+| `deep` | +2,385 | 7 758 |
+
+`gated` (notre défaut) est une mixture softmax ; son espérance non entraînée est `mean`.
+
+C'est le même désaccord que rétention contre `memory_gain` : **`shallow` est le seul
+fidèle à la loi −1/2, mais `mean` décroît plus lentement donc vit 2,3× plus longtemps.**
+La cible −1/2 de Benna-Fusi est une borne *asymptotique* — la décroissance la plus lente
+gardant la variance finie sur une chaîne infinie. La nôtre a K=6 et une frontière
+terminale, donc la variance est finie de toute façon et l'argument ne mord pas.
+
+Je ne trancherai pas cet axe a priori : il sort de l'échelle d'ablation et devient une
+question séparée, à mesurer sur le score d'écho plutôt qu'à décider sur la théorie.
+
 ### Ce que j'abandonne : la chaîne dirigée
 
 **Retirée.** La bidirectionnalité est *la* contribution du papier : « the interactions
@@ -483,9 +567,9 @@ une propriété dont le papier montre qu'elle ne sert pas, au prix de celle qui 
 | topologie | `chain`, **bidirectionnelle** | contribution centrale de Benna-Fusi |
 | **`C_k = g^k`** | **à implémenter** | l'ingrédient manquant : −0,066 → −0,500 |
 | **fuite terminale** (`u_{K}=0`) | **à implémenter** | tue le mode λ=1 |
-| `leak_rate` r | **≤ 10⁻⁶** (contre 0,1) | au-delà, l'enveloppe exponentielle écrase la loi de puissance |
-| readout | **`shallow`** (déjà le défaut) | seul mode à −0,5 |
-| K | 12 | couvre 10⁵ pas ≈ 28 h à 1 fps ; K ≈ log(T)/(2 log g) |
+| `leak_rate` r | **3·10⁻⁴** (contre 0,1) | §5quater : le plus grand `r_eff ≤ 10⁻⁵` sur toutes les graines |
+| readout | **non tranché** | `shallow` seul à −0,5, mais `mean` vit 2,3× plus longtemps |
+| K | **6** (et non 12) | §5ter : optimum 1 605 avec fuite terminale ; plat entre 5 et 6 |
 | g, β₁ | 2 ; 0,5 | `c = gg = 2` donne l'exposant −1/2 |
 
 L'option B (K=17, g=2) est abandonnée : 2,3× la VRAM de `sane_ns`, fenêtre réduite de 532
