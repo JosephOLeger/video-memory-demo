@@ -105,6 +105,7 @@ def build_cfg(a) -> dict:
         eta_init=getattr(a, "eta_init", None),
         theta_scale=getattr(a, "theta_scale", None),
         normalize_hidden=getattr(a, "normalize_hidden", None),
+        muon=getattr(a, "muon", None),
         cascade=a.cascade, reservoirs=a.reservoirs, leak=a.leak,
         leak_rate=getattr(a, "leak_rate", 1.0), readout=a.readout,
         selective=a.selective, gate=a.gate, topology=a.topology,
@@ -336,6 +337,10 @@ def build_parser() -> argparse.ArgumentParser:
                     dest="normalize_hidden",
                     help="target L2 norm for the memory's hidden activation h_0 "
                          "(bounds lambda_max(H_GN^(W1)) = 2||h_0||^2); unset = off")
+    ap.add_argument("--muon", default=None, choices=["rescale", "unit", "clip"],
+                    help="Newton-Schulz magnitude convention. sane_ns defaults to "
+                         "'rescale' (restores ||G||, bounds nothing); 'unit' is "
+                         "ATLAS Eq 32 literally, 'clip' caps only the tail.")
     ap.add_argument("--bptt-window", type=int, default=None, dest="bptt_window",
                     help="truncate BPTT to this many steps; VRAM becomes independent\n"
                          "of sequence length (measured: 0.82 GiB at T=128..2048)")

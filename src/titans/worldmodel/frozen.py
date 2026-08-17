@@ -37,6 +37,7 @@ FORMAT = 1
 def build_cfg(config: str = "sane_ns", *, eta_init: Optional[float] = None,
               theta_scale: Optional[float] = None,
               normalize_hidden: Optional[float] = None,
+              muon: Optional[str] = None,
               cascade: bool = False, reservoirs: int = 6, leak: str = "none",
               leak_rate: float = 1.0, readout: str = "gated",
               selective: bool = False, gate: str = "surprise",
@@ -78,6 +79,12 @@ def build_cfg(config: str = "sane_ns", *, eta_init: Optional[float] = None,
         cfg["theta_scale"] = theta_scale
     if normalize_hidden is not None:
         cfg["normalize_hidden"] = normalize_hidden
+    if muon is not None:
+        # Which magnitude convention Newton-Schulz uses. sane_ns already turns NS
+        # on in "rescale" mode, which restores ||G|| and therefore bounds nothing;
+        # "unit" is ATLAS Eq 32 literally and "clip" caps only the tail. See
+        # titans.memory.newton_schulz5.
+        cfg["memory_orthogonalize_momentum"] = muon
     if cascade:
         cfg.update(memory_use_cascade=True, cascade_reservoirs=reservoirs,
                    cascade_leak=leak, cascade_leak_rate=leak_rate,
