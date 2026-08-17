@@ -37,6 +37,26 @@ from ..worldmodel.data import load_video_frames
 from .qwen import default_layer, find_decoder_layers
 
 
+def resize_frames(frames: torch.Tensor, max_side: int) -> torch.Tensor:
+    """Cap the longest side of ``[F, H, W, C]`` uint8 frames.
+
+    Qwen2.5-VL uses *dynamic* resolution: it does not downscale for you, so native
+    EgoLife frames turn 32 frames into tens of thousands of visual tokens and the
+    vision tower asks for 11 GB in a single allocation. The basis does not need
+    resolution -- it needs the *distribution* of layer-L activations -- so the cap
+    is cheap here in a way it would not be at evaluation time.
+    """
+    f, h, w, c = frames.shape
+    scale = max_side / max(h, w)
+    if scale >= 1.0:
+        return frames
+    new_h, new_w = max(2, int(round(h * scale))), max(2, int(round(w * scale)))
+    x = frames.permute(0, 3, 1, 2).float()                  # [F, C, H, W]
+    x = torch.nn.functional.interpolate(x, size=(new_h, new_w), mode="bilinear",
+                                        align_corners=False, antialias=True)
+    return x.permute(0, 2, 3, 1).round().clamp(0, 255).to(torch.uint8)
+
+
 def video_inputs(processor, frames: torch.Tensor, prompt: str, fps: float):
     """One video turned into the exact dict the model's forward expects."""
     messages = [{"role": "user", "content": [{"type": "video"},
@@ -52,7 +72,8 @@ def video_inputs(processor, frames: torch.Tensor, prompt: str, fps: float):
 
 @torch.no_grad()
 def collect(model, processor, paths, layer: int, *, num_frames: int, fps: float,
-            per_video: int, prompt: str, device: str) -> torch.Tensor:
+            per_video: int, prompt: str, device: str,
+            max_side: int = 256) -> torch.Tensor:
     """Layer-``layer`` hidden states over ``paths``, subsampled to ``per_video`` each.
 
     Subsampling is uniform over the token axis rather than taking a prefix: the
@@ -72,7 +93,8 @@ def collect(model, processor, paths, layer: int, *, num_frames: int, fps: float,
         for p in paths:
             grabbed.clear()
             try:
-                frames = load_video_frames(p, num_frames=num_frames)
+                frames = resize_frames(load_video_frames(p, num_frames=num_frames),
+                                       max_side)
                 inputs = video_inputs(processor, frames, prompt, fps)
                 inputs = {k: (v.to(device) if hasattr(v, "to") else v)
                           for k, v in inputs.items()}
@@ -106,6 +128,9 @@ def main() -> None:
     ap.add_argument("--num-frames", type=int, default=32, dest="num_frames")
     ap.add_argument("--fps", type=float, default=1.0)
     ap.add_argument("--per-video", type=int, default=512, dest="per_video")
+    ap.add_argument("--max-side", type=int, default=256, dest="max_side",
+                    help="cap the frame's longest side; native EgoLife frames OOM "
+                         "the vision tower at 32 frames")
     ap.add_argument("--prompt", default="Describe what happens in this video.")
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--device", default="cuda")
@@ -131,7 +156,8 @@ def main() -> None:
 
     t0 = time.time()
     X = collect(model, processor, paths, site, num_frames=a.num_frames, fps=a.fps,
-                per_video=a.per_video, prompt=a.prompt, device=a.device)
+                per_video=a.per_video, prompt=a.prompt, device=a.device,
+                max_side=a.max_side)
     print(f"activations {tuple(X.shape)} in {time.time() - t0:.0f}s", flush=True)
     # The pathology this basis exists to remove, before and after, in one number.
     ch_std = X.std(0)
@@ -143,7 +169,8 @@ def main() -> None:
     print(f"PCA k={a.k}: {100 * pca['explained']:.1f} % of the variance", flush=True)
     torch.save({"pca": pca, "model": a.model, "layer": site, "d_model": d_model,
                 "videos": [p.split("/")[-1] for p in paths],
-                "num_frames": a.num_frames, "fps": a.fps, "tokens": int(X.shape[0]),
+                "num_frames": a.num_frames, "fps": a.fps, "max_side": a.max_side,
+                "tokens": int(X.shape[0]),
                 "channel_std_ratio": float(ch_std.max() / ch_std.median())}, a.out)
     print("saved:", a.out)
     print(json.dumps({"k": a.k, "explained": pca["explained"], "layer": site,

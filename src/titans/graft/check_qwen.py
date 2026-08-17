@@ -99,6 +99,9 @@ def main() -> None:
     ap.add_argument("--model", default="Qwen/Qwen2.5-VL-3B-Instruct")
     ap.add_argument("--layer", type=int, default=None, help="default: 2/3 of depth")
     ap.add_argument("--d-mem", type=int, default=128, dest="d_mem")
+    ap.add_argument("--basis", default=None,
+                    help="a basis from titans.graft.fit_basis; without it `down` is "
+                         "random and the memory diverges on raw activations")
     ap.add_argument("--chunk", type=int, default=64)
     ap.add_argument("--write-stride", default="1", dest="write_stride",
                     help="comma-separated strides; the grid is tokens x strides")
@@ -130,10 +133,21 @@ def main() -> None:
     print(f"host: {len(layers)} decoder layers, d_model={d_model}, "
           f"{host_params/1e9:.2f} B params; graft site = layer {site}", flush=True)
 
-    branch = MemoryBranch(d_model, a.d_mem, chunk_size=a.chunk).to(dev)  # fp32 on purpose
+    pca = None
+    if a.basis:
+        blob = torch.load(a.basis, map_location="cpu", weights_only=False)
+        pca = blob["pca"]
+        if blob.get("layer") != site:
+            raise SystemExit(f"basis was fitted at layer {blob.get('layer')}, "
+                             f"the graft site is {site}")
+        print(f"basis: k={pca['k']}, {100 * pca['explained']:.1f} % of the variance, "
+              f"fitted on {blob.get('tokens')} tokens of real video", flush=True)
+
+    branch = MemoryBranch(d_model, a.d_mem, chunk_size=a.chunk,
+                          down_pca=pca).to(dev)          # fp32 on purpose
     rep = {"model": a.model, "layer": site, "d_model": d_model, "d_mem": a.d_mem,
            "chunk": a.chunk, "dtype": a.dtype, "n_decoder_layers": len(layers),
-           **branch_report(branch, host_params), "runs": []}
+           "basis": a.basis, **branch_report(branch, host_params), "runs": []}
     print(f"branch: {rep['branch_trainable']:,} trainable params "
           f"= {rep['pct_of_host']:.4f} % of the host", flush=True)
     print("\nla note se lit en ECRITURES, pas en tokens : le backward garde un etat "
