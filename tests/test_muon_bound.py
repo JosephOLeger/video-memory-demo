@@ -180,3 +180,47 @@ def test_squash_mode_end_to_end_and_bounds_the_step():
     state, S = mem.init_memory(2)
     state, S = mem.update(x, state, S, 4)
     assert torch.isfinite(mem.retrieve(state, mem.q_proj(x))).all()
+
+
+# --------------------------------------------------------------------------- #
+# unit_squash: unit's bound, with the amplitude put back as a monotone function
+# of the RAW momentum -- theta at the output, where Josep wanted it.
+# --------------------------------------------------------------------------- #
+
+
+def _unit_squash_move(grad_scale: float, c: float = 350.0) -> float:
+    return _step_move("unit_squash", grad_scale, orthogonalize_clip=c)
+
+
+def test_unit_squash_keeps_units_bound():
+    """psi is in [0,1), so the step can only be SMALLER than unit's -- never larger,
+    however big the gradient gets."""
+    for scale in (1e-2, 1.0, 1e4, 1e8):
+        assert _unit_squash_move(scale) <= _step_move("unit", scale) + 1e-9, scale
+    assert _unit_squash_move(1e8) < 0.05
+
+
+def test_unit_squash_is_monotone_where_unit_is_flat():
+    """The whole point of the variant: unit writes the same for every surprise."""
+    scales = (1e-3, 1e-1, 1e1, 1e3)
+    sq = [_unit_squash_move(s) for s in scales]
+    un = [_step_move("unit", s) for s in scales]
+    assert all(a < b for a, b in zip(sq, sq[1:])), sq        # ordered
+    assert un[0] == pytest.approx(un[-1], rel=0.15), un      # unit: flat
+
+
+def test_unit_squash_recovers_unit_as_c_goes_to_zero():
+    big = _unit_squash_move(1.0, c=1e-6)
+    assert big == pytest.approx(_step_move("unit", 1.0), rel=1e-3)
+
+
+def test_unit_squash_runs_on_both_paths():
+    for extra in ({}, dict(use_cascade_momentum=True, cascade_reservoirs=4)):
+        torch.manual_seed(0)
+        mem = NeuralMemory(dim=8, hidden_dim=16, theta_scale=0.03, normalize_qk="l2",
+                           orthogonalize_momentum="unit_squash",
+                           orthogonalize_clip=350.0, update_bias=False, **extra)
+        x = torch.randn(2, 12, 8)
+        state, S = mem.init_memory(2)
+        state, S = mem.update(x, state, S, 4)
+        assert torch.isfinite(mem.retrieve(state, mem.q_proj(x))).all()

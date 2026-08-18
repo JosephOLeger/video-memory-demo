@@ -483,9 +483,9 @@ class NeuralMemory(nn.Module):
         # artefact reproduces bit-for-bit; the value is kept unnormalised on the
         # attribute for the same reason.
         mode = "rescale" if orthogonalize_momentum is True else orthogonalize_momentum
-        if mode not in (False, "rescale", "unit", "clip", "squash"):
+        if mode not in (False, "rescale", "unit", "clip", "squash", "unit_squash"):
             raise ValueError("orthogonalize_momentum must be False, True, "
-                             "'rescale', 'unit', 'clip' or 'squash'")
+                             "'rescale', 'unit', 'clip', 'squash' or 'unit_squash'")
         self._orth_mode = mode
         self.orthogonalize_clip = orthogonalize_clip
 
@@ -607,6 +607,34 @@ class NeuralMemory(nn.Module):
 
         return grad(loss, argnums=0)
 
+    def _unit_update(self, raw: torch.Tensor) -> torch.Tensor:
+        """The bounded, direction-only update from a raw momentum ``raw``.
+
+        ``unit`` returns ``NS-5(raw)`` -- singular values ~1, magnitude discarded, so
+        the caller's ``theta_t`` alone bounds the step (ATLAS Eq 32).
+
+        ``unit_squash`` (Josep, 2026-08-18) multiplies that by
+        ``psi_c(||raw||) = (2/pi) arctan(pi ||raw|| / 2c) in [0, 1)``. Dimensionless
+        and tending to 1, so the **bound is exactly unit's** -- ``||dM||_2 <=
+        theta_t`` -- while the amplitude is again monotone in the accumulated
+        surprise. ``unit`` is the ``c -> 0`` limit.
+
+        Why here and not on the gradient (which is what ``squash`` does): squashing
+        ``||S||`` after ``theta`` has already set its scale means ``c`` has to track
+        ``theta``, and it did not -- ``c = 0.25`` against a measured ``||S|| ~ 6.3``
+        put the arctan **98 % into saturation**, so that arm silently reproduced
+        ``unit``. With the raw momentum ``c`` is set from a quantity we measure
+        directly: ``||S|| ~ 350`` under ``unit`` on the graft, and ``c = 350`` puts
+        ``psi`` at 0.64 there -- mid-transition, discriminating both ways.
+        """
+        u = newton_schulz5(raw, rescale=False)
+        if self._orth_mode != "unit_squash":
+            return u
+        c = self.orthogonalize_clip
+        n = raw.norm(dim=(-2, -1), keepdim=True) if raw.dim() >= 3 else raw.norm(
+            dim=-1, keepdim=True)
+        return u * (2.0 / math.pi) * torch.atan(n * (math.pi / (2.0 * c)))
+
     def _orth_mag_kwargs(self) -> dict:
         """Which magnitude convention ``newton_schulz5`` should apply.
 
@@ -718,7 +746,7 @@ class NeuralMemory(nn.Module):
                 # Under "unit" theta is applied to the orthogonalised readout below
                 # instead of to the gradient here, so the reservoir carries the raw
                 # surprise (same split as the scalar path).
-                injected = (-gk if self._orth_mode == "unit"
+                injected = (-gk if self._orth_mode in ("unit", "unit_squash")
                             else -self._bcast(theta_t, gk) * gk)
                 eta_b = self._bcast(eta_t, S[key])
                 if self.cascade_leak == "full":
@@ -759,10 +787,8 @@ class NeuralMemory(nn.Module):
                         self.cascade.base_areas, self.cascade.terminal_beta,
                     )
                 s_read = self.cascade.readout(new_S[key], x_t=x_t)
-                if self._orth_mode == "unit":
-                    s_read = self._bcast(theta_t, gk) * newton_schulz5(
-                        s_read, rescale=False
-                    )
+                if self._orth_mode in ("unit", "unit_squash"):
+                    s_read = self._bcast(theta_t, gk) * self._unit_update(s_read)
                 elif self._orth_mode and w.dim() >= 3:
                     # ATLAS Eq 57 orthogonalises whatever plays the role of the
                     # visible momentum before it updates M. On the cascade path
@@ -772,7 +798,7 @@ class NeuralMemory(nn.Module):
                     # entirely, so cascade+NS silently ran as plain cascade.
                     s_read = newton_schulz5(s_read, **self._orth_mag_kwargs())
                 new_state[key] = self._bcast(1.0 - alpha_t, w) * w + s_read
-            elif self._orth_mode == "unit":
+            elif self._orth_mode in ("unit", "unit_squash"):
                 # ATLAS Eq 32 / Table 1 literally: the learning rate multiplies the
                 # *orthogonalised* momentum, not the gradient.
                 #     S_t = theta_t S_{t-1} - grad_t        (ATLAS's theta = our eta)
@@ -785,9 +811,7 @@ class NeuralMemory(nn.Module):
                 # modes by construction, which is why this is a separate branch and not
                 # a flag on the same expression.
                 new_S[key] = self._bcast(eta_t, gk) * S[key] - gk
-                update = self._bcast(theta_t, gk) * newton_schulz5(
-                    new_S[key], rescale=False
-                )
+                update = self._bcast(theta_t, gk) * self._unit_update(new_S[key])
                 new_state[key] = self._bcast(1.0 - alpha_t, w) * w + update
             else:
                 new_S[key] = (

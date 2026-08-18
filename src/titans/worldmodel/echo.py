@@ -346,7 +346,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--muon-scale", type=float, default=None, dest="muon_scale",
                     help="magnitude scale c for --muon clip/squash; ||M|| -> c/alpha")
     ap.add_argument("--muon", default=None,
-                    choices=["rescale", "unit", "clip", "squash"],
+                    choices=["rescale", "unit", "clip", "squash", "unit_squash"],
                     help="Newton-Schulz magnitude convention. sane_ns defaults to "
                          "'rescale' (restores ||G||, bounds nothing); 'unit' is "
                          "ATLAS Eq 32 literally, 'clip' caps only the tail.")
