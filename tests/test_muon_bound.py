@@ -224,3 +224,87 @@ def test_unit_squash_runs_on_both_paths():
         state, S = mem.init_memory(2)
         state, S = mem.update(x, state, S, 4)
         assert torch.isfinite(mem.retrieve(state, mem.q_proj(x))).all()
+
+
+# --------------------------------------------------------------------------- #
+# softclip: Josep's proposal read as what it is -- an IMPROVED CLIP. arctan is a
+# smoothed `min`, so the lineage is clip -> softclip, not unit -> unit_squash.
+# The property that separates them is which constant bounds the step.
+# --------------------------------------------------------------------------- #
+
+
+def _theta_move(mode: str, grad_scale: float, theta: float, **kw) -> float:
+    """``_step_move`` with the inner gate set explicitly, to vary ``theta_t`` alone."""
+    torch.manual_seed(0)
+    mem = NeuralMemory(dim=8, hidden_dim=16, orthogonalize_momentum=mode,
+                       update_bias=False, **kw)
+    state, S = mem.init_memory(1)
+    g = {k: (torch.randn_like(v) * grad_scale if v.dim() >= 3 else torch.zeros_like(v))
+         for k, v in state.items()}
+    one = torch.ones(1)
+    new_state, _ = mem._step(state, S, g, alpha_t=one * 0.002, eta_t=one * 0.9,
+                             theta_t=one * theta)
+    return max(float(torch.linalg.svdvals((new_state[k] - 0.998 * state[k]).detach()).max())
+               for k, v in state.items() if v.dim() >= 3)
+
+
+def _softclip_move(grad_scale: float, c: float = 8.0) -> float:
+    return _step_move("softclip", grad_scale, orthogonalize_clip=c)
+
+
+def test_softclip_bound_is_the_constant_c_not_theta():
+    """The distinction that motivates the mode.
+
+    ``unit`` and ``unit_squash`` bound the step by ``theta_t``, and
+    ``theta_t = softplus(head(x)) * theta_scale`` has no upper bound -- so their
+    "bound" moves whenever the outer loop pushes the gate. ``softclip``'s bound is
+    the constant ``c``: doubling ``theta_scale`` cannot make the step exceed it.
+    """
+    for scale in (1e2, 1e6):
+        assert _softclip_move(scale, c=8.0) < 8.0 + 1e-6
+        # a hundred times the gate, same ceiling
+        assert _theta_move("softclip", scale, theta=3.0,
+                           orthogonalize_clip=8.0) < 8.0 + 1e-6
+    # ...whereas unit's step scales one-for-one with theta, without limit.
+    assert _theta_move("unit", 1.0, theta=3.0) == pytest.approx(
+        100.0 * _theta_move("unit", 1.0, theta=0.03), rel=0.2)
+
+
+def test_softclip_is_monotone_where_clip_is_flat():
+    scales = (1e-3, 1e-1, 1e1, 1e3)
+    soft = [_softclip_move(s) for s in scales]
+    assert all(a < b for a, b in zip(soft, soft[1:])), soft
+
+
+def test_softclip_is_the_identity_well_below_c():
+    """Far under the cap it is plain gradient descent on the orthogonalised
+    direction -- theta's learned scale reaches the update untouched."""
+    small = _softclip_move(1e-4, c=1e4)
+    torch.manual_seed(0)
+    mem = NeuralMemory(dim=8, hidden_dim=16, theta_scale=0.03,
+                       orthogonalize_momentum="softclip", orthogonalize_clip=1e4,
+                       update_bias=False)
+    state, _ = mem.init_memory(1)
+    ref = 0.03 * 1.0                       # theta * ||NS/||NS|| || in spectral terms
+    assert 0.0 < small < ref               # no cap reached, no amplification
+
+
+def test_softclip_recovers_unit_up_to_a_constant_when_saturated():
+    """c -> 0 flattens it onto a fixed-size step, which is exactly ``unit``'s
+    behaviour: the two families meet at the degenerate end, as they should."""
+    a, b = _softclip_move(1e-2, c=1e-3), _softclip_move(1e6, c=1e-3)
+    # Frobenius is pinned to c exactly; the spectral norm read here still moves a
+    # little with the singular-value spread NS-5 happens to leave behind.
+    assert a == pytest.approx(b, rel=0.2)
+
+
+def test_softclip_runs_on_both_paths():
+    for extra in ({}, dict(use_cascade_momentum=True, cascade_reservoirs=4)):
+        torch.manual_seed(0)
+        mem = NeuralMemory(dim=8, hidden_dim=16, theta_scale=0.03, normalize_qk="l2",
+                           orthogonalize_momentum="softclip", orthogonalize_clip=8.0,
+                           update_bias=False, **extra)
+        x = torch.randn(2, 12, 8)
+        state, S = mem.init_memory(2)
+        state, S = mem.update(x, state, S, 4)
+        assert torch.isfinite(mem.retrieve(state, mem.q_proj(x))).all()

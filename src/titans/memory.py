@@ -483,9 +483,11 @@ class NeuralMemory(nn.Module):
         # artefact reproduces bit-for-bit; the value is kept unnormalised on the
         # attribute for the same reason.
         mode = "rescale" if orthogonalize_momentum is True else orthogonalize_momentum
-        if mode not in (False, "rescale", "unit", "clip", "squash", "unit_squash"):
-            raise ValueError("orthogonalize_momentum must be False, True, "
-                             "'rescale', 'unit', 'clip', 'squash' or 'unit_squash'")
+        if mode not in (False, "rescale", "unit", "clip", "squash", "unit_squash",
+                        "softclip"):
+            raise ValueError(
+                "orthogonalize_momentum must be False, True, 'rescale', 'unit', "
+                "'clip', 'squash', 'unit_squash' or 'softclip'")
         self._orth_mode = mode
         self.orthogonalize_clip = orthogonalize_clip
 
@@ -606,6 +608,43 @@ class NeuralMemory(nn.Module):
             return ((pred - v) ** 2).sum()
 
         return grad(loss, argnums=0)
+
+    def _softclip_update(self, raw: torch.Tensor,
+                         theta_b: torch.Tensor) -> torch.Tensor:
+        """``clip`` with its hard corner replaced by a smooth saturation.
+
+        This is Josep's proposal read as what it is -- an *improved clip*, not a
+        modulation of ``unit``. arctan is a smoothed ``min``::
+
+            dM = NS-5(S)/||NS-5(S)||_F * phi_c(theta_t ||S||_F)
+            phi_c(x) = (2c/pi) arctan(pi x / 2c)
+
+        The three properties, in the order they matter:
+
+        * **The bound is the constant ``c``**, in Frobenius norm, whatever the
+          gradient and whatever ``theta_t`` do. That is what ``clip`` has and what
+          ``unit``/``unit_squash`` do not: their step is ``~theta_t``, and
+          ``theta_t = softplus(.) * scale`` has no upper bound, so their bound moves
+          if the outer loop pushes the gate.
+        * **Monotone everywhere**, unlike ``min``, so the surprise hierarchy survives
+          past the cap instead of being flattened onto it.
+        * ``S`` accumulates the **raw** gradient, so ``theta`` never enters the
+          momentum recurrence -- it only frames the saturation's argument. Squashing
+          a quantity whose scale ``theta`` already set is what made the ``squash``
+          arm silently reproduce ``unit`` at ``c = 0.25``.
+
+        Choosing ``c``: it is the *deposit size*, and the transition region is where
+        the hierarchy lives, so set it near the median of ``theta_t ||S||`` -- both
+        are reported by every trace (~0.023 * 350 = 8 on the graft). Push ``c`` far
+        below that and the arctan saturates, recovering ``unit`` with extra steps.
+        """
+        if raw.dim() < 3:                       # no matrix structure to orthogonalise
+            return theta_b * raw
+        X = newton_schulz5(raw, rescale=False)
+        X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+        c = self.orthogonalize_clip
+        a = theta_b * raw.norm(dim=(-2, -1), keepdim=True)
+        return X * (2.0 * c / math.pi) * torch.atan(a * (math.pi / (2.0 * c)))
 
     def _unit_update(self, raw: torch.Tensor) -> torch.Tensor:
         """The bounded, direction-only update from a raw momentum ``raw``.
@@ -746,7 +785,8 @@ class NeuralMemory(nn.Module):
                 # Under "unit" theta is applied to the orthogonalised readout below
                 # instead of to the gradient here, so the reservoir carries the raw
                 # surprise (same split as the scalar path).
-                injected = (-gk if self._orth_mode in ("unit", "unit_squash")
+                injected = (-gk
+                            if self._orth_mode in ("unit", "unit_squash", "softclip")
                             else -self._bcast(theta_t, gk) * gk)
                 eta_b = self._bcast(eta_t, S[key])
                 if self.cascade_leak == "full":
@@ -787,7 +827,10 @@ class NeuralMemory(nn.Module):
                         self.cascade.base_areas, self.cascade.terminal_beta,
                     )
                 s_read = self.cascade.readout(new_S[key], x_t=x_t)
-                if self._orth_mode in ("unit", "unit_squash"):
+                if self._orth_mode == "softclip":
+                    s_read = self._softclip_update(s_read,
+                                                   self._bcast(theta_t, gk))
+                elif self._orth_mode in ("unit", "unit_squash"):
                     s_read = self._bcast(theta_t, gk) * self._unit_update(s_read)
                 elif self._orth_mode and w.dim() >= 3:
                     # ATLAS Eq 57 orthogonalises whatever plays the role of the
@@ -798,7 +841,7 @@ class NeuralMemory(nn.Module):
                     # entirely, so cascade+NS silently ran as plain cascade.
                     s_read = newton_schulz5(s_read, **self._orth_mag_kwargs())
                 new_state[key] = self._bcast(1.0 - alpha_t, w) * w + s_read
-            elif self._orth_mode in ("unit", "unit_squash"):
+            elif self._orth_mode in ("unit", "unit_squash", "softclip"):
                 # ATLAS Eq 32 / Table 1 literally: the learning rate multiplies the
                 # *orthogonalised* momentum, not the gradient.
                 #     S_t = theta_t S_{t-1} - grad_t        (ATLAS's theta = our eta)
@@ -811,7 +854,10 @@ class NeuralMemory(nn.Module):
                 # modes by construction, which is why this is a separate branch and not
                 # a flag on the same expression.
                 new_S[key] = self._bcast(eta_t, gk) * S[key] - gk
-                update = self._bcast(theta_t, gk) * self._unit_update(new_S[key])
+                th = self._bcast(theta_t, gk)
+                update = (self._softclip_update(new_S[key], th)
+                          if self._orth_mode == "softclip"
+                          else th * self._unit_update(new_S[key]))
                 new_state[key] = self._bcast(1.0 - alpha_t, w) * w + update
             else:
                 new_S[key] = (

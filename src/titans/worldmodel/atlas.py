@@ -48,6 +48,10 @@ MUON = dict(memory_orthogonalize_momentum=True, memory_update_bias=False)
 # gradient did); "clip" keeps theta on the gradient and only caps the tail.
 MUON_UNIT = dict(memory_orthogonalize_momentum="unit", memory_update_bias=False)
 MUON_CLIP = dict(memory_orthogonalize_momentum="clip", memory_update_bias=False)
+# clip's hard corner, smoothed: bounded by the constant c, monotone in the surprise
+# everywhere. c is a cap on theta_t*||S||, so pick it from a trace, not by feel.
+MUON_SOFTCLIP = dict(memory_orthogonalize_momentum="softclip",
+                     memory_orthogonalize_clip=8.0, memory_update_bias=False)
 CASCADE = dict(memory_use_cascade=True, cascade_leak="none", cascade_readout="mean")
 # The gate/normalisation set that follows ATLAS's own bounds (p25) rather than
 # patching around them. Each piece is inert or harmful alone; together they took
@@ -78,6 +82,7 @@ CONFIGS: dict[str, dict] = {
     # gradient-independent bound on ||M_t - M_{t-1}|| would cut. Deltas on sane_ns.
     "sane_ns_unit": {**SANE, **MUON_UNIT, "learned_qk_scale": True},
     "sane_ns_clip": {**SANE, **MUON_CLIP, "learned_qk_scale": True},
+    "sane_ns_softclip": {**SANE, **MUON_SOFTCLIP, "learned_qk_scale": True},
     # SANE with the inner step halved. normalize_output=False makes the inner
     # loop diverge to NaN on ~13% of seeds -- abruptly, inside a single forward, with
     # no precursor, and deterministically per seed. theta_scale=0.01 prevented that on

@@ -344,12 +344,20 @@ def build_parser() -> argparse.ArgumentParser:
                          "d writes the closed form is alpha ~ 1/(2d) (half-life 1.39d); "
                          "under --muon unit this is the only knob that sets reach.")
     ap.add_argument("--muon-scale", type=float, default=None, dest="muon_scale",
-                    help="magnitude scale c for --muon clip/squash; ||M|| -> c/alpha")
+                    help="magnitude scale c. For clip/squash/softclip it is the cap "
+                         "on the deposit, so ||M|| -> c/alpha; set it near the median "
+                         "of the quantity being squashed, not by feel (c=0.25 on "
+                         "||S||~6 saturated 98%% of the time and silently became "
+                         "'unit'). For softclip that quantity is theta_t*||S||.")
     ap.add_argument("--muon", default=None,
-                    choices=["rescale", "unit", "clip", "squash", "unit_squash"],
-                    help="Newton-Schulz magnitude convention. sane_ns defaults to "
-                         "'rescale' (restores ||G||, bounds nothing); 'unit' is "
-                         "ATLAS Eq 32 literally, 'clip' caps only the tail.")
+                    choices=["rescale", "unit", "clip", "squash", "unit_squash",
+                             "softclip"],
+                    help="Newton-Schulz magnitude convention, i.e. what bounds one "
+                         "inner step. 'rescale' restores ||G|| and bounds nothing "
+                         "(sane_ns default); 'unit' is ATLAS Eq 32 literally, bounded "
+                         "by theta_t; 'clip' caps the tail with a hard corner; "
+                         "'softclip' is that corner smoothed -- bounded by the "
+                         "CONSTANT c, and monotone in the surprise everywhere.")
     ap.add_argument("--bptt-window", type=int, default=None, dest="bptt_window",
                     help="truncate BPTT to this many steps; VRAM becomes independent\n"
                          "of sequence length (measured: 0.82 GiB at T=128..2048)")
