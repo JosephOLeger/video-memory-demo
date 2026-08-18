@@ -38,6 +38,7 @@ def build_cfg(config: str = "sane_ns", *, eta_init: Optional[float] = None,
               theta_scale: Optional[float] = None,
               normalize_hidden: Optional[float] = None,
               muon: Optional[str] = None,
+              muon_scale: Optional[float] = None,
               alpha_init: Optional[float] = None,
               cascade: bool = False, reservoirs: int = 6, leak: str = "none",
               leak_rate: float = 1.0, readout: str = "gated",
@@ -94,6 +95,11 @@ def build_cfg(config: str = "sane_ns", *, eta_init: Optional[float] = None,
         # "unit" is ATLAS Eq 32 literally and "clip" caps only the tail. See
         # titans.memory.newton_schulz5.
         cfg["memory_orthogonalize_momentum"] = muon
+    if muon_scale is not None:
+        # The magnitude scale c, for `clip` (hard cap) and `squash`
+        # (arctan saturation). ||M|| settles at ~c/alpha, so pick it from
+        # the state norm you want, not by feel.
+        cfg["memory_orthogonalize_clip"] = muon_scale
     if cascade:
         cfg.update(memory_use_cascade=True, cascade_reservoirs=reservoirs,
                    cascade_leak=leak, cascade_leak_rate=leak_rate,

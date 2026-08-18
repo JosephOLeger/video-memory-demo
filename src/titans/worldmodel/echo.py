@@ -106,6 +106,7 @@ def build_cfg(a) -> dict:
         theta_scale=getattr(a, "theta_scale", None),
         normalize_hidden=getattr(a, "normalize_hidden", None),
         muon=getattr(a, "muon", None),
+        muon_scale=getattr(a, "muon_scale", None),
         alpha_init=getattr(a, "alpha_init", None),
         cascade=a.cascade, reservoirs=a.reservoirs, leak=a.leak,
         leak_rate=getattr(a, "leak_rate", 1.0), readout=a.readout,
@@ -342,7 +343,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="forget-gate resting value. For a target recall distance of "
                          "d writes the closed form is alpha ~ 1/(2d) (half-life 1.39d); "
                          "under --muon unit this is the only knob that sets reach.")
-    ap.add_argument("--muon", default=None, choices=["rescale", "unit", "clip"],
+    ap.add_argument("--muon-scale", type=float, default=None, dest="muon_scale",
+                    help="magnitude scale c for --muon clip/squash; ||M|| -> c/alpha")
+    ap.add_argument("--muon", default=None,
+                    choices=["rescale", "unit", "clip", "squash"],
                     help="Newton-Schulz magnitude convention. sane_ns defaults to "
                          "'rescale' (restores ||G||, bounds nothing); 'unit' is "
                          "ATLAS Eq 32 literally, 'clip' caps only the tail.")

@@ -123,3 +123,60 @@ def test_unit_works_on_the_cascade_path_too():
     state, S = mem.update(x, state, S, 4)
     y = mem.retrieve(state, mem.q_proj(x))
     assert torch.isfinite(y).all()
+
+
+# --------------------------------------------------------------------------- #
+# squash: bounded like clip, but monotone everywhere (Josep's proposal).
+# --------------------------------------------------------------------------- #
+
+
+def _mag(out: torch.Tensor) -> torch.Tensor:
+    return out.norm(dim=(-2, -1))
+
+
+def test_squash_is_bounded_by_c():
+    for scale in (1e-2, 1.0, 1e2, 1e6):
+        out = newton_schulz5(_G(scale, seed=2), squash=0.25)
+        assert (_mag(out) < 0.2500001).all(), (scale, _mag(out))
+
+
+def test_squash_is_strictly_monotone_where_clip_is_flat():
+    """The whole point: past the cap, clip flattens and squash still ranks."""
+    norms, sq, cl = [], [], []
+    for scale in (0.5, 5.0, 50.0, 500.0):        # all far above c after scaling
+        G = _G(scale, seed=3)
+        norms.append(float(_mag(G)[0]))
+        sq.append(float(_mag(newton_schulz5(G, squash=0.25))[0]))
+        cl.append(float(_mag(newton_schulz5(G, clip=0.25))[0]))
+    assert all(a < b for a, b in zip(norms, norms[1:]))
+    assert all(a < b for a, b in zip(sq, sq[1:])), sq      # order preserved
+    assert cl[1] == pytest.approx(cl[-1]), cl              # order destroyed
+
+
+def test_squash_is_the_identity_well_below_c():
+    G = _G(1e-4, seed=4)
+    assert torch.allclose(newton_schulz5(G, squash=1.0), newton_schulz5(G), rtol=1e-6)
+
+
+def test_squash_interpolates_between_the_two_papers():
+    """c -> inf recovers Titans (rescale); c -> 0 recovers ATLAS (unit scale)."""
+    G = _G(1.0, seed=5)
+    ref = float(_mag(newton_schulz5(G))[0])
+    assert float(_mag(newton_schulz5(G, squash=1e8))[0]) == pytest.approx(ref, rel=1e-6)
+    tiny = 1e-6
+    assert float(_mag(newton_schulz5(G, squash=tiny))[0]) == pytest.approx(tiny, rel=1e-3)
+
+
+def test_squash_mode_end_to_end_and_bounds_the_step():
+    torch.manual_seed(0)
+    mem = NeuralMemory(dim=8, hidden_dim=16, theta_scale=0.03, normalize_qk="l2",
+                       orthogonalize_momentum="squash", orthogonalize_clip=0.25,
+                       update_bias=False)
+    assert mem._orth_mag_kwargs() == {"squash": 0.25}
+    small, huge = _step_move("squash", 1e-2, orthogonalize_clip=0.25), \
+                  _step_move("squash", 1e4, orthogonalize_clip=0.25)
+    assert huge < 0.26 and small < huge          # bounded, and still ordered
+    x = torch.randn(2, 12, 8)
+    state, S = mem.init_memory(2)
+    state, S = mem.update(x, state, S, 4)
+    assert torch.isfinite(mem.retrieve(state, mem.q_proj(x))).all()

@@ -72,6 +72,7 @@ Params = Dict[str, torch.Tensor]
 def newton_schulz5(
     G: torch.Tensor, steps: int = 5, eps: float = 1e-7,
     rescale: bool = True, clip: Optional[float] = None,
+    squash: Optional[float] = None,
 ) -> torch.Tensor:
     """Orthogonalise a batch of matrices toward the nearest semi-orthogonal one.
 
@@ -110,9 +111,24 @@ def newton_schulz5(
       gradient magnitude*. It is the only hard bound either paper has on the
       inner loop -- neither states it as one.
     * ``clip=c`` keeps the direction and caps the magnitude at ``c``:
-      ``N(S)/||N(S)|| * min(||S||, c)``. The compromise: ``theta_t``'s learned
-      scale still reaches the update below the cap, so the surprise mechanism
-      survives, but the tail is bounded.
+      ``N(S)/||N(S)|| * min(||S||, c)``. Bounded, but ``min`` has zero derivative
+      above ``c``, so every surprise past the cap is flattened to the same write.
+      Measured 2026-08-18: on the cascade path the cap binds essentially always
+      (``||S|| ~ 9e3`` against ``c = 1``), which discards ``theta_t`` as well.
+    * ``squash=c`` keeps the direction and passes the magnitude through
+      ``phi_c(x) = (2c/pi) arctan(pi x / 2c)`` -- Josep's proposal, and a strict
+      improvement on ``clip``. ``phi_c`` is monotone *everywhere*, so the surprise
+      hierarchy survives at every scale instead of only below a cap; it is bounded
+      by ``c``, so ``||M||`` has a fixed point at ``c/alpha`` and the feedback loop
+      is cut; and ``phi_c(x) ~ x`` for ``x << c``, so nothing changes in normal
+      operation. arctan rather than tanh on purpose: it saturates polynomially
+      (``phi' ~ c^2/x^2``) instead of exponentially, keeping ~1e6 times more
+      discriminability at 10c -- which is exactly where the surprising tokens are.
+
+      It is also a **homotopy between the two papers**: ``c -> inf`` gives
+      ``phi(x) = x`` (Titans, unbounded) and ``c -> 0`` gives ``phi(x) = c``
+      (ATLAS, magnitude discarded). Neither paper considers anything in between --
+      neither contains the words "stability", "divergence" or "clipping" at all.
     """
     if G.dim() < 3:
         return G
@@ -139,6 +155,8 @@ def newton_schulz5(
     mag = G.norm(dim=(-2, -1), keepdim=True)
     if clip is not None:
         mag = mag.clamp(max=clip)
+    if squash is not None:
+        mag = (2.0 * squash / math.pi) * torch.atan(mag * (math.pi / (2.0 * squash)))
     return X * mag
 
 
@@ -465,9 +483,9 @@ class NeuralMemory(nn.Module):
         # artefact reproduces bit-for-bit; the value is kept unnormalised on the
         # attribute for the same reason.
         mode = "rescale" if orthogonalize_momentum is True else orthogonalize_momentum
-        if mode not in (False, "rescale", "unit", "clip"):
+        if mode not in (False, "rescale", "unit", "clip", "squash"):
             raise ValueError("orthogonalize_momentum must be False, True, "
-                             "'rescale', 'unit' or 'clip'")
+                             "'rescale', 'unit', 'clip' or 'squash'")
         self._orth_mode = mode
         self.orthogonalize_clip = orthogonalize_clip
 
@@ -588,6 +606,21 @@ class NeuralMemory(nn.Module):
             return ((pred - v) ** 2).sum()
 
         return grad(loss, argnums=0)
+
+    def _orth_mag_kwargs(self) -> dict:
+        """Which magnitude convention ``newton_schulz5`` should apply.
+
+        ``orthogonalize_clip`` is the scale ``c`` for both bounded modes: the hard
+        cap under ``clip``, the saturation scale under ``squash``. Choose it from
+        the fixed point it implies, ``||M|| -> c/alpha``, not by feel -- both times
+        the default 1.0 has been wrong it was because it sat nowhere near the
+        typical deposit size (theta * sqrt(rank) ~ 0.24 under SANE).
+        """
+        if self._orth_mode == "clip":
+            return {"clip": self.orthogonalize_clip}
+        if self._orth_mode == "squash":
+            return {"squash": self.orthogonalize_clip}
+        return {}
 
     def _project(self, x: torch.Tensor):
         """Return k, v, q and gate scalars alpha, eta, theta ([B,N]).
@@ -737,11 +770,7 @@ class NeuralMemory(nn.Module):
                     # reservoir state, which has no weight-matrix structure to
                     # orthogonalise). Previously this branch ignored the flag
                     # entirely, so cascade+NS silently ran as plain cascade.
-                    s_read = newton_schulz5(
-                        s_read,
-                        clip=(self.orthogonalize_clip
-                              if self._orth_mode == "clip" else None),
-                    )
+                    s_read = newton_schulz5(s_read, **self._orth_mag_kwargs())
                 new_state[key] = self._bcast(1.0 - alpha_t, w) * w + s_read
             elif self._orth_mode == "unit":
                 # ATLAS Eq 32 / Table 1 literally: the learning rate multiplies the
@@ -770,11 +799,7 @@ class NeuralMemory(nn.Module):
                     # orthogonality structure to speak of; bias vectors ([B, out])
                     # pass through untouched (and are usually frozen anyway when
                     # update_bias=False).
-                    update = newton_schulz5(
-                        update,
-                        clip=(self.orthogonalize_clip
-                              if self._orth_mode == "clip" else None),
-                    )
+                    update = newton_schulz5(update, **self._orth_mag_kwargs())
                 new_state[key] = self._bcast(1.0 - alpha_t, w) * w + update
         return new_state, new_S
 
