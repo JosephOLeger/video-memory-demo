@@ -72,14 +72,30 @@ def weighted_gram_lambda_max(X: torch.Tensor, w: torch.Tensor) -> float:
 
     ``X`` is ``[m, d]`` (one row per token). Uses ``diag(sqrt(w)) X X^T diag(sqrt(w))``
     because ``m`` (the chunk, 8) is far smaller than ``d``.
+
+    Returns ``inf`` rather than raising when the state has already run away. This
+    module exists to *record* a divergence, so dying of one is the one failure it
+    cannot afford: ``eigvalsh`` raises ``_LinAlgError`` on a Gram matrix built from
+    ~1e19 activations (measured 2026-08-18, it killed a 40-minute trace and took
+    every row with it), and the squaring overflows to ``inf`` well before ``w1``
+    itself stops being finite.
     """
     Xd = X.detach().double()
+    if not torch.isfinite(Xd).all():
+        return float("inf")
     # chunk_weights builds on CPU (it is m-long and device-free by construction);
     # X comes off whatever device the model runs on, so align here rather than
     # threading a device argument through every caller.
     r = w.detach().to(Xd.device).double().clamp_min(0).sqrt().unsqueeze(-1)
     G = (r * Xd) @ (r * Xd).T
-    return float(2.0 * torch.linalg.eigvalsh(G).max())
+    if not torch.isfinite(G).all():
+        return float("inf")
+    try:
+        return float(2.0 * torch.linalg.eigvalsh(G).max())
+    except Exception:
+        # Ill-conditioned past the point of convergence. ||G||_F >= lambda_max for a
+        # PSD G, so the bound still shows the blow-up at the right order.
+        return float(2.0 * G.norm())
 
 
 def chunk_transfer(a: float, eta: float, m: int, theta: float,
@@ -96,7 +112,12 @@ def chunk_transfer(a: float, eta: float, m: int, theta: float,
     P_m = float(((a ** (m - j)) * (eta ** j)).sum())
     B = torch.tensor([[a ** m - theta * lam_w, P_m],
                       [-theta * lam_u, eta ** m]], dtype=torch.float64)
-    rho = float(torch.linalg.eigvals(B).abs().max())
+    if not torch.isfinite(B).all():
+        return B, float("inf")
+    try:
+        rho = float(torch.linalg.eigvals(B).abs().max())
+    except Exception:
+        rho = float("inf")
     return B, rho
 
 
@@ -180,11 +201,17 @@ def probe_chunk(mem, x_chunk: torch.Tensor, state: dict, S: Optional[dict] = Non
 
 
 @torch.no_grad()
-def trace_forward(mem, x: torch.Tensor, chunk_size: int, b: int = 0) -> list[dict]:
+def trace_forward(mem, x: torch.Tensor, chunk_size: int, b: int = 0,
+                  on_row=None) -> list[dict]:
     """Probe every chunk of one forward pass, threading the real recurrence.
 
     Returns one dict per chunk, in order, each tagged with ``chunk`` and the token
     index it starts at -- the within-forward trajectory the phenomenology needs.
+
+    ``on_row`` is called with each row as it is produced. A long trace is worth
+    hours of GPU time, so callers should use it to emit incrementally: rows only
+    returned at the end are rows lost to any crash, and this function's whole
+    subject matter is states that crash things.
     """
     k, v, q, alpha, eta, theta = mem._project(x)[:6]
     gamma = mem._gamma(x)
@@ -196,10 +223,17 @@ def trace_forward(mem, x: torch.Tensor, chunk_size: int, b: int = 0) -> list[dic
     out = []
     for c, start in enumerate(range(0, N, chunk_size)):
         end = min(start + chunk_size, N)
-        rec = probe_chunk(mem, x[:, start:end], state, S, b=b)
+        try:
+            rec = probe_chunk(mem, x[:, start:end], state, S, b=b)
+        except Exception as e:            # never lose the trace to the thing it probes
+            rec = {"finite": False, "note": f"probe failed: {type(e).__name__}: {e}"}
         rec["chunk"] = c
         rec["token"] = start
         out.append(rec)
+        if on_row is not None:
+            on_row(rec)
+        if not rec.get("finite", True):
+            break
         state, S, _ = mem._scan_chunked(
             k[:, start:end], v[:, start:end], alpha[:, start:end],
             eta[:, start:end], theta[:, start:end], state, S, end - start,
@@ -207,7 +241,10 @@ def trace_forward(mem, x: torch.Tensor, chunk_size: int, b: int = 0) -> list[dic
             x=x[:, start:end],
         )
         if not torch.isfinite(state["w1"]).all():
-            out.append({"chunk": c + 1, "token": end, "finite": False,
-                        "note": "state went non-finite in this chunk"})
+            rec = {"chunk": c + 1, "token": end, "finite": False,
+                   "note": "state went non-finite in this chunk"}
+            out.append(rec)
+            if on_row is not None:
+                on_row(rec)
             break
     return out

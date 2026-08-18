@@ -26,8 +26,13 @@ What to read in the output, in order:
   while and only then explode, the loop is a slow positive feedback; if they jump
   in one chunk, something upstream saturated.
 
-    python -m titans.graft.trace_stability --video clip.mp4 \\
-        --basis cache/qwen_l24_pca128.pt --frames 32 --out trace.json
+Use ``--videos`` for anything that claims a stability wall: EgoLife's clips are
+consecutive 30 s slices, so a sorted glob is one continuous recording. ``--repeat``
+tiles a single clip instead, which makes the probe *easier* -- the memory learns the
+loop and the driving gradient dies -- so a plateau measured that way proves nothing.
+
+    python -m titans.graft.trace_stability --videos '<egolife>/**/*.mp4' \\
+        --basis cache/qwen_l24_pca128.pt --frames 64 --chunk 8 --out trace.json
 """
 
 from __future__ import annotations
@@ -43,9 +48,20 @@ from .qwen import default_layer, find_decoder_layers
 
 
 @torch.no_grad()
-def host_activations(model, processor, path: str, layer: int, *, num_frames: int,
+def host_activations(model, processor, paths, layer: int, *, num_frames: int,
                      max_side: int, prompt: str, device: str) -> torch.Tensor:
-    """Layer-``layer`` hidden states ``[1, N, d_model]`` for one real clip."""
+    """Layer-``layer`` hidden states ``[1, N, d_model]`` over ``paths``, concatenated.
+
+    EgoLife's clips are consecutive 30 s slices of one recording, so handing this a
+    sorted glob gives a **genuinely continuous, non-repeating** stream -- which is the
+    only kind that can find a stability wall. Tiling one clip (``--repeat``) does the
+    opposite of what it looks like: at period P the memory can *learn the loop*, the
+    associative loss collapses, and nothing is left to drive the state anywhere. A
+    plateau measured that way proves nothing.
+
+    Kept on the CPU while collecting so the host and the whole stream never have to
+    fit on the card at the same time.
+    """
     from ..worldmodel.data import load_video_frames
     from .fit_basis import resize_frames, video_inputs
 
@@ -56,22 +72,40 @@ def host_activations(model, processor, path: str, layer: int, *, num_frames: int
         grabbed.append((out[0] if isinstance(out, tuple) else out).detach())
 
     handle = layers[layer].register_forward_hook(hook)
+    chunks = []
     try:
-        frames = resize_frames(load_video_frames(path, num_frames=num_frames), max_side)
-        inputs = video_inputs(processor, frames, prompt, 1.0)
-        inputs = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in inputs.items()}
-        model(**inputs)
+        for i, path in enumerate(paths):
+            grabbed.clear()
+            try:
+                frames = resize_frames(load_video_frames(path, num_frames=num_frames),
+                                       max_side)
+                inputs = video_inputs(processor, frames, prompt, 1.0)
+                inputs = {k: (v.to(device) if hasattr(v, "to") else v)
+                          for k, v in inputs.items()}
+                model(**inputs)
+            except Exception as e:            # one bad file must not kill the sweep
+                print(f"  skip {path.split('/')[-1]}: {type(e).__name__}", flush=True)
+                continue
+            if grabbed:
+                chunks.append(grabbed[0].float().cpu())
+                print(f"  [{i + 1}/{len(paths)}] {path.split('/')[-1]}: "
+                      f"{chunks[-1].shape[1]} tokens", flush=True)
     finally:
         handle.remove()
-    if not grabbed:
+    if not chunks:
         raise SystemExit("the forward hook never fired -- wrong layer?")
-    return grabbed[0].float()
+    return torch.cat(chunks, dim=1)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", default="Qwen/Qwen2.5-VL-3B-Instruct")
-    ap.add_argument("--video", required=True)
+    ap.add_argument("--video", default=None, help="one clip")
+    ap.add_argument("--videos", default=None,
+                    help="glob over .mp4; the clips are concatenated in name order. "
+                         "EgoLife's are consecutive 30 s slices, so this is a real "
+                         "continuous stream -- the only input that can find a wall.")
+    ap.add_argument("--num-videos", type=int, default=40, dest="num_videos")
     ap.add_argument("--basis", default=None)
     ap.add_argument("--layer", type=int, default=None)
     ap.add_argument("--d-mem", type=int, default=128, dest="d_mem")
@@ -79,12 +113,17 @@ def main() -> None:
     ap.add_argument("--frames", type=int, default=32)
     ap.add_argument("--max-side", type=int, default=256, dest="max_side")
     ap.add_argument("--repeat", type=int, default=1,
-                    help="tile the activations this many times, to reach a write "
-                         "count past the wall with one clip's worth of VRAM")
+                    help="tile the activations this many times. WARNING: this makes "
+                         "the probe EASIER, not harder -- a periodic stream lets the "
+                         "memory learn the loop and the driving gradient dies. Use "
+                         "--videos for a real answer; keep this for reaching write "
+                         "counts past the available content, and say so.")
     ap.add_argument("--prompt", default="Describe what happens in this video.")
     ap.add_argument("--override", action="append", default=[], metavar="K=V",
                     help="override a NeuralMemory kwarg on top of SANE, e.g. "
                          "--override normalize_hidden=True --override eta_init=0.9")
+    ap.add_argument("--print-every", type=int, default=1, dest="print_every",
+                    help="thin the streamed table; the breaking row always prints")
     ap.add_argument("--guard-gb", type=float, default=11.0, dest="guard_gb")
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--device", default="cuda")
@@ -108,7 +147,17 @@ def main() -> None:
     d_model = int(model.config.text_config.hidden_size
                   if hasattr(model.config, "text_config") else model.config.hidden_size)
 
-    h = host_activations(model, processor, a.video, site, num_frames=a.frames,
+    if bool(a.videos) == bool(a.video):
+        raise SystemExit("pass exactly one of --video / --videos")
+    if a.videos:
+        import glob as globmod
+        paths = sorted(globmod.glob(a.videos, recursive=True))[:a.num_videos]
+        if not paths:
+            raise SystemExit(f"no video matched {a.videos}")
+        print(f"{len(paths)} clips, flux continu", flush=True)
+    else:
+        paths = [a.video]
+    h = host_activations(model, processor, paths, site, num_frames=a.frames,
                          max_side=a.max_side, prompt=a.prompt, device=a.device)
     del model
     torch.cuda.empty_cache()
@@ -133,22 +182,31 @@ def main() -> None:
         print(f"overrides: {over}", flush=True)
     branch = MemoryBranch(d_model, a.d_mem, chunk_size=a.chunk, down_pca=pca,
                           **over).to(a.device)
-    z = branch.down(h)
+    z = branch.down(h.to(a.device))
+    del h                          # 2048-wide and the largest thing here; z is 128-wide
+    torch.cuda.empty_cache()
     print(f"memory input z: std {float(z.std()):.3g}, "
           f"max |z| {float(z.abs().max()):.3g}", flush=True)
 
-    rows = trace_forward(branch.memory, z, a.chunk)
     keys = ("chunk", "token", "theta", "eta", "alpha", "kappa", "lambda_hidden_w",
             "theta_lambda_hidden", "rho_hidden", "h0_norm_max", "w1_fro",
             "w1_spec", "S_norm", "finite")
     print("\n" + "  ".join(f"{k:>10.10}" for k in keys), flush=True)
-    for r in rows:
+
+    def show(r, every=a.print_every):
+        # Printed as it is produced, not at the end: a long trace is hours of GPU
+        # time and a crash used to take every row with it. Thinned so a 13000-chunk
+        # run stays readable, but never thin away the row that broke.
+        if r["chunk"] % every and r.get("finite", True):
+            return
         cells = []
         for k in keys:
             v = r.get(k)
             cells.append(f"{'':>10}" if v is None else
                          (f"{v:>10}" if isinstance(v, (int, bool)) else f"{v:>10.3g}"))
-        print("  ".join(cells), flush=True)
+        print("  ".join(cells) + ("  " + r["note"] if r.get("note") else ""), flush=True)
+
+    rows = trace_forward(branch.memory, z, a.chunk, on_row=show)
 
     finite = [r for r in rows if r.get("finite")]
     print(f"\n{len(finite)}/{len(rows)} chunks finis "
