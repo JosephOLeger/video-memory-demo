@@ -38,6 +38,7 @@ def build_cfg(config: str = "sane_ns", *, eta_init: Optional[float] = None,
               theta_scale: Optional[float] = None,
               normalize_hidden: Optional[float] = None,
               muon: Optional[str] = None,
+              alpha_init: Optional[float] = None,
               cascade: bool = False, reservoirs: int = 6, leak: str = "none",
               leak_rate: float = 1.0, readout: str = "gated",
               selective: bool = False, gate: str = "surprise",
@@ -79,6 +80,14 @@ def build_cfg(config: str = "sane_ns", *, eta_init: Optional[float] = None,
         cfg["theta_scale"] = theta_scale
     if normalize_hidden is not None:
         cfg["normalize_hidden"] = normalize_hidden
+    if alpha_init is not None:
+        # The forget gate's resting value, and under a bounded step (`muon="unit"`)
+        # the ONLY thing that sets how far back the memory reaches: every deposit is
+        # then the same size, so theta cancels out of the trace-to-interference ratio
+        # and retention is governed by alpha alone. Closed form for a target recall
+        # distance d writes: alpha* = 1 - sqrt(d/(1+d)) ~ 1/(2d), giving a half-life
+        # of 1.39*d. Derived and checked numerically 2026-08-18.
+        cfg["alpha_init"] = alpha_init
     if muon is not None:
         # Which magnitude convention Newton-Schulz uses. sane_ns already turns NS
         # on in "rescale" mode, which restores ||G|| and therefore bounds nothing;

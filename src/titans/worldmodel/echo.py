@@ -106,6 +106,7 @@ def build_cfg(a) -> dict:
         theta_scale=getattr(a, "theta_scale", None),
         normalize_hidden=getattr(a, "normalize_hidden", None),
         muon=getattr(a, "muon", None),
+        alpha_init=getattr(a, "alpha_init", None),
         cascade=a.cascade, reservoirs=a.reservoirs, leak=a.leak,
         leak_rate=getattr(a, "leak_rate", 1.0), readout=a.readout,
         selective=a.selective, gate=a.gate, topology=a.topology,
@@ -337,6 +338,10 @@ def build_parser() -> argparse.ArgumentParser:
                     dest="normalize_hidden",
                     help="target L2 norm for the memory's hidden activation h_0 "
                          "(bounds lambda_max(H_GN^(W1)) = 2||h_0||^2); unset = off")
+    ap.add_argument("--alpha-init", type=float, default=None, dest="alpha_init",
+                    help="forget-gate resting value. For a target recall distance of "
+                         "d writes the closed form is alpha ~ 1/(2d) (half-life 1.39d); "
+                         "under --muon unit this is the only knob that sets reach.")
     ap.add_argument("--muon", default=None, choices=["rescale", "unit", "clip"],
                     help="Newton-Schulz magnitude convention. sane_ns defaults to "
                          "'rescale' (restores ||G||, bounds nothing); 'unit' is "
