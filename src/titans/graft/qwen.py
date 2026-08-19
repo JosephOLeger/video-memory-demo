@@ -85,6 +85,11 @@ class GraftedLayer(nn.Module):
         # Build it in fp32 (the default) and the bf16 host is cast on the way in.
         self.branch_dtype = branch_dtype or next(branch.parameters()).dtype
         self.enabled = True
+        # Reading without writing. The answer segment of a distillation step must
+        # retrieve from the state the context built and leave it alone: writing the
+        # question into memory gives the loss a second gradient path and changes the
+        # state the phase before it produced. Set False around that segment.
+        self.writes_enabled = True
         self.reset()
 
     def reset(self) -> None:
@@ -98,8 +103,12 @@ class GraftedLayer(nn.Module):
             return out
         h = out[0] if isinstance(out, tuple) else out
         state, S = self.carry
+        mask = None
+        if not self.writes_enabled:
+            mask = torch.zeros(h.shape[1], dtype=torch.bool, device=h.device)
         d, state, S = self.branch.delta(h.to(self.branch_dtype), state, S,
-                                        token_offset=self.token_offset)
+                                        token_offset=self.token_offset,
+                                        write_mask=mask)
         self.carry = (state, S)
         self.token_offset += h.shape[1]
         # Added in the host's dtype: a zero delta must leave `h` untouched bit for

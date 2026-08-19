@@ -151,17 +151,21 @@ def per_token_grad_norms(mem, state: dict, k: torch.Tensor, v: torch.Tensor,
     -- the probe's job is to survive what it measures.
     """
     from torch.func import vmap
-    try:
-        gf = mem._grad_fn()
-        G = vmap(vmap(gf, in_dims=(None, 0, 0)), in_dims=(0, 0, 0))(state, k, v)
-    except Exception:
-        return None
-    per = None
-    for g in G.values():
-        flat = g[b].reshape(g.shape[1], -1).double()
-        sq = flat.pow(2).sum(-1)
-        per = sq if per is None else per + sq
-    return None if per is None else per.sqrt()
+    # Under no_grad and freed eagerly: this is a *second* full chunk gradient on top
+    # of the one the scan already takes, and a long trace ran out of VRAM inside the
+    # probe once -- which the trace then reported as a stability wall it was not.
+    with torch.no_grad():
+        try:
+            gf = mem._grad_fn()
+            G = vmap(vmap(gf, in_dims=(None, 0, 0)), in_dims=(0, 0, 0))(state, k, v)
+        except Exception:
+            return None
+        per = None
+        for g in G.values():
+            per_g = g[b].reshape(g.shape[1], -1).double().pow(2).sum(-1)
+            per = per_g if per is None else per + per_g
+        del G
+        return None if per is None else per.sqrt()
 
 
 def probe_chunk(mem, x_chunk: torch.Tensor, state: dict, S: Optional[dict] = None,
