@@ -124,8 +124,13 @@ def forced_inputs(processor, frames, probe: str, y: torch.Tensor, fps: float,
 
 
 def forced_loss(model, inputs: dict, n_prompt: int, y: torch.Tensor) -> torch.Tensor:
-    """Cross-entropy of ``y`` given the prompt. Position ``n_prompt-1`` predicts ``y[0]``."""
-    logits = model(**inputs).logits
+    """Cross-entropy of ``y`` given the prompt. Position ``n_prompt-1`` predicts ``y[0]``.
+
+    ``use_cache=False`` is not an optimisation: the grafted layer advances a
+    recurrence in its forward, so anything that replays or reuses a forward makes
+    the memory step twice.
+    """
+    logits = model(**inputs, use_cache=False).logits
     pred = logits[:, n_prompt - 1: n_prompt - 1 + y.shape[0]].float()
     return F.cross_entropy(pred.reshape(-1, pred.shape[-1]),
                            y.to(pred.device).reshape(-1))
@@ -278,13 +283,18 @@ def main() -> None:
     opt = torch.optim.AdamW(params, lr=a.lr, weight_decay=0.01)
 
     def lr_at(step):
-        if step < a.warmup:
+        if a.warmup and step < a.warmup:
             return a.lr * (step + 1) / a.warmup
         t = (step - a.warmup) / max(1, a.steps - a.warmup)
         return a.lr * 0.5 * (1 + math.cos(math.pi * min(1.0, t)))
 
-    def one(win, train: bool):
-        """Loss of the student on one window. Returns (mem, short, n_writes)."""
+    def one(win, floor: bool = False):
+        """Loss of the student on one window. Returns ``(mem, short_or_None, n_writes)``.
+
+        ``floor`` runs the *same* input through the branch-disabled model, i.e. the
+        untouched host on the student's clip alone. It is a second full forward, so
+        it is only paid where it is read -- at eval, and on the printed steps.
+        """
         lo, hi = win
         y = tgt[win]
         s_lo = hi - a.student_clips
@@ -295,11 +305,13 @@ def main() -> None:
         state, S, nw = write_context(branch, z, tok_lo, tok_hi, a.write_stride, a.device)
         wrapper.carry, wrapper.token_offset = (state, S), 0
         loss = forced_loss(model, inputs, n_prompt, y)
-        with torch.no_grad():                              # le plancher exact
-            wrapper.enabled = False
-            short = forced_loss(model, inputs, n_prompt, y)
-            wrapper.enabled = True
-        return loss, float(short), nw
+        short = None
+        if floor:
+            with torch.no_grad():
+                wrapper.enabled = False
+                short = float(forced_loss(model, inputs, n_prompt, y))
+                wrapper.enabled = True
+        return loss, short, nw
 
     hist, best = [], float("inf")
     rng = torch.Generator().manual_seed(a.seed)
@@ -308,8 +320,9 @@ def main() -> None:
         for g in opt.param_groups:
             g["lr"] = lr_at(step)
         win = train_w[int(torch.randint(len(train_w), (1,), generator=rng))]
+        show = step % 20 == 0
         try:
-            loss, short, nw = one(win, True)
+            loss, short, nw = one(win, floor=show)
         except torch.OutOfMemoryError:
             torch.cuda.empty_cache(); opt.zero_grad(set_to_none=True); continue
         opt.zero_grad(set_to_none=True)
@@ -317,7 +330,7 @@ def main() -> None:
         gn = torch.nn.utils.clip_grad_norm_(params, a.clip_grad)
         opt.step()
 
-        if step % 20 == 0:
+        if show:
             print(f"  {step:5d}  loss {float(loss):.4f}  sans-memoire {short:.4f}  "
                   f"|g| {float(gn):.3f}  ecritures {nw}  "
                   f"{(time.time() - t0) / (step + 1):.2f} s/pas", flush=True)
@@ -328,7 +341,7 @@ def main() -> None:
                 ms, ss = [], []
                 for w in val_w[:a.eval_n]:
                     try:
-                        l, s, _ = one(w, False)
+                        l, s, _ = one(w, floor=True)
                     except torch.OutOfMemoryError:
                         torch.cuda.empty_cache(); continue
                     ms.append(float(l)); ss.append(s)
