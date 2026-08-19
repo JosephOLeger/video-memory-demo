@@ -36,6 +36,7 @@ FORMAT = 1
 
 def build_cfg(config: str = "sane_ns", *, eta_init: Optional[float] = None,
               theta_scale: Optional[float] = None,
+              theta_gate: Optional[str] = None,
               normalize_hidden: Optional[float] = None,
               muon: Optional[str] = None,
               muon_scale: Optional[float] = None,
@@ -79,6 +80,8 @@ def build_cfg(config: str = "sane_ns", *, eta_init: Optional[float] = None,
         cfg["eta_init"] = eta_init
     if theta_scale is not None:
         cfg["theta_scale"] = theta_scale
+    if theta_gate is not None:
+        cfg["theta_gate"] = theta_gate
     if normalize_hidden is not None:
         cfg["normalize_hidden"] = normalize_hidden
     if alpha_init is not None:
@@ -179,6 +182,8 @@ def add_config_flags(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     ap.add_argument("--config", default="sane_ns", choices=sorted(CONFIGS))
     ap.add_argument("--eta-init", type=float, default=None, dest="eta_init")
     ap.add_argument("--theta-scale", type=float, default=None, dest="theta_scale")
+    ap.add_argument("--theta-gate", default=None, dest="theta_gate",
+                    choices=["softplus", "sigmoid"])
     ap.add_argument("--normalize-hidden", type=float, default=None, dest="normalize_hidden")
     ap.add_argument("--cascade", action="store_true")
     ap.add_argument("--reservoirs", type=int, default=6)
@@ -206,6 +211,7 @@ def add_config_flags(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
 def cfg_from_args(a) -> dict:
     return build_cfg(a.config, eta_init=a.eta_init, theta_scale=a.theta_scale,
+                     theta_gate=getattr(a, "theta_gate", None),
                      normalize_hidden=a.normalize_hidden, cascade=a.cascade,
                      reservoirs=a.reservoirs, leak=a.leak, leak_rate=a.leak_rate,
                      readout=a.readout, selective=a.selective, gate=a.gate,

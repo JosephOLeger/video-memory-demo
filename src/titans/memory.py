@@ -381,6 +381,7 @@ class NeuralMemory(nn.Module):
         hidden_dim: Optional[int] = None,
         num_layers: int = 2,
         theta_scale: float = 1.0,
+        theta_gate: str = "softplus",
         window_size: int = 1,
         window_normalize: bool = False,
         use_cascade_momentum: bool = False,
@@ -451,6 +452,9 @@ class NeuralMemory(nn.Module):
         self.normalize_hidden = normalize_hidden
         self.dim = dim
         self.theta_scale = theta_scale
+        if theta_gate not in ("softplus", "sigmoid"):
+            raise ValueError("theta_gate must be 'softplus' or 'sigmoid'")
+        self.theta_gate = theta_gate
         # ATLAS phi: polynomial feature map on keys and queries (degree 1 = the
         # identity map, i.e. plain Titans up to a learned unit-init scale).
         self.feature_degree = feature_degree
@@ -706,8 +710,31 @@ class NeuralMemory(nn.Module):
         q = self.q_proj(x)
         alpha = torch.sigmoid(self.alpha_head(x)).squeeze(-1)
         eta = torch.sigmoid(self.eta_head(x)).squeeze(-1)
-        theta = F.softplus(self.theta_head(x)).squeeze(-1) * self.theta_scale
+        theta = self._theta(self.theta_head(x)).squeeze(-1) * self.theta_scale
         return k, v, q, alpha, eta, theta
+
+    #: ``2 * softplus(0)``, so the sigmoid gate starts at exactly the softplus gate's
+    #: initial value and the two are bit-identical at step 0.
+    _SIGMOID_GAIN = 2.0 * math.log(2.0)
+
+    def _theta(self, h: torch.Tensor) -> torch.Tensor:
+        """The inner learning rate's gate, bounded or not.
+
+        ``softplus`` is Titans' own and has **no upper bound**. Measured on five
+        trained seeds, that costs: the dispersion of ``theta_t`` over tokens,
+        ``CV(theta)``, predicts ``memory_gain`` at ``r = -0.99`` across ten models
+        and ``r = -0.95`` *within* each arm -- a wildly swinging inner learning rate
+        is the single best predictor of a bad memory we have measured.
+
+        ``sigmoid`` caps it at ``2 log 2 ~ 1.386`` times ``theta_scale``, i.e. twice
+        its own initial value, and is chosen so that at initialisation the two gates
+        agree exactly. It is the causal test of that correlation: the correlation
+        alone is equally consistent with a good memory *producing* smooth gradients,
+        so the dispersion has to be imposed rather than observed.
+        """
+        if self.theta_gate == "sigmoid":
+            return self._SIGMOID_GAIN * torch.sigmoid(h)
+        return F.softplus(h)
 
     def _norm_qk(self, z: torch.Tensor) -> torch.Tensor:
         """Normalise keys/queries; see the note in ``__init__`` on lambda_max."""

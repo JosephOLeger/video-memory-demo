@@ -104,6 +104,7 @@ def build_cfg(a) -> dict:
         "sane_ns",
         eta_init=getattr(a, "eta_init", None),
         theta_scale=getattr(a, "theta_scale", None),
+        theta_gate=getattr(a, "theta_gate", None),
         normalize_hidden=getattr(a, "normalize_hidden", None),
         muon=getattr(a, "muon", None),
         muon_scale=getattr(a, "muon_scale", None),
@@ -282,6 +283,17 @@ def run(a, device) -> dict:
                 bptt_window=getattr(a, "bptt_window", None),
                 normalize_hidden=getattr(a, "normalize_hidden", None),
                 theta_scale=cfg.get("theta_scale"),
+                theta_gate=cfg.get("theta_gate"),
+                # The magnitude convention, recorded from the *config actually
+                # built* rather than from the flag. Two runs that differed only in
+                # this were indistinguishable field for field in their result files,
+                # so a 2.3x gap in memory_gain could not be attributed to anything
+                # from the JSON alone -- which is exactly what a paper cannot afford.
+                muon=cfg.get("memory_orthogonalize_momentum"),
+                muon_scale=cfg.get("memory_orthogonalize_clip"),
+                alpha_init=cfg.get("alpha_init"),
+                normalize_qk=cfg.get("normalize_qk"),
+                normalize_output=cfg.get("normalize_output"),
                 params=cost["params"])
 
 
@@ -331,6 +343,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--memory-chunk", type=int, default=None, dest="memory_chunk_size")
     ap.add_argument("--heads", type=int, default=None, dest="num_heads",
                     help="attention heads; the block's default is 1 (head_dim = dim)")
+    ap.add_argument("--theta-gate", default=None, dest="theta_gate",
+                    choices=["softplus", "sigmoid"],
+                    help="gate for the inner learning rate. Titans uses an unbounded\n"
+                         "softplus; 'sigmoid' caps theta at 2*log2 ~ 1.39 times\n"
+                         "theta_scale and is bit-identical at init. CV(theta) predicts\n"
+                         "memory_gain at r = -0.99 over ten trained models.")
     ap.add_argument("--theta-scale", type=float, default=None, dest="theta_scale",
                     help="inner-step scale; 0.01 fixes the NaN divergence, 0.03 is SANE's default")
     ap.add_argument("--eta-init", type=float, default=None, dest="eta_init",

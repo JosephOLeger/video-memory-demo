@@ -110,16 +110,40 @@ def teacher_continuation(model, processor, frames, probe: str, *, fps: float,
 # --------------------------------------------------------------------------- #
 # student
 # --------------------------------------------------------------------------- #
+#: Value to pad each per-token tensor with when ``y`` is appended. ``y`` is plain
+#: text, so it attends (1) and is not a multimodal placeholder (0). Anything the
+#: processor grows in the future defaults to 0 and trips the assertion below if
+#: that is wrong, rather than being silently left short.
+_PAD_PER_TOKEN = {"attention_mask": 1, "mm_token_type_ids": 0, "token_type_ids": 0}
+
+
 def forced_inputs(processor, frames, probe: str, y: torch.Tensor, fps: float,
                   device: str):
-    """``[prompt | y]`` teacher-forced, plus the index where ``y`` starts."""
+    """``[prompt | y]`` teacher-forced, plus the index where ``y`` starts.
+
+    Every tensor the processor emits **per token** has to grow with ``input_ids``,
+    not just the attention mask. Qwen2.5-VL also returns ``mm_token_type_ids``, and
+    leaving it at the prompt's length makes ``get_rope_index`` index a 684-long
+    tensor with a 706-long mask -- an ``IndexError`` a hundred lines deep in
+    ``transformers``, with nothing in it naming the cause.
+    """
     from .fit_basis import video_inputs
     inp = video_inputs(processor, frames, probe, fps)
     inp = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in inp.items()}
-    n_prompt = inp["input_ids"].shape[1]
-    inp["input_ids"] = torch.cat([inp["input_ids"], y.to(device).unsqueeze(0)], dim=1)
-    if "attention_mask" in inp:
-        inp["attention_mask"] = torch.ones_like(inp["input_ids"])
+    n_prompt = int(inp["input_ids"].shape[1])
+    m = int(y.shape[0])
+    for k, v in list(inp.items()):
+        if not torch.is_tensor(v) or v.dim() != 2 or v.shape[1] != n_prompt:
+            continue                       # pixels / grids are not per text token
+        if k == "input_ids":
+            inp[k] = torch.cat([v, y.to(device).unsqueeze(0)], dim=1)
+        else:
+            fill = _PAD_PER_TOKEN.get(k, 0)
+            inp[k] = torch.cat([v, torch.full((1, m), fill, dtype=v.dtype,
+                                              device=v.device)], dim=1)
+    grown = {k: tuple(v.shape) for k, v in inp.items()
+             if torch.is_tensor(v) and v.dim() == 2 and v.shape[1] == n_prompt}
+    assert not grown, f"tenseurs par token restes a la longueur du prompt: {grown}"
     return inp, n_prompt
 
 
