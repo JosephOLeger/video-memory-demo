@@ -136,6 +136,34 @@ def hidden_activations(state: dict, k: torch.Tensor, activation: str = "silu",
 
 
 @torch.no_grad()
+def per_token_grad_norms(mem, state: dict, k: torch.Tensor, v: torch.Tensor,
+                         b: int = 0) -> Optional[torch.Tensor]:
+    """``||grad l_t||`` for each token of the chunk, at the chunk-start weights.
+
+    This is the *instantaneous* surprise -- the quantity Titans' magnitude actually
+    measures. It is deliberately reported next to ``S_norm``, because the two are
+    not interchangeable and the difference decides where a magnitude convention can
+    put a nonlinearity: with ``eta = 0.995`` the momentum averages ~``1/(1-eta)`` =
+    200 tokens, so ``||S_t||`` is a heavily smoothed version of this. A saturating
+    function of ``||S||`` can only transmit the smoothed signal.
+
+    Returns ``None`` rather than raising if the functional gradient cannot be taken
+    -- the probe's job is to survive what it measures.
+    """
+    from torch.func import vmap
+    try:
+        gf = mem._grad_fn()
+        G = vmap(vmap(gf, in_dims=(None, 0, 0)), in_dims=(0, 0, 0))(state, k, v)
+    except Exception:
+        return None
+    per = None
+    for g in G.values():
+        flat = g[b].reshape(g.shape[1], -1).double()
+        sq = flat.pow(2).sum(-1)
+        per = sq if per is None else per + sq
+    return None if per is None else per.sqrt()
+
+
 def probe_chunk(mem, x_chunk: torch.Tensor, state: dict, S: Optional[dict] = None,
                 b: int = 0) -> dict:
     """Every stability quantity for one chunk, at the state it starts from.
@@ -182,6 +210,9 @@ def probe_chunk(mem, x_chunk: torch.Tensor, state: dict, S: Optional[dict] = Non
         # the quantity the theory says governs the last layer's block
         "h0_norm_max": float(H0.norm(dim=-1).max()),
         "h0_norm_mean": float(H0.norm(dim=-1).mean()),
+        # the instantaneous surprise, and how much it varies *within* one chunk --
+        # the dispersion any magnitude convention could in principle transmit
+        **_grad_stats(mem, state, k, v, b),
         "k_norm_mean": float(K.norm(dim=-1).mean()),
         # the sufficient condition from the note: ||W0||_2 + ||b0||_2 < threshold
         "w0_spec": float(torch.linalg.matrix_norm(w0, 2)),
@@ -201,6 +232,15 @@ def probe_chunk(mem, x_chunk: torch.Tensor, state: dict, S: Optional[dict] = Non
 
 
 @torch.no_grad()
+def _grad_stats(mem, state: dict, k: torch.Tensor, v: torch.Tensor, b: int) -> dict:
+    gn = per_token_grad_norms(mem, state, k, v, b)
+    if gn is None or not torch.isfinite(gn).all():
+        return {"grad_norm_mean": None, "grad_norm_max": None, "grad_cv_in_chunk": None}
+    mu = float(gn.mean())
+    return {"grad_norm_mean": mu, "grad_norm_max": float(gn.max()),
+            "grad_cv_in_chunk": float(gn.std(unbiased=False) / mu) if mu else None}
+
+
 def trace_forward(mem, x: torch.Tensor, chunk_size: int, b: int = 0,
                   on_row=None) -> list[dict]:
     """Probe every chunk of one forward pass, threading the real recurrence.

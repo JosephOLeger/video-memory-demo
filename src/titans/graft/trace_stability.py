@@ -190,7 +190,7 @@ def main() -> None:
 
     keys = ("chunk", "token", "theta", "eta", "alpha", "kappa", "lambda_hidden_w",
             "theta_lambda_hidden", "rho_hidden", "h0_norm_max", "w1_fro",
-            "w1_spec", "S_norm", "finite")
+            "w1_spec", "S_norm", "grad_norm_mean", "grad_cv_in_chunk", "finite")
     print("\n" + "  ".join(f"{k:>10.10}" for k in keys), flush=True)
 
     def show(r, every=a.print_every):
