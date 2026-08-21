@@ -176,6 +176,22 @@ def main() -> None:
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--out", default=None)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--alpha-override", type=float, default=None,
+                    dest="alpha_override",
+                    help="pin the forget gate to this constant at read time, "
+                         "bypassing the learned alpha_head. The reach law "
+                         "alpha* ~ 1/(2d) is about a constant test-time alpha, "
+                         "and training erases alpha_init (all inits end at "
+                         "realised ~1e-4), so the law is probed by overriding "
+                         "alpha on frozen artifacts, not by initialising it.")
+    ap.add_argument("--theta-override", type=float, default=None,
+                    dest="theta_override",
+                    help="pin the write step to this constant at read time. "
+                         "0.0 disables writing entirely: if mem_effect survives "
+                         "it, the memory's measured benefit does not come from "
+                         "test-time writes -- the discriminating probe for "
+                         "artefacts whose margin audit reads theta_t ~ 1e-6 "
+                         "while mem_effect stays positive.")
     a = ap.parse_args()
 
     va, meta = load_latent_cache(a.val)
@@ -189,12 +205,20 @@ def main() -> None:
     for p in sorted(globmod.glob(a.frozen)) or [a.frozen]:
         try:
             model, info = load_frozen(p, a.device)
+            if a.alpha_override is not None:
+                for b in model.blocks:
+                    b.memory.alpha_override = a.alpha_override
+            if a.theta_override is not None:
+                for b in model.blocks:
+                    b.memory.theta_override = a.theta_override
             curve = retention_curve(model, va, T, a.horizon, gaps, a.batch)
             rec = {"arm": arm_of(p), "file": os.path.basename(p),
                    "cascade": bool(info["cfg"].get("memory_use_cascade")),
                    "leak": info["cfg"].get("cascade_leak"),
                    "leak_rate": info["cfg"].get("cascade_leak_rate"),
                    "eta_init": info["cfg"].get("eta_init"),
+                   "alpha_override": a.alpha_override,
+                   "theta_override": a.theta_override,
                    "T": T, "horizon": a.horizon, "n_eval": int(va.shape[0]),
                    "curve": curve}
         except Exception as e:

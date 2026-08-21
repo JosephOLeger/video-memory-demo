@@ -7,6 +7,8 @@ actually hold anything out, and does the answer segment leave the state alone.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 import torch.nn as nn
@@ -153,3 +155,93 @@ def test_unit_is_what_the_loop_defaults_to():
     z = torch.randn(64, 16)
     state, _, _ = write_context(br, z, 0, 64, stride=2, device="cpu")
     assert torch.isfinite(state["w1"]).all()
+
+
+# --------------------------------------------------------------------------- #
+# plusieurs jours: la greffe surapprenait sur 184 fenetres vues 13.6 fois. Sept
+# jours d'EgoLife portent le corpus a ~1550 fenetres. Ce qui doit survivre au
+# passage multi-jours, c'est la separation train/val.
+# --------------------------------------------------------------------------- #
+
+
+def test_windows_are_tagged_by_day_and_never_span_two():
+    """Une fenetre appartient a un jour. Rien ne doit pouvoir la faire chevaucher
+    la frontiere : les jours sont des enregistrements distincts, pas un flux."""
+    days = [10, 6]
+    wins = [(d, lo, hi) for d, n in enumerate(days)
+            for lo, hi in windows(n, span=4, hop=2)]
+    assert all(len(w) == 3 for w in wins)
+    for d, n in enumerate(days):
+        sub = [w for w in wins if w[0] == d]
+        assert sub and all(hi <= n for _, _, hi in sub)
+
+
+def test_validation_tail_is_taken_per_day():
+    """La propriete qui porte toute la mesure.
+
+    Les fenetres consecutives se chevauchent de ``span - hop`` clips, donc une
+    queue prise sur la liste concatenee mettrait la fin du dernier jour en
+    validation et *tout* le reste en entrainement -- les six premiers jours
+    n'auraient aucune fenetre tenue a l'ecart, et la courbe de validation
+    mesurerait un seul jour.
+    """
+    wins = [(d, lo, hi) for d in range(3)
+            for lo, hi in windows(100, span=12, hop=4)]
+    tr, va = split_windows(wins, val_frac=0.1)
+    assert sorted(tr + va) == sorted(wins)          # rien perdu, rien duplique
+    # chaque jour contribue a la validation
+    assert {w[0] for w in va} == {0, 1, 2}
+    # et dans chaque jour, la validation est bien la QUEUE
+    for d in range(3):
+        t = [w[1] for w in tr if w[0] == d]
+        v = [w[1] for w in va if w[0] == d]
+        assert t and v and max(t) < min(v)
+
+
+def test_no_training_window_overlaps_a_validation_window():
+    """Ce que la queue contigue existe pour garantir, verifie en clips."""
+    span, hop = 12, 4
+    wins = [(d, lo, hi) for d in range(2)
+            for lo, hi in windows(80, span=span, hop=hop)]
+    tr, va = split_windows(wins, val_frac=0.1,
+                           embargo=math.ceil(span / hop) - 1)
+    for dv, lv, hv in va:
+        for dt, lt, ht in tr:
+            if dt != dv:
+                continue
+            assert ht <= lv or hv <= lt, f"chevauchement {(dt,lt,ht)} / {(dv,lv,hv)}"
+
+
+def test_a_single_day_still_behaves_as_before():
+    """Retro-compatibilite : un seul cache doit donner exactement l'ancien decoupage."""
+    plain = windows(50, span=12, hop=4)
+    tagged = [(0, lo, hi) for lo, hi in plain]
+    tr_old, va_old = split_windows(plain)
+    tr_new, va_new = split_windows(tagged)
+    assert [(lo, hi) for _, lo, hi in tr_new] == tr_old
+    assert [(lo, hi) for _, lo, hi in va_new] == va_old
+
+
+def test_embargo_is_what_makes_the_split_disjoint():
+    """Sans purge la couture fuit ; avec elle, non. Le test qui a trouve le bug."""
+    span, hop = 12, 4
+    wins = windows(60, span=span, hop=hop)
+
+    def leaks(embargo):
+        tr, va = split_windows(wins, val_frac=0.1, embargo=embargo)
+        return any(not (ht <= lv or hv <= lt)
+                   for lv, hv in va for lt, ht in tr)
+
+    assert leaks(0), "sans purge la couture DOIT fuir -- sinon le test ne teste rien"
+    assert not leaks(math.ceil(span / hop) - 1)
+
+
+def test_embargo_is_paid_by_training_not_by_validation():
+    """La validation est la ressource rare : ~5 fenetres par jour contre ~43
+    d'entrainement. La purge doit donc mordre sur l'entrainement, sinon elle
+    coute 40 % de la mesure pour epargner 5 % du signal."""
+    wins = [(d, lo, hi) for d in range(7) for lo, hi in windows(200, 12, 4)]
+    tr0, va0 = split_windows(wins, val_frac=0.1, embargo=0)
+    tr2, va2 = split_windows(wins, val_frac=0.1, embargo=2)
+    assert len(va2) == len(va0), "la validation ne doit pas retrecir"
+    assert len(tr2) == len(tr0) - 2 * 7, "l'entrainement paie, un lot par jour"

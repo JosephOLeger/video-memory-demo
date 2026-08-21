@@ -601,6 +601,23 @@ class NeuralMemory(nn.Module):
             with torch.no_grad():
                 self.eta_head.bias.fill_(math.log(eta_init / (1 - eta_init)))
 
+        # Evaluation-time override: pin the forget gate to a constant, bypassing
+        # alpha_head entirely. The reach law is a statement about a *constant*
+        # test-time alpha, and alpha_init cannot deliver one: the outer loop
+        # erases it during training (measured 2026-08-21 on the alpha sweep --
+        # inits 7.8e-3 / 2.0e-3 / 4.9e-4 all end at realised ~1e-4, the same
+        # basin-erasure eta_init showed). Deliberately not a constructor
+        # argument: it never belongs in a saved cfg, and None (the default)
+        # leaves every code path bit-identical. Set it on a loaded model,
+        # e.g. `block.memory.alpha_override = 2e-3`, for read-time probes.
+        self.alpha_override: Optional[float] = None
+        # Same instrument for the write step. theta_override = 0.0 turns off
+        # writing entirely at read time, which separates "the memory helps
+        # because it wrote something" from "the memory helps through M_0 /
+        # architecture alone" -- the discriminating probe for artefacts whose
+        # margin audit reads theta_t ~ 1e-6 while mem_effect stays positive.
+        self.theta_override: Optional[float] = None
+
     # ------------------------------------------------------------------ utils
     def _grad_fn(self):
         num_layers = self.num_layers
@@ -709,8 +726,12 @@ class NeuralMemory(nn.Module):
         v = self.v_proj(x)
         q = self.q_proj(x)
         alpha = torch.sigmoid(self.alpha_head(x)).squeeze(-1)
+        if self.alpha_override is not None:
+            alpha = torch.full_like(alpha, self.alpha_override)
         eta = torch.sigmoid(self.eta_head(x)).squeeze(-1)
         theta = self._theta(self.theta_head(x)).squeeze(-1) * self.theta_scale
+        if self.theta_override is not None:
+            theta = torch.full_like(theta, self.theta_override)
         return k, v, q, alpha, eta, theta
 
     #: ``2 * softplus(0)``, so the sigmoid gate starts at exactly the softplus gate's

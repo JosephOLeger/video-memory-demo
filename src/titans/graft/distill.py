@@ -75,15 +75,47 @@ def windows(n_clips: int, span: int, hop: int) -> list:
     return [(s, s + span) for s in range(0, max(0, n_clips - span) + 1, hop)]
 
 
-def split_windows(wins: list, val_frac: float = 0.1) -> tuple:
-    """A **contiguous tail** is held out, not a random subset.
+def split_windows(wins: list, val_frac: float = 0.1, embargo: int = 0) -> tuple:
+    """A **contiguous tail** is held out, not a random subset, with an embargo.
 
-    Consecutive windows overlap by ``span - hop`` clips, so a random split would put
-    nearly the same video on both sides and the validation curve would measure
+    Two things are wrong with the obvious split, and both inflate the score.
+
+    A *random* split puts nearly the same video on both sides -- consecutive windows
+    overlap by ``span - hop`` clips -- so the validation curve would measure
     memorisation of the training stream.
+
+    A contiguous tail alone is not enough either: the last training window and the
+    first validation window still share up to ``span - hop`` clips. With
+    ``span=12, hop=4`` that is **8 clips out of 12**, i.e. two thirds of the
+    context the memory is asked to carry. ``embargo`` drops that many windows at
+    the seam, which is the purged/embargoed split standard in time-series
+    evaluation. Pass ``embargo = ceil(span/hop) - 1`` for a strictly disjoint
+    split; :func:`main` computes it from the flags rather than leaving it to the
+    caller to remember.
+
+    With several days the tail is taken **per day** and the pieces concatenated.
+    Holding out one whole day instead would confound "unseen window" with "unseen
+    day": a day of EgoLife is a different room, a different activity and a
+    different set of people, so a whole-day split would measure domain transfer
+    rather than memory.
     """
-    cut = max(1, int(len(wins) * (1.0 - val_frac)))
-    return wins[:cut], wins[cut:]
+    def cut_one(sub):
+        n = len(sub)
+        cut = max(1, int(n * (1.0 - val_frac)))
+        # La purge est prise cote ENTRAINEMENT, pas cote validation. A
+        # val_frac=0.1 un jour n'a que ~5 fenetres de validation contre ~43
+        # d'entrainement : retirer 2 fenetres coute 40 % de la mesure d'un cote
+        # et 5 % du signal de l'autre. On coupe donc dans l'abondant.
+        return sub[:max(1, cut - embargo)], sub[cut:]
+
+    if wins and len(wins[0]) == 3:
+        train, val = [], []
+        for d in sorted({w[0] for w in wins}):
+            t, v = cut_one([w for w in wins if w[0] == d])
+            train += t
+            val += v
+        return train, val
+    return cut_one(wins)
 
 
 # --------------------------------------------------------------------------- #
@@ -182,7 +214,10 @@ def write_context(branch: MemoryBranch, z: torch.Tensor, lo: int, hi: int,
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", default="Qwen/Qwen2.5-VL-3B-Instruct")
-    ap.add_argument("--z", required=True, help="cache produit par titans.graft.cache_z")
+    ap.add_argument("--z", required=True, nargs="+",
+                    help="un ou plusieurs caches produits par titans.graft.cache_z. "
+                         "Plusieurs jours sont concatenes en une seule liste de "
+                         "fenetres (--make-targets n'en accepte qu'un).")
     ap.add_argument("--basis", default=None)
     ap.add_argument("--layer", type=int, default=None)
     ap.add_argument("--probe", default=PROBE)
@@ -218,7 +253,9 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     # --- modes / plomberie ---
     ap.add_argument("--make-targets", action="store_true", dest="make_targets")
-    ap.add_argument("--targets", default=None)
+    ap.add_argument("--targets", default=None, nargs="+",
+                    help="fichiers de cibles, dans le MEME ordre que --z. Omis, "
+                         "ils sont deduits en remplacant '_z.pt' par '_tgt.pt'.")
     ap.add_argument("--out-targets", default=None, dest="out_targets")
     ap.add_argument("--out", default=None, help="prefixe des sorties (.json, .pt)")
     ap.add_argument("--guard-gb", type=float, default=10.0, dest="guard_gb")
@@ -237,25 +274,40 @@ def main() -> None:
         if free / 2**30 < a.guard_gb:
             raise SystemExit(f"abandon : il faut {a.guard_gb} Go libres")
 
-    cache = torch.load(a.z, map_location="cpu", weights_only=False)
-    z, offsets, paths = cache["z"], cache["offsets"].tolist(), cache["clips"]
-    fpc = cache["frames_per_clip"]
-    fps = fpc / 30.0
-    wins = windows(len(paths), a.span, a.hop)
-    print(f"cache : {len(paths)} clips, {z.shape[0]} tokens, {fpc} images/clip "
-          f"({z.shape[0] / len(paths):.0f} tokens/clip)")
-    print(f"{len(wins)} fenetres de {a.span} clips ({a.span * 0.5:.1f} min), pas {a.hop}")
+    if a.make_targets and len(a.z) != 1:
+        raise SystemExit("--make-targets ne prend qu'un seul --z (une carte par jour)")
+
+    # Un "jour" est un cache z autonome : ses propres clips, ses propres offsets,
+    # sa propre resolution. Rien n'est fusionne -- une fenetre porte l'indice de
+    # son jour et tout le reste s'indexe dessus.
+    days = []
+    for path in a.z:
+        c = torch.load(path, map_location="cpu", weights_only=False)
+        days.append({"src": path, "z": c["z"], "offsets": c["offsets"].tolist(),
+                     "paths": c["clips"], "fpc": c["frames_per_clip"],
+                     "fps": c["frames_per_clip"] / 30.0,
+                     "max_side": c["max_side"]})
+        print(f"cache {os.path.basename(path)} : {len(c['clips'])} clips, "
+              f"{c['z'].shape[0]} tokens, {c['frames_per_clip']} images/clip",
+              flush=True)
+
+    wins = [(d, lo, hi) for d, day in enumerate(days)
+            for lo, hi in windows(len(day["paths"]), a.span, a.hop)]
+    print(f"{len(wins)} fenetres de {a.span} clips ({a.span * 0.5:.1f} min), "
+          f"pas {a.hop}, sur {len(days)} jour(s)")
 
     model = load_host(a.model, getattr(torch, a.dtype), a.device)
     processor = AutoProcessor.from_pretrained(a.model)
 
     # ------------------------------------------------------------ professeur
     if a.make_targets:
-        out = a.out_targets or (os.path.splitext(a.z)[0] + "_tgt.pt")
+        day = days[0]
+        paths, fpc, fps = day["paths"], day["fpc"], day["fps"]
+        out = a.out_targets or a.z[0].replace("_z.pt", "_tgt.pt")
         tgt, t0 = {}, time.time()
-        for i, (lo, hi) in enumerate(wins):
+        for i, (_, lo, hi) in enumerate(wins):
             try:
-                frames = load_window_frames(paths, lo, hi, fpc, cache["max_side"])
+                frames = load_window_frames(paths, lo, hi, fpc, day["max_side"])
                 y = teacher_continuation(model, processor, frames, a.probe, fps=fps,
                                          max_new=a.max_new, device=a.device)
                 tgt[(lo, hi)] = y
@@ -267,20 +319,41 @@ def main() -> None:
                       f"reste {(len(wins) - i - 1) * el / (i + 1) / 60:.0f} min", flush=True)
         torch.save({"targets": {f"{k[0]}-{k[1]}": v for k, v in tgt.items()},
                     "probe": a.probe, "span": a.span, "hop": a.hop,
-                    "max_new": a.max_new, "z": a.z}, out)
+                    "max_new": a.max_new, "z": a.z[0]}, out)
         print(f"\n{len(tgt)}/{len(wins)} cibles -> {out}")
         return
 
-    if not a.targets:
-        raise SystemExit("passe --targets (ou --make-targets d'abord)")
-    tb = torch.load(a.targets, map_location="cpu", weights_only=False)
-    if tb["probe"] != a.probe:
-        raise SystemExit("la sonde du fichier de cibles ne correspond pas a --probe")
-    tgt = {tuple(int(x) for x in k.split("-")): v for k, v in tb["targets"].items()}
+    tgt_paths = a.targets or [p.replace("_z.pt", "_tgt.pt") for p in a.z]
+    if len(tgt_paths) != len(days):
+        raise SystemExit(f"{len(tgt_paths)} fichiers de cibles pour {len(days)} "
+                         f"caches z -- ils doivent etre dans le meme ordre")
+    tgt = {}
+    for d, tp in enumerate(tgt_paths):
+        if not os.path.exists(tp):
+            raise SystemExit(f"cibles manquantes : {tp} (lancer --make-targets)")
+        tb = torch.load(tp, map_location="cpu", weights_only=False)
+        # La sonde est verifiee par jour : melanger deux sondes donnerait un
+        # entrainement ou la meme fenetre a deux cibles differentes selon le jour.
+        if tb["probe"] != a.probe:
+            raise SystemExit(f"{tp} : sonde {tb['probe']!r} != --probe")
+        if tb.get("span") != a.span or tb.get("hop") != a.hop:
+            raise SystemExit(f"{tp} : genere avec span/hop "
+                             f"{tb.get('span')}/{tb.get('hop')}, pas {a.span}/{a.hop}")
+        for k, v in tb["targets"].items():
+            lo, hi = (int(x) for x in k.split("-"))
+            tgt[(d, lo, hi)] = v
+        print(f"  {os.path.basename(tp)} : {len(tb['targets'])} cibles", flush=True)
+
     wins = [w for w in wins if w in tgt]
-    train_w, val_w = split_windows(wins)
+    # Purge la couture : sans elle la premiere fenetre de validation partage
+    # span-hop clips avec la derniere d'entrainement (8 sur 12 aux valeurs par
+    # defaut), donc le score de validation serait flatte des deux tiers du
+    # contexte que la memoire est censee porter.
+    embargo = max(0, math.ceil(a.span / a.hop) - 1)
+    train_w, val_w = split_windows(wins, embargo=embargo)
     print(f"{len(train_w)} fenetres d'entrainement, {len(val_w)} de validation "
-          f"(queue contigue)")
+          f"(queue contigue par jour, purge de {embargo} fenetres a la couture), "
+          f"{len(tgt)} cibles au total")
 
     # ------------------------------------------------------------------ greffe
     pca = (torch.load(a.basis, map_location="cpu", weights_only=False)["pca"]
@@ -319,14 +392,19 @@ def main() -> None:
         untouched host on the student's clip alone. It is a second full forward, so
         it is only paid where it is read -- at eval, and on the printed steps.
         """
-        lo, hi = win
+        d, lo, hi = win
+        day = days[d]
         y = tgt[win]
         s_lo = hi - a.student_clips
-        frames = load_window_frames(paths, s_lo, hi, fpc, cache["max_side"])
-        inputs, n_prompt = forced_inputs(processor, frames, a.probe, y, fps, a.device)
-        tok_lo, tok_hi = offsets[lo], offsets[s_lo]        # contexte = ce qu'il NE voit pas
+        frames = load_window_frames(day["paths"], s_lo, hi, day["fpc"],
+                                    day["max_side"])
+        inputs, n_prompt = forced_inputs(processor, frames, a.probe, y, day["fps"],
+                                         a.device)
+        # contexte = ce que l'eleve NE voit pas, dans les offsets de SON jour
+        tok_lo, tok_hi = day["offsets"][lo], day["offsets"][s_lo]
         wrapper.reset()
-        state, S, nw = write_context(branch, z, tok_lo, tok_hi, a.write_stride, a.device)
+        state, S, nw = write_context(branch, day["z"], tok_lo, tok_hi,
+                                     a.write_stride, a.device)
         wrapper.carry, wrapper.token_offset = (state, S), 0
         loss = forced_loss(model, inputs, n_prompt, y)
         short = None
