@@ -176,6 +176,10 @@ def main() -> None:
               f"alpha_init={mem_kw['alpha_init']:.3g} pas-ecriture={a.write_stride} "
               f"(entrainement : {args.get('write_stride')})", flush=True)
 
+    # Une course courte ne doit pas rester muette jusqu'a la fin : un pas fixe de
+    # 25 questions ne dit rien d'un --limit 8, et c'est precisement la course
+    # qu'on lance pour verifier que la plomberie tient.
+    every = max(1, min(25, len(data) // 8))
     rows, t0 = [], time.time()
     for i, item in enumerate(data):
         path = os.path.join(a.data, "videos", item["video_path"])
@@ -208,7 +212,7 @@ def main() -> None:
             rows.append(row)
         except Exception as e:
             print(f"  saut {item['id']}: {type(e).__name__}: {e}", flush=True)
-        if (i + 1) % 25 == 0:
+        if (i + 1) % every == 0:
             acc_b = sum(r["base"] == r["gold"] for r in rows) / max(1, len(rows))
             msg = f"  [{i + 1}/{len(data)}] reference {100 * acc_b:.1f} %"
             if wrapper is not None and rows and "mem" in rows[0]:
