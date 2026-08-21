@@ -40,7 +40,7 @@ import time
 
 import torch
 
-from .branch import MemoryBranch
+from .branch import MemoryBranch, memory_kwargs_from_args
 from .qwen import default_layer, disabled, find_decoder_layers, graft
 
 LETTERS = "ABCDEFGH"
@@ -118,7 +118,10 @@ def main() -> None:
                     help="images ecrites dans la memoire (jamais dans le contexte)")
     ap.add_argument("--max-side", type=int, default=256, dest="max_side")
     ap.add_argument("--chunk", type=int, default=8)
-    ap.add_argument("--write-stride", type=int, default=8, dest="write_stride")
+    ap.add_argument("--write-stride", type=int, default=None, dest="write_stride",
+                    help="par defaut, celui de l'entrainement (lu dans le "
+                         "checkpoint) : la portee de la memoire est calibree sur "
+                         "un nombre d'ecritures, pas sur une duree de video")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--duration-group", type=int, default=None, dest="duration_group",
                     help="n'evaluer qu'une tranche (15 / 60 / 600 / 3600 s)")
@@ -159,11 +162,9 @@ def main() -> None:
         pca = (torch.load(a.basis, map_location="cpu", weights_only=False)["pca"]
                if a.basis else None)
         d_model = int(model.config.text_config.hidden_size)
-        mem_kw = dict(hidden_dim=args.get("memory_hidden", 64),
-                      alpha_init=args.get("alpha_init", 5.38e-4),
-                      orthogonalize_momentum=args.get("muon", "unit"))
-        if args.get("muon_scale"):
-            mem_kw["orthogonalize_clip"] = args["muon_scale"]
+        mem_kw = memory_kwargs_from_args(args)
+        if a.write_stride is None:
+            a.write_stride = int(args.get("write_stride", 2))
         branch = MemoryBranch(d_model, args.get("d_mem", 128), chunk_size=a.chunk,
                               down_pca=pca, **mem_kw).to(a.device)
         branch.load_state_dict(blob["branch"])
@@ -171,7 +172,9 @@ def main() -> None:
         wrapper = graft(model, branch, layer=site)
         wrapper.writes_enabled = False        # la memoire est ecrite hors contexte
         print(f"greffe {a.ckpt} (pas {blob.get('step')}, val {blob.get('val_mem'):.4f}) "
-              f"muon={mem_kw['orthogonalize_momentum']}", flush=True)
+              f"muon={mem_kw['orthogonalize_momentum']} "
+              f"alpha_init={mem_kw['alpha_init']:.3g} pas-ecriture={a.write_stride} "
+              f"(entrainement : {args.get('write_stride')})", flush=True)
 
     rows, t0 = [], time.time()
     for i, item in enumerate(data):
@@ -241,19 +244,30 @@ def summarise(rows: list) -> dict:
         if "mem" in sel[0]:
             e["mem"] = sum(r["mem"] == r["gold"] for r in sel) / len(sel)
             e["delta"] = e["mem"] - e["base"]
+            # The memory's reach is calibrated on a number of WRITES, not on a
+            # duration. A stratum evaluated far from the training write count is
+            # being asked something it was never tuned for, and the accuracy alone
+            # does not show it -- so the count travels with the score.
+            w = [r["writes"] for r in sel if "writes" in r]
+            if w:
+                e["writes"] = sum(w) / len(w)
         out[key] = e
     return out
 
 
 def format_report(rep: dict) -> str:
     has_mem = any("mem" in v for v in rep.values())
-    head = f"{'tranche':>9}{'n':>6}{'reference':>11}" + (f"{'greffe':>9}{'delta':>8}"
-                                                        if has_mem else "")
+    has_w = any("writes" in v for v in rep.values())
+    head = (f"{'tranche':>9}{'n':>6}{'reference':>11}"
+            + (f"{'greffe':>9}{'delta':>8}" if has_mem else "")
+            + (f"{'ecritures':>11}" if has_w else ""))
     lines = [head]
     for k, v in rep.items():
         line = f"{k:>9}{v['n']:>6}{100 * v['base']:>10.1f}%"
         if "mem" in v:
             line += f"{100 * v['mem']:>8.1f}%{100 * v['delta']:>+7.1f}"
+        if has_w:
+            line += f"{v.get('writes', 0):>11.0f}"
         lines.append(line)
     return "\n".join(lines)
 

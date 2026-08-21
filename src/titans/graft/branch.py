@@ -118,6 +118,30 @@ def sane_memory_kwargs(**overrides) -> dict:
     return {**SANE_NS, "eta_init": ETA_INIT, **overrides}
 
 
+def memory_kwargs_from_args(args) -> dict:
+    """The memory's construction kwargs, from a run's saved ``args``.
+
+    Training and evaluation must build the **same** memory, and most of the ways
+    they can disagree do not change any parameter shape: ``orthogonalize_momentum``,
+    ``theta_gate`` and the cascade flags all leave ``state_dict`` identical. So
+    ``load_state_dict`` succeeds, nothing warns, and the checkpoint is evaluated
+    under a different inner loop than the one that trained it. Having one function
+    called by both scripts is what keeps that from happening quietly.
+
+    Accepts a dict (``blob["args"]``) or an argparse namespace.
+    """
+    g = ((lambda k, d=None: args.get(k, d)) if isinstance(args, dict)
+         else (lambda k, d=None: getattr(args, k, d)))
+    kw = dict(hidden_dim=g("memory_hidden", 64),
+              alpha_init=g("alpha_init", 1.27e-4),
+              orthogonalize_momentum=g("muon", "unit"))
+    if g("muon_scale") is not None:            # 0.0 is a real clip, not "absent"
+        kw["orthogonalize_clip"] = g("muon_scale")
+    if g("cascade"):
+        kw.update(use_cascade_momentum=True, cascade_reservoirs=g("reservoirs", 6))
+    return kw
+
+
 class MemoryBranch(nn.Module):
     """One lateral Titans memory, sized for a decoder of width ``d_model``.
 

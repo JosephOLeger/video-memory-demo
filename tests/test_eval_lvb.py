@@ -65,3 +65,36 @@ def test_empty_strata_are_dropped_rather_than_reported_as_zero():
     when it is an absence."""
     rep = summarise([{"duration_group": 15, "gold": 0, "base": 0, "mem": 0}])
     assert set(rep) == {"all", "15"}
+
+
+def test_write_count_travels_with_the_score():
+    """The memory's reach is calibrated on a number of writes. A stratum scored far
+    from the training write count was asked something it was never tuned for, and
+    the accuracy alone does not show it."""
+    rows = [{"duration_group": 15, "gold": 0, "base": 0, "mem": 0, "writes": 400},
+            {"duration_group": 3600, "gold": 0, "base": 0, "mem": 0, "writes": 9000}]
+    rep = summarise(rows)
+    assert rep["15"]["writes"] == 400 and rep["3600"]["writes"] == 9000
+    assert "ecritures" in format_report(rep)
+
+
+def test_the_evaluation_builds_the_same_memory_as_the_training():
+    """Nothing here changes a parameter shape, so a mismatch loads cleanly and is
+    only visible in the numbers. One function, called by both scripts."""
+    from titans.graft.branch import memory_kwargs_from_args
+
+    saved = {"memory_hidden": 64, "alpha_init": 1.27e-4, "muon": "unit_squash",
+             "muon_scale": 0.0, "cascade": True, "reservoirs": 6}
+    kw = memory_kwargs_from_args(saved)
+    assert kw["orthogonalize_momentum"] == "unit_squash"
+    assert kw["orthogonalize_clip"] == 0.0, "0.0 est un clip reel, pas une absence"
+    assert kw["use_cascade_momentum"] and kw["cascade_reservoirs"] == 6
+
+
+def test_a_namespace_and_a_dict_give_the_same_memory():
+    import argparse
+
+    from titans.graft.branch import memory_kwargs_from_args
+    ns = argparse.Namespace(memory_hidden=32, alpha_init=1e-3, muon="unit",
+                            muon_scale=None, cascade=False, reservoirs=6)
+    assert memory_kwargs_from_args(ns) == memory_kwargs_from_args(vars(ns))

@@ -58,7 +58,8 @@ import time
 import torch
 import torch.nn.functional as F
 
-from .branch import MemoryBranch, stride_for_reach  # noqa: F401  (re-exported)
+from .branch import (MemoryBranch, memory_kwargs_from_args,  # noqa: F401
+                     stride_for_reach)
 from .qwen import branch_report, default_layer, find_decoder_layers, graft
 
 PROBE = ("Describe what the camera wearer was doing at the very beginning of "
@@ -358,12 +359,7 @@ def main() -> None:
     # ------------------------------------------------------------------ greffe
     pca = (torch.load(a.basis, map_location="cpu", weights_only=False)["pca"]
            if a.basis else None)
-    mem_kw = dict(hidden_dim=a.memory_hidden, alpha_init=a.alpha_init,
-                  orthogonalize_momentum=a.muon)
-    if a.muon_scale is not None:
-        mem_kw["orthogonalize_clip"] = a.muon_scale
-    if a.cascade:
-        mem_kw.update(use_cascade_momentum=True, cascade_reservoirs=a.reservoirs)
+    mem_kw = memory_kwargs_from_args(a)
     d_model = int(model.config.text_config.hidden_size
                   if hasattr(model.config, "text_config") else model.config.hidden_size)
     branch = MemoryBranch(d_model, a.d_mem, chunk_size=a.chunk,
