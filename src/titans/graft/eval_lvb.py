@@ -46,6 +46,43 @@ from .qwen import default_layer, disabled, find_decoder_layers, graft
 LETTERS = "ABCDEFGH"
 
 
+def donor_indices(data: list) -> list:
+    """For each question, the index of a question on a DIFFERENT video.
+
+    The mismatched-memory control needs a memory that costs exactly the same --
+    same parameters, same forward, same number of writes -- and carries the wrong
+    content. Shifting by half the list and walking forward until the video differs
+    is deterministic (no seed to record, no run-to-run drift) and cannot pair a
+    video with itself, which matters because LongVideoBench asks several questions
+    about the same video.
+    """
+    n = len(data)
+    out = []
+    for i, item in enumerate(data):
+        j = (i + n // 2) % n
+        for _ in range(n):
+            if data[j]["video_path"] != item["video_path"]:
+                break
+            j = (j + 1) % n
+        out.append(j)
+    return out
+
+
+def tile_to(frames, n: int):
+    """Repeat ``frames`` until there are ``n`` of them.
+
+    The same-frames control must not also change the number of writes: the
+    memory's state magnitude grows with how often it is written, so comparing 364
+    writes against 2911 would confound "less information" with "less writing".
+    Repeating what the context already shows adds no information and holds the
+    write count fixed.
+    """
+    if frames.shape[0] >= n:
+        return frames[:n]
+    reps = -(-n // frames.shape[0])
+    return frames.repeat(reps, *([1] * (frames.dim() - 1)))[:n]
+
+
 def build_prompt(item: dict) -> str:
     """The question and its options, in LongVideoBench's own order."""
     lines = [item["question"]]
@@ -122,6 +159,15 @@ def main() -> None:
                     help="par defaut, celui de l'entrainement (lu dans le "
                          "checkpoint) : la portee de la memoire est calibree sur "
                          "un nombre d'ecritures, pas sur une duree de video")
+    ap.add_argument("--memory-source", default="video", dest="memory_source",
+                    choices=["video", "mismatched", "context"],
+                    help="video : les --mem-frames images de la vidéo posée "
+                         "(la mesure). mismatched : celles d'une AUTRE video -- "
+                         "meme cout, contenu faux, donc isole ce que la memoire "
+                         "retient. context : les --frames images du contexte, "
+                         "repetees pour garder le nombre d'ecritures -- donc "
+                         "aucune information nouvelle, ce qui isole l'apport des "
+                         "328 k parametres de celui des images supplementaires.")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--duration-group", type=int, default=None, dest="duration_group",
                     help="n'evaluer qu'une tranche (15 / 60 / 600 / 3600 s)")
@@ -180,6 +226,10 @@ def main() -> None:
     # 25 questions ne dit rien d'un --limit 8, et c'est precisement la course
     # qu'on lance pour verifier que la plomberie tient.
     every = max(1, min(25, len(data) // 8))
+    donors = donor_indices(data) if a.memory_source == "mismatched" else []
+    if a.memory_source != "video":
+        print(f"CONTROLE : memoire ecrite depuis {a.memory_source} -- ce n'est "
+              f"pas la mesure", flush=True)
     rows, t0 = [], time.time()
     for i, item in enumerate(data):
         path = os.path.join(a.data, "videos", item["video_path"])
@@ -198,11 +248,23 @@ def main() -> None:
                    "duration": dur, "gold": item["correct_choice"],
                    "base": int(base.argmax())}
             if wrapper is not None:
-                dense = resize_frames(load_video_frames(path, num_frames=a.mem_frames),
-                                      a.max_side)
+                if a.memory_source == "context":
+                    dense, dur_mem = tile_to(ctx, a.mem_frames), dur
+                elif a.memory_source == "mismatched":
+                    other = data[donors[i]]
+                    dense = resize_frames(
+                        load_video_frames(os.path.join(a.data, "videos",
+                                                       other["video_path"]),
+                                          num_frames=a.mem_frames), a.max_side)
+                    dur_mem = float(other["duration"])
+                    row["donor"] = other["video_path"]
+                else:
+                    dense = resize_frames(
+                        load_video_frames(path, num_frames=a.mem_frames), a.max_side)
+                    dur_mem = dur
                 with disabled(wrapper):
                     state, S, nw = write_memory(branch, model, processor, dense,
-                                                "", a.mem_frames / dur, a.device,
+                                                "", a.mem_frames / dur_mem, a.device,
                                                 site, a.chunk, a.write_stride)
                 wrapper.carry, wrapper.token_offset = (state, S), 0
                 mem = letter_logits(model, processor, ctx, prompt, n_opt,

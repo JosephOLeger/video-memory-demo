@@ -64,3 +64,19 @@ the bimodal gates are visible). Chosen: **C_S = 0.07**, **C_TS = 4.5e-4**.
 So the old clip c=1.0 sat ~14x ABOVE the median — inert on this path for the
 opposite reason it saturated on the graft (||S||~6-9e3 there). Same mistake,
 both directions, one lesson: measure the median first.
+
+## First read (2026-08-24, 25/25 done; PROVISIONAL until joint replay scoring)
+
+- Prediction 2 EXCEEDED: clipc 0.3176±0.0214, sq 0.3016±0.0248 — not "between
+  unit and rescale" but ABOVE rescale (0.206, invalid ref) at equal budget.
+  If replay confirms 0 NaN, the stability↔quality trade-off is not a trade-off
+  at calibrated c.
+- Prediction 3 CONFIRMED strongly: unit10k 0.4263±0.0725 (5× its 4k score),
+  usq10k 0.5332±0.0413. The −58% was budget.
+- softclip c=4.5e-4 DEAD (0.0011): med(θ‖S‖) is dominated by the bimodal gate
+  (q25=2.3e-6); the cap strangles exactly the high-θ writes that carry
+  learning. Third instance of the c-trap — the "c = median" rule assumes a
+  unimodal distribution. AMENDMENT: relaunched as mu_scl2, c=0.03 (~tail
+  deposit scale, med‖S‖×θ_tail≈0.07×0.45), 5 seeds, 2026-08-24 10:06.
+- Joint replay scoring launched 2026-08-24 10:06 (jobs_famscore.txt: 13 arms ×
+  retention grid, 3 pool4 workers cards 1-3) → results/retention_fam_*.json.

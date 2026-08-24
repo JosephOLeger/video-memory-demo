@@ -70,3 +70,24 @@ Per the contingency announced before launch:
 Decision rule unchanged: compare rungs at equal horizon; NaN at a specific rung
 = dose-response figure; all three surviving = bounded-θ headline with the
 1000-step caveat stated.
+
+## OUTCOME (read 2026-08-24) — the NaN returned, at the rung nobody predicted
+
+- **R3** (closed loop + raw magnitude + bare MLP — most paper-faithful): **0 NaN**,
+  final loss ~1.6 over 1000 steps.
+- **R2** (same + ResidualNorm): **0 NaN**, ~1.7–2.0.
+- **R1** (closed loop, everything else ON incl. spectral-normed surprises):
+  **NaN at training step 2** — instant.
+
+R1 vs R2 differ ONLY in `SPEC_NORM_SURPRISES`: with the loop closed, their
+un-rescaled NS (= our `unit`) kills in one step; the paper's raw-magnitude
+configs train fine. Crossed with R0 (spec-norm ON, open loop, 20k steps clean):
+the stale-gradient decoupling was masking it. Predictions R1/R3 were WRONG
+(registered before, kept as such). Reading: NS-without-rescale is a step
+*normalizer* — bound above, FLOOR below; on their path raw magnitudes are tiny
+(mean loss ×1/64, θ rest 0.025) so the same operation that rescues our
+world-model path (‖S‖~5457) multiplies every deposit on theirs. Candidate
+mechanism for step-2 NaN (hypothesis, untested): backward of NS(G/‖G‖) carries
+1/‖G‖ — explosive exactly when surprise is tiny — and batch 4 chains 128 such
+links in the graph. Caveats: 1 seed/rung, 1000 steps, BATCH 1 deviation.
+Optional R1b: raise NS eps or detach spec-norm backward to test the hypothesis.

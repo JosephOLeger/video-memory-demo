@@ -33,3 +33,14 @@ of the write path. theta_override=0.0 removes test-time writing entirely, so:
 
 Baseline for comparison: `results/retention_alpha.json` (same artefacts, no
 override).
+
+## OUTCOME (2026-08-21 17:24, read 2026-08-24): P-A, clean
+
+Under theta=0 on all 9 artefacts: retention_gain equals the memoff floor within
+1.5e-4 at every gap (sharp internal check passes), and mem_effect collapses
+from +0.015..+0.051 to |·|<0.003 on 9/9 — including the five artefacts whose
+margin audit read theta~1e-6. All measured memory benefit comes from test-time
+writes ⇒ margin.py mis-reads theta on `unit` artefacts. **No theta figure from
+margin_alpha.json may be cited until the instrument is fixed** (suspects: b=0
+single-sequence sampling; gate read site under `unit`). Result:
+`results/retention_theta_ov0.json`.

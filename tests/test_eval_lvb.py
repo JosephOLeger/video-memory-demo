@@ -98,3 +98,52 @@ def test_a_namespace_and_a_dict_give_the_same_memory():
     ns = argparse.Namespace(memory_hidden=32, alpha_init=1e-3, muon="unit",
                             muon_scale=None, cascade=False, reservoirs=6)
     assert memory_kwargs_from_args(ns) == memory_kwargs_from_args(vars(ns))
+
+
+def test_the_mismatched_control_never_pairs_a_video_with_itself():
+    """LongVideoBench asks several questions about the same video, so a naive
+    shift would hand some questions their own memory back -- which would be the
+    measurement, not the control, and would quietly weaken the null."""
+    from titans.graft.eval_lvb import donor_indices
+
+    data = [{"video_path": f"v{i // 3}.mp4"} for i in range(12)]   # 3 questions/video
+    idx = donor_indices(data)
+    assert len(idx) == len(data)
+    for i, j in enumerate(idx):
+        assert data[j]["video_path"] != data[i]["video_path"], (i, j)
+
+
+def test_the_mismatched_control_is_deterministic():
+    """No seed to record, no drift between a run and its rerun."""
+    from titans.graft.eval_lvb import donor_indices
+
+    data = [{"video_path": f"v{i}.mp4"} for i in range(7)]
+    assert donor_indices(data) == donor_indices(data)
+
+
+def test_donor_choice_survives_a_single_video():
+    """Degenerate input must not loop forever; it simply cannot find a donor."""
+    from titans.graft.eval_lvb import donor_indices
+
+    assert len(donor_indices([{"video_path": "v.mp4"}] * 3)) == 3
+
+
+def test_the_context_control_holds_the_write_count_fixed():
+    """Fewer writes would confound 'less information' with 'less writing': the
+    memory's state magnitude grows with how often it is written."""
+    import torch
+
+    from titans.graft.eval_lvb import tile_to
+
+    ctx = torch.arange(32 * 2 * 2).reshape(32, 2, 2)
+    out = tile_to(ctx, 256)
+    assert out.shape[0] == 256
+    assert torch.equal(out[:32], ctx), "les images du contexte, a l'identique"
+    assert torch.equal(out[32:64], ctx), "puis repetees, sans information neuve"
+
+
+def test_tiling_never_grows_frames_it_was_given_enough_of():
+    import torch
+
+    from titans.graft.eval_lvb import tile_to
+    assert tile_to(torch.zeros(300, 2, 2), 256).shape[0] == 256
