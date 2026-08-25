@@ -91,3 +91,19 @@ mechanism for step-2 NaN (hypothesis, untested): backward of NS(G/‖G‖) carri
 1/‖G‖ — explosive exactly when surprise is tiny — and batch 4 chains 128 such
 links in the graph. Caveats: 1 seed/rung, 1000 steps, BATCH 1 deviation.
 Optional R1b: raise NS eps or detach spec-norm backward to test the hypothesis.
+
+## Amendement 24/08 16h30 — eps512 rendu, regle corrigee, detach512 pre-enregistre
+
+- **ctrl512** : 2e realisation de R1 — pas 0 : perte finie 5.78, 248/340
+  gradients non-finis entre backward et clip ; NaN complet ensuite (340/340).
+- **eps512 (eps 1e-2)** : profil bit-identique au controle (248/340 au pas 0,
+  NaN au pas 2). La regle pre-enregistree ("NaN => polynomes") etait MAL
+  CALIBREE : clamp actif => Jacobien 1/eps = 100 par maillon, 100^128 >> fp32
+  de toute facon — le test ne separe pas division vs polynomes a 128 maillons.
+  Etabli tout de meme : insensibilite complete a eps dans ce regime.
+- **detach512 (lance, resultat non lu)** : NS avec denominateur detache
+  (forward bit-identique, le terme 1/||t|| disparait du backward).
+  PREDICTION (penchant declare, pas certitude — la borne 64<->128 propre/mort
+  implique un facteur effectif ~2-4 par maillon, compatible avec les deux
+  sites) : gradients PROPRES au pas 0 => la division est le site ; non-finis
+  => les polynomes du NS. Les deux issues sont publiables.

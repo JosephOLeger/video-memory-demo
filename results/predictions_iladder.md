@@ -99,3 +99,63 @@ gradcheck insere, queues derriere l'echelle I): prediction — survie 2/2,
 0 gradient non-fini sur toute la course. Si R2b ou R3b meurt: la survie de
 R2/R3 etait un accident de graine, le brouillon retire le CLAIM
 survie-comme-prediction et le remplace par la distribution observee.
+
+## OUTCOMES PARTIELS (24/08 ~17h, 3 barreaux/12)
+
+- **I0_defaut s0+s1 : P-I0 CONFIRME** (et durci) : etat a zero exact sur tout
+  le flux (mort au chunk ~96 mesuree en calibration), ret_rms constant 0.306
+  (la lecture vit sur le chemin residuel). Pas amnesique : mort.
+- **I1_alpha s0 : P-I1 PARTIELLEMENT INFIRME.** Pas de plateau d'accumulation :
+  l'etat meurt au rythme exact configure ((1-3.4e-4)^n a quelques % pres —
+  biais -8 verifie actif), depots invisibles <=1e-5 meme a poids sains.
+  Lecture : sous spec-norm les depots n'ont la magnitude pour soutenir un etat
+  a AUCUN alpha ; baisser alpha ralentit l'horloge de la mort. Les barreaux
+  decisifs restent I2/I3 (depots bruts), comme concu.
+
+## ANNULATION v1 + RELANCE v2 (24/08 soir)
+
+Les "OUTCOMES PARTIELS" ci-dessus sont ANNULES : artefact d'instrument.
+La sonde v1 tournait sous torch.inference_mode(), qui zerote SILENCIEUSEMENT
+les gradients torch.func du chemin d'ecriture (verifie a config/graine
+identiques : NS input 0.0 sous inference_mode, 0.34 sous no_grad et en mode
+normal ; symptome retrospectif : trajectoires bit-identiques I1/I2/I3 = pure
+decroissance de l'init). Ce qui survit de la v1 : alpha repos ~0.5/chunk
+(non sature), biais -8 actif, qk-norm = gamma+1 (gain 1 a l'init, pas un
+silencieux), gradient nul en W=0 exact (fait mathematique, MLP sans biais).
+Sous no_grad, config I1 : l'etat CROIT 22.7 -> 242 en une fenetre (128
+chunks) — le chemin d'ecriture est vivant.
+
+**v2 relancee** : probe_iladder2.py (no_grad ; toujours aucun backward
+externe -> D2 toujours impossible par construction), results_iladder2/,
+memes 6 barreaux x 2 graines, MEMES predictions et regles de decision
+qu'en tete de ce fichier. P-I1 (plateau borne) redevient plausible ;
+P-I3 (mur D1) est a ce jour NON TESTE.
+
+## AMENDEMENT 25/08 matin — v2 lue, extension + echelle de gain I5 (AVANT lancement)
+
+v2 rendue (12/12, aucun mur): I0 plateau amnesique ~17 (P-I0 v-plateau OK);
+I1 plateau borne ~790 avec theta*lambda ~ 144 >> 2 — le regime borne ignore le
+seuil du gradient brut = le resultat famille reproduit sur leur pile (P-I1 OK);
+I2/I3 contraction vers 7-9, theta*kappa*lambda ~ 0.2 << 2 — la stabilite
+observee est PREDITE par la condition (P-I2 issue "ni derive ni mur");
+I4 mort reelle (zero exact, gradients vivants — preuve interne: I0 meme
+harnais plateau 17): la memoire fidele au papier meurt au repos, c'est la
+spec-norm qui la maintient en vie. P-I3 (mur) infirme A CETTE ECHELLE — la
+regle exige l'extension x4 avant verdict.
+
+**I3ext (lance maintenant)**: I3_fidele 2 graines a 1,048,576 octets (x4).
+PREDICTION: le plateau persiste, pas de mur.
+
+**I5 — echelle de gain (lance maintenant)**: config I3 (fidele, alpha portee,
+max_lr 0.1) avec init des poids memoire x g, g dans {2, 4, 8}, 2 graines.
+Mecanisme: h0 ~ g (1re couche), lambda ~ g^2, theta*kappa*lambda(g=1) ~ 0.2
+=> franchissement de 2 attendu vers g* ~ 3.
+PREDICTIONS:
+- P-I5a: l'instabilite est monotone en g (croissance de ||W||/h0 d'autant
+  plus rapide que g est grand).
+- P-I5b: il existe un g* fini dans [2, 8]: mur (non-fini ou ||W||>1e6) a
+  g >= g*, plateau/contraction en dessous; le mur est precede par la
+  croissance de h0 (signature D1).
+- Si aucun mur a g=8: P-I5 infirme => restriction honnete maintenue (la
+  contraction GELU de leur init bat la boucle a toute echelle atteignable);
+  identifier l'amortisseur via la trajectoire h.
