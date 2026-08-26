@@ -159,3 +159,60 @@ PREDICTIONS:
 - Si aucun mur a g=8: P-I5 infirme => restriction honnete maintenue (la
   contraction GELU de leur init bat la boucle a toute echelle atteignable);
   identifier l'amortisseur via la trajectoire h.
+
+## VERDICT I3ext + I5 (25/08 ~12h30) + affinage (AVANT lancement)
+
+- I3ext: plateau 8.6-9.0 sur 262k chunks x2 graines — la regle x4 est purgee,
+  P-I3 infirme A g=1 proprement.
+- I5_g2: 53 -> erosion -> MEME plateau ~8.5 (attracteur sous le seuil), 2/2.
+- **I5_g4 et I5_g8: MUR — non-fini des la premiere fenetre, 4/4 realisations.**
+  P-I5a (monotonie) CONFIRME; P-I5b (g* fini) CONFIRME avec g* dans (2, 4].
+  Quantitatif: theta*kappa*lambda(g) ~ 0.2 g^2 => seuil 2 franchi a
+  g* ~ 3.2 — DANS le bracket mesure. D1 est demontre sur leur pile en
+  inference pure.
+
+**Affinage (lance maintenant):**
+- I5_g3 (2 graines): theta*kappa*lambda(3) ~ 1.8, a un facteur ~2 du seuil —
+  prediction VOLONTAIREMENT non tranchee (les estimations kappa/lambda ont
+  des incertitudes de facteur 2): sa valeur est de RESSERRER g*, pas de
+  tester. Les deux issues sont consignables telles quelles.
+- I5_g4fin (1 graine, fenetre 32 tokens, 16k tokens): prediction — la
+  signature D1 est visible AVANT le non-fini: h0 croit de facon monotone
+  sur les chunks precedant le mur (boucle somme, pas bascule instantanee).
+  Si le non-fini arrive sans croissance visible meme a ce grain: consigner
+  comme bascule rapide, ne pas presenter la trajectoire comme signature.
+
+## AFFINAGE 2 (25/08 ~12h45, AVANT lancement) — la zone proche seuil
+
+Verdicts precedents: g=3 MUR 2/2 des la fenetre 0 => g* dans (2, 3].
+g=4 a grain 32: non-fini dans les 8 premiers chunks => bascule rapide,
+consignee comme telle (pas de trajectoire-signature a ce gain).
+
+Lance: g dans {2.25, 2.5, 2.75}, 1 graine, fenetre 32, 65536 octets.
+PREDICTION: g* etant dans (2, 3], au moins un de ces barreaux est juste
+au-dessus du seuil et diverge LENTEMENT — croissance monotone de h0/||W||
+visible sur des dizaines a centaines de chunks avant le non-fini (la
+signature somme de D1), la ou g=4 bascule en <8 chunks. Les barreaux sous
+g* montrent l'erosion vers le plateau ~8.5. Si TOUS basculent vite ou
+tous plateauent (g* a bord raide): consigner la raideur du seuil comme
+resultat — la transition est alors quasi discontinue en g, ce qui est
+aussi une signature interpretable (la boucle multiplicative par couche
+domine la somme).
+
+## VERDICT FINAL I5 (25/08 ~13h)
+
+- g=3: MUR 2/2 des la fenetre 0 => bracket resserre.
+- Affinage fin (fenetre 32): g=2.25, 2.5, 2.75 — TOUS mur fenetre 0
+  (non-fini en <=8 chunks). Branche alternative pre-enregistree appliquee:
+  le seuil est RASOIR, aucun barreau a divergence lente n'existe —
+  signature de la boucle multiplicative par couche (profondeur 4,
+  gain de boucle ~ g^4).
+- Controle croise d'instrument: g=2.25 a fenetre 512 => mur (idem);
+  g=2.0 a fenetre 32 => survit 2048 fenetres (idem). La fenetre n'est
+  pas un confondant.
+- **g* dans (2.0, 2.25]**. theta*kappa*lambda(g) ~ 0.2 g^2 (facteur ~2
+  d'incertitude declare) => franchissement predit dans la bande 2-3:
+  mesure DANS la bande. D1 est demontre sur la pile de reference, en
+  inference pure, dose par l'echelle d'etat.
+- g=4 grain fin: bascule en <8 chunks — consignee comme bascule rapide,
+  pas de trajectoire-signature presentable a ce gain (regle appliquee).

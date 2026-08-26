@@ -80,3 +80,21 @@ both directions, one lesson: measure the median first.
   deposit scale, med‖S‖×θ_tail≈0.07×0.45), 5 seeds, 2026-08-24 10:06.
 - Joint replay scoring launched 2026-08-24 10:06 (jobs_famscore.txt: 13 arms ×
   retention grid, 3 pool4 workers cards 1-3) → results/retention_fam_*.json.
+
+## Figure 2 world-model — chasse a l'instance divergente (25/08, AVANT run)
+
+Constat: le rejeu conjoint de mu_rescale NaN aux gaps >= 4 (5 graines, onset
+variable) MAIS un flux continu de 12,800 latents DISTINCTS reste fini
+(theta erode a 0.008 -> theta*lambda ~ 0.3). Hypothese mecanistique (la
+selectivite au contenu, cf. dose-reponse theta): LE MUR A BESOIN DE L'ECHO —
+les ecritures selectives qui portent la retention sont celles qui poussent
+l'arme non bornee au-dela du seuil.
+PREDICTIONS (protocole: rep = [V; D1..D4; V] gap 4, lignes tracees une par
+une, mu_rescale_s0):
+- P-F2a: au moins une ligne sur 8 diverge.
+- P-F2b: le chunk du mur est DANS ou APRES le bloc V final (declenche par la
+  re-rencontre), pas dans les distracteurs.
+- P-F2c: meme protocole sur mu_unit10k_s0: AUCUNE ligne ne diverge (borne).
+La ligne divergente devient la Figure 2 world-model (theta plat, h0/lambda/
+||W1|| qui partent). En complement dose: rescale avec --theta-override 0.05
+sur flux continu doit murer deterministiquement; unit10k idem ne doit pas.

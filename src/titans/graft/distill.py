@@ -150,6 +150,19 @@ def teacher_continuation(model, processor, frames, probe: str, *, fps: float,
 _PAD_PER_TOKEN = {"attention_mask": 1, "mm_token_type_ids": 0, "token_type_ids": 0}
 
 
+def text_only_inputs(processor, prompt: str):
+    """The prompt with no video at all -- the diagnostic's zero.
+
+    How much of the teacher's answer is reachable from the question alone? If a
+    lot, the task is mostly a language prior and no memory architecture can show
+    up in it, whatever it retains.
+    """
+    messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+    text = processor.apply_chat_template(messages, tokenize=False,
+                                         add_generation_prompt=True)
+    return processor(text=[text], return_tensors="pt")
+
+
 def forced_inputs(processor, frames, probe: str, y: torch.Tensor, fps: float,
                   device: str):
     """``[prompt | y]`` teacher-forced, plus the index where ``y`` starts.
@@ -161,7 +174,8 @@ def forced_inputs(processor, frames, probe: str, y: torch.Tensor, fps: float,
     ``transformers``, with nothing in it naming the cause.
     """
     from .fit_basis import video_inputs
-    inp = video_inputs(processor, frames, probe, fps)
+    inp = (text_only_inputs(processor, probe) if frames is None
+           else video_inputs(processor, frames, probe, fps))
     inp = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in inp.items()}
     n_prompt = int(inp["input_ids"].shape[1])
     m = int(y.shape[0])

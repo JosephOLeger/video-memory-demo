@@ -72,6 +72,13 @@ def main() -> None:
     ap.add_argument("--basis", default=None)
     ap.add_argument("--memory-source", default="context", dest="memory_source",
                     choices=["context", "mismatched", "none"])
+    ap.add_argument("--student-view", default="clip", dest="student_view",
+                    choices=["clip", "none", "mismatched"],
+                    help="ce que l'ELEVE voit, avant toute memoire. clip : son "
+                         "dernier clip (la mesure). none : rien du tout -- lire "
+                         "alors la colonne 'sans', c'est l'a priori de langage "
+                         "pur. mismatched : un clip d'un AUTRE jour, ce qui "
+                         "separe 'voir une video' de 'voir LA video'.")
     ap.add_argument("--eval-n", type=int, default=0, dest="eval_n",
                     help="0 = toute la validation")
     ap.add_argument("--guard-gb", type=float, default=8.0, dest="guard_gb")
@@ -120,7 +127,7 @@ def main() -> None:
     if a.eval_n:
         val_w = val_w[:a.eval_n]
     print(f"{len(val_w)} fenetres de validation, source memoire : "
-          f"{a.memory_source}", flush=True)
+          f"{a.memory_source}, vue de l'eleve : {a.student_view}", flush=True)
     if a.memory_source != "context":
         print("CONTROLE -- ce n'est pas la mesure", flush=True)
 
@@ -146,8 +153,18 @@ def main() -> None:
         day = days[d]
         y = tgt[win]
         s_lo = hi - sclips
-        frames = load_window_frames(day["paths"], s_lo, hi, day["fpc"],
-                                    day["max_side"])
+        if a.student_view == "none":
+            frames = None
+        elif a.student_view == "mismatched":
+            d2 = (d + 1) % len(days)
+            n2 = len(days[d2]["paths"])
+            c2 = min(n2 - sclips, int(s_lo * n2 / len(day["paths"])))
+            frames = load_window_frames(days[d2]["paths"], max(0, c2),
+                                        max(0, c2) + sclips, days[d2]["fpc"],
+                                        days[d2]["max_side"])
+        else:
+            frames = load_window_frames(day["paths"], s_lo, hi, day["fpc"],
+                                        day["max_side"])
         inputs, n_prompt = forced_inputs(processor, frames, probe, y, day["fps"],
                                          a.device)
         tok_lo, tok_hi = day["offsets"][lo], day["offsets"][s_lo]

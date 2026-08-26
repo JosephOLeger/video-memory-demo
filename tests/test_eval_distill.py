@@ -48,3 +48,24 @@ def test_the_pairing_is_deterministic():
     """Pas de graine a consigner, pas de derive entre une course et sa reprise."""
     days = _days([1000, 1200, 900])
     assert donor_span(days, 1, 33, 400) == donor_span(days, 1, 33, 400)
+
+
+def test_the_prompt_survives_having_no_video():
+    """Le zero du diagnostic : la question seule, sans un seul jeton visuel.
+    Si le professeur est deja prevu de la, la tache est un a priori de langage et
+    aucune architecture memoire ne peut y apparaitre."""
+    from titans.graft.distill import PROBE, text_only_inputs
+
+    class FakeProc:
+        def apply_chat_template(self, messages, tokenize, add_generation_prompt):
+            assert not any(c["type"] == "video"
+                           for m in messages for c in m["content"])
+            return "<|im_start|>" + messages[0]["content"][0]["text"]
+
+        def __call__(self, text, return_tensors):
+            return {"input_ids": torch.tensor([[1, 2, 3]]),
+                    "attention_mask": torch.tensor([[1, 1, 1]])}
+
+    out = text_only_inputs(FakeProc(), PROBE)
+    assert set(out) == {"input_ids", "attention_mask"}
+    assert "pixel_values_videos" not in out, "aucun jeton visuel ne doit passer"
