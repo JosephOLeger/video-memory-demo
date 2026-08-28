@@ -192,3 +192,147 @@ partout) mais tague collapse des le gap 0 une partie des graines unit
   canal fluctuations sans DC. A completer au checkpoint final 4000 :
   la version T2 de leur pile (le collapse s'approfondit-il avec
   l'entrainement ?).
+
+## P-2x2 — cellule manquante direction x magnitude (enregistree AVANT lancement, 28/08 ~17h)
+
+Bras : rawdir_usq_s0/s1 = famille 10k avec la regle de magnitude usq
+(psi_c, c=350, theta exterieur) mais direction BRUTE S/||S||_F au lieu de
+NS-5(S). Biais inchanges (apparies a usq). 10k pas, frozen-every 2000,
+sonde cycle 100 clips. Lancement en file derriere unit30k (carte 0).
+
+Contexte : cellules connues sur bases saines = NS+magnitude-bornee (usq,
+tient) et brut+brut (Titans-litteral, 8/8 D1). La cellule
+NS+magnitude-brute etait l'hybride rescale — purge, inutilisable. Ce bras
+teste si la magnitude SUFFIT.
+
+- **P-2x2-1 (stabilite, confiance 70%)** : 2/2 sains (pas de D1, pas de
+  NaN, theta plat). La borne du pas est portee par psi_c seul ; NS n'est
+  pas necessaire a la stabilite. Alternative si FAUX : la direction NS
+  contribue a casser la boucle de courbure autrement que par la
+  magnitude (blanchiment des ecritures) — resultat encore plus
+  interessant, a consigner tel quel.
+- **P-2x2-2 (rang, confiance 60%)** : collapse du pr AU MOINS aussi dur
+  que unit (ecritures brutes quasi rang-1, sans l'inflation de rang de
+  NS-5) — r_eff des U_t <= ceux d'usq, pr final <= unit.
+- **P-2x2-3 (qualite)** : memory_gain < usq (0.533) — ce que la
+  direction NS achete, si elle achete quelque chose, est de la qualite,
+  pas de la stabilite. Pas de seuil chiffre, 2 graines seulement.
+
+### Verdict P-ABS-1, seconde moitie (28/08 ~17h, retention absrule 10k)
+
+Fichiers : retention_mu_unit10k_absrule.json / retention_mu_usq10k_absrule.json
+(dec en cours). Largeur 128, plancher absolu 12.8.
+
+- **La partie "collapse des le gap 0" est FAUSSE** : au gap 0 les 5
+  graines unit10k affichent pr 20.3-71.9, toutes saines. La raison est
+  le mecanisme lui-meme : le pr est une fonction de la LONGUEUR de rejeu
+  L. La sonde cycle (pr finaux 1.5-7.3) mesure apres ~800 ecritures ; le
+  gap 0 de la retention mesure apres UNE presentation — l'etat n'est pas
+  encore descendu. J'avais conflate "pr final de sonde" et "pr gap-0".
+- **La regle fait exactement son travail a mi-marche** : 7 flips ABS sur
+  les graines unit (s3 des le gap 4 a pr 10.1 ; s1/s4 au gap 16 ; s0/s1/
+  s3/s4 au gap 32), soit **5/5 graines unit classees collapse au gap 32**
+  (s2 via la regle relative/cos a pr 17.0). usq : **0/5, aucun gap,
+  aucune graine** — le contraste du levier gratuit existe maintenant dans
+  le classifieur OFFICIEL, pas seulement dans la sonde.
+- **Le seuil 0.10 track la mort fonctionnelle** : partout ou ABS tire,
+  retention_gain <= +0.025, souvent negatif (unit s4 : -0.004/-0.016 ;
+  s1 : -0.005). Aucun flip sur une ligne fonctionnellement vivante.
+  Bordelines 0.125 : unit s0 gap 16 (14.8), s3 gap 2 (13.7), s4 gap 8
+  (15.8) — coherent avec la sensibilite deja documentee.
+- **Dose-reponse gratuite** : pr(gap) est monotone decroissant sur unit
+  (33->8.8 ; 27->2.9 ; 72->17 ; 20->6.9 ; 26->5.9) et CROISSANT sur usq
+  (17->37 au gap 16) — la marche de retention est une rampe de L
+  independante qui confirme les deux canaux (descente unit,
+  replenissement usq).
+- **CAVEAT no-free-lunch, a garder pour le papier** : usq oublie PLUS
+  VITE aux petits gaps. ret_gain gap 1 : unit ~0.166 moyen (0.125-0.218)
+  vs usq ~0.068 (0.029-0.106) ; gap 2 : unit ~0.13 vs usq ~0.006. usq
+  est gratuit au gap 0 (0.467-0.573, egal/superieur a unit) et
+  rang-stable partout, mais son horizon de retention est plus court que
+  le mi-parcours d'unit. Meme motif que "retention vs memory_gain"
+  (bras larges) : le levier est gratuit en memory_gain, pas en horizon.
+
+### Verdict P-X3 (28/08 ~18h, sonde X10k_text, tx10k 10k pas budget apparie)
+
+Largeur 128 (plancher absolu 12.8), 800 ecritures par rejeu, T2 sur
+checkpoints 2k-10k, 2 graines x 2 blocs.
+
+- **Le texte ne protege pas, il RALENTIT.** s1 b0 refait unit-video au
+  ralenti : r_eff des ecritures 14.7 -> 6.9 le long de l'entrainement,
+  pr final 13.2-16.1 a tous les checkpoints — au ras du plancher absolu,
+  pente descendante, pas encore classable collapse a 10k. s0 reste
+  diverse (r_eff 20-75, pr finaux 25-39), mais avec la MEME derive
+  d'entrainement (b0 : r_eff 74.8 a 2k -> 35.0 a 10k).
+- La variable operante est la diversite APPRISE du flux d'ecriture, pas
+  la modalite : conjugue au volet R (leur stack texte collapse dans une
+  sequence), l'enonce "pas de collapse sur texte" du 4k est mort — c'est
+  une question de vitesse, la loterie et la derive sont les memes.
+- Curiosite consignee : s1 b1 prend le chemin INVERSE (r_eff 50-79,
+  m_norm 0.25-0.51, pr qui MONTE 14.5 -> 27.8) — un gros m de haut rang
+  qui replenit, coherent avec le canal DC a m divers.
+
+## P-CD / P-R2 — interventions sur le levier de magnitude (enregistrees AVANT lancement, 28/08 ~18h30)
+
+Motivation : le dossier "pallier le collapse" n'a que des contrastes
+observationnels entre bras. Ces trois runs le transforment en causal +
+transfert. Design commun : decomposer MECANIQUE (la regle appliquee au
+rejeu) vs APPRIS (la regle appliquee pendant l'entrainement).
+
+- **P-CD-1 (dose de c au rejeu, notre stack, confiance 65%)** : sur les
+  usq10k geles, c-override 35 / 87.5 / 1400 / 3500 au rejeu laisse le pr
+  essentiellement PLAT (la diversite directionnelle est apprise ; psi au
+  rejeu ne decorrele rien). Si c=35 (psi sature = unit mecanique)
+  reproduit le collapse d'unit, le levier est mecanique — consigner.
+- **P-R2a (psi_c a l'inference sur LEUR stack, confiance 70%)** : la
+  regle usq greffee sur newtonschulz5 de lucidrains, appliquee au rejeu
+  seulement sur ckpt_prlaw_final, ne repare PAS le collapse
+  intra-sequence (pr reste 1-3 en fin de sequence, r_eff des ecritures
+  inchange).
+- **P-R2b (psi_c pendant l'entrainement sur LEUR stack, confiance 55% —
+  le vrai test de transfert)** : reentrainement 4000 pas identique
+  (graine 0) avec la regle active -> le r_eff des ecritures du modele
+  final est superieur au baseline et le pr intra-sequence ne descend
+  plus a 1-3. Si FAUX : le levier usq est une propriete de NOTRE bras,
+  pas une regle portable — a dire tel quel dans le papier (borne la
+  section pistes).
+  Garde-fou : verifier d'abord que la loss de R2b converge comme le
+  baseline (sinon le pr ne compare rien) ; c auto-calibre par EMA de la
+  mediane (regle anti-piege-du-c), consigne dans patch_psic.py.
+
+## Campagne week-end 28-31/08 (enregistree AVANT lancement, 28/08 soir)
+
+Contexte : ~160 heures-carte disponibles. Objectifs : (i) rendre la
+section (c,alpha) PROSPECTIVE (dose de c a l'entrainement), (ii) passer
+les claims 30k et stride de n=1 a n=2, (iii) la baseline lucidrains non
+patchee (reference de R2). Configs verifiees identiques a mu_usq10k
+(batch 8, T=64, seg 8, dim 128, w1 128x128, qk l2) — seule varie la
+quantite testee.
+
+- **P-CDT (dose de c a l'entrainement, usq, c in {35, 87.5, 350 natif,
+  1400, 3500}, 2 graines, 10k pas).** psi au depot typique (||S||~350) :
+  0.96 / 0.90 / 0.64 / 0.24 / 0.10.
+  - P-CDT-1 (confiance 60%) : memory_gain unimodal en c, max au c natif
+    350 (la regle de la mediane mesuree) ; les deux extremes perdent
+    >= 25%. ALTERNATIVE enregistree : la boucle externe compense le c
+    trop grand en gonflant ||S|| (comme l'effacement d'eta_init/alpha) —
+    memory_gain plat cote haut ; ce serait un resultat en soi ("c doit
+    s'enoncer en unites effectives").
+  - P-CDT-2 (confiance 70%) : la stabilite du rang se degrade quand c
+    baisse (continuum usq -> unit) : les bras c35 refont unit (pr sonde
+    bas, flips retention au gap <= 32 sur >= 1 graine sur 2) ; c1400 et
+    c3500 rang-stables.
+  - P-CDT-3 (confiance 65%) : en T2 (checkpoints), le r_eff des
+    ecritures des bras c35 derive vers le bas comme unit ; c natif
+    stable.
+- **P-T30-s1** : memes predictions que P-T30-1..3 appliquees a la graine
+  1 ; le point est la VARIANCE (loterie unit dej a documentee pr 1.5-49 a
+  10k) — aucun verdict 30k ne sera enonce sur n=1.
+- **P-S4-s1** : meme direction que P-S4-1 sur la graine 1.
+- **P-RLAD-1 (confiance 75%)** : les checkpoints lucidrains 2000/3000/
+  final montrent le collapse intra-sequence au moins aussi severe que le
+  1000 (pr final 1-3) — l'entrainement ne se repare pas tout seul.
+  Reference directe de P-R2a/P-R2b.
+- Retentions absrule ajoutees en fin de w2 : familles cdt, rawdir_usq,
+  usq30k/unit30k/dec30k (graines presentes), tx10k (cache texte) — le
+  classifieur OFFICIEL sur tout le neuf.

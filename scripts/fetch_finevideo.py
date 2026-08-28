@@ -37,12 +37,22 @@ import time
 
 
 def youtube_id(row: dict) -> str:
-    """L'identifiant YouTube, quel que soit le champ qui le porte."""
-    for k in ("original_json_filename", "youtube_id", "video_id", "id"):
-        v = row.get(k)
+    """L'identifiant YouTube, depuis ``json.original_json_filename``.
+
+    Verifie sur le shard 0 : le parquet n'a que deux colonnes, ``mp4`` (octets)
+    et ``json`` (struct), et l'identifiant est le nom du fichier source --
+    ``d6b4OmUFt7I.json``. Aucun champ de premier niveau ne le porte, donc une
+    heuristique qui cherche en surface renverrait "" pour toutes les lignes et
+    **la purge du juge ne rejetterait rien, en silence**. D'ou l'exception plus
+    bas plutot qu'un retour vide.
+    """
+    j = row.get("json") or {}
+    for k in ("original_json_filename", "original_video_filename"):
+        v = j.get(k)
         if isinstance(v, str) and v:
             return re.sub(r"\.(json|mp4)$", "", os.path.basename(v))
-    return ""
+    raise KeyError("identifiant YouTube introuvable : le schema de FineVideo a "
+                   "change, la purge LongVideoBench serait inoperante")
 
 
 def video_bytes(row: dict) -> bytes:
@@ -59,19 +69,8 @@ def video_bytes(row: dict) -> bytes:
 
 
 def duration_s(row: dict) -> float:
-    for k in ("duration_seconds", "duration", "video_duration"):
-        v = row.get(k)
-        if isinstance(v, (int, float)) and v > 0:
-            return float(v)
-    j = row.get("json") or row.get("metadata")
-    if isinstance(j, str):
-        try:
-            d = json.loads(j).get("duration_seconds")
-            if d:
-                return float(d)
-        except Exception:
-            pass
-    return 0.0
+    v = (row.get("json") or {}).get("duration_seconds")
+    return float(v) if isinstance(v, (int, float)) and v > 0 else 0.0
 
 
 def main() -> None:
@@ -133,6 +132,9 @@ def main() -> None:
                 continue
             if vid in banned:                 # <- la purge du juge
                 dropped_lvb += 1
+                if dropped_lvb <= 10:
+                    print(f"    exclu (present dans LongVideoBench) : {vid}",
+                          flush=True)
                 continue
             dur = duration_s(r)
             if dur and dur < a.min_seconds:
@@ -143,8 +145,7 @@ def main() -> None:
                 continue
             with open(os.path.join(vid_dir, vid + ".mp4"), "wb") as f:
                 f.write(blob)
-            meta = {k: v for k, v in r.items()
-                    if not isinstance(v, (bytes, bytearray))}
+            meta = r.get("json") or {}
             man.write(json.dumps({"id": vid, "duration": dur,
                                   "meta": meta}, default=str) + "\n")
             man.flush()
