@@ -62,9 +62,11 @@ print("saved fig_r_dose.pdf")
 # ---------- figure homotopie ----------
 fig, ax = plt.subplots(figsize=(6.2, 3.8))
 # (c effectif, gain 4k, label, borne?)
+# NOTE 27/08 : le point c=inf (bras non borne) est retire — il venait de
+# l'hybride maison retire (archive_rescale_2026-08-27.md). L'extremite
+# non bornee sera re-mesuree sur l'echelle Titans-litterale.
 pts = [
-    (1e4, 0.206, "rescale (c=inf,\nNaN au rejeu)", False),
-    (1.0, 0.206, "clip c=1\n(inerte)", False),
+    (1.0, 0.206, "clip c=1\n(cap jamais actif)", False),
     (0.07, 0.318, "clip c=0.07", True),
     (0.03, 0.330, "softclip c=0.03", True),
     (4.5e-4, 0.001, "softclip c=mediane\n(le piege du c)", True),

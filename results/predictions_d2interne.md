@@ -238,3 +238,15 @@ et C (controles longs) : verdicts a la fin du runner.
   guettait l'etat, elle ne pouvait rien trouver. Prochaine sonde : meme
   protocole, guetter la PREMIERE non-finitude dans le chemin de
   prediction (retrieval normalise ? attention ?) au gap 256, par ligne.
+
+## CORRECTION 26/08 apres-midi — le verdict chasse est SUPPLANTE (sonde A)
+
+Le re-diagnostic du matin (« mur du rejeu = non-finitude du READOUT sur
+etat fini rang-degenere ») etait un artefact d'instrument. La sonde A
+(diag_readout_probe.py, predictions_sondes.md) montre : premier etage non
+fini = memory.update, BLOC 1, sur toutes les lignes touchees (w0/w1 non
+finis, biais finis). Le mur du rejeu EST une explosion d'etat — D1 au
+rejeu — dans le bloc que ni memory_health (passe bloc-0) ni la chasse
+(wm_fig2_hunt.py, blocks[0]) ne regardaient. P-F2a ne tombait que parce
+que la chasse guettait le mauvais bloc. health_finite=True etait vrai du
+bloc 0 seulement. Verdicts detailles : results/predictions_sondes.md.

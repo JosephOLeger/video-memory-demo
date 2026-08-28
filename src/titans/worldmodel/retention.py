@@ -53,6 +53,15 @@ from .train import load_latent_cache
 # value that depends on the memory's width.
 COLLAPSE_PR_FRAC = 0.25    # participation ratio fallen to a quarter of its gap-0 value
 COLLAPSE_COS = 0.95        # retrievals for distinct queries nearly parallel
+# Absolute floor, as a fraction of the memory width (min dim of W1). The
+# relative rule alone is blind to an artifact TRAINED into collapse: its
+# degenerate gap-0 pr becomes the reference and the whole walk is tagged
+# healthy. Measured basis (campaign 2026-08-28, width 128): collapsed unit
+# seeds sit at pr 1.5-13, healthy arms at 20-70 -- 0.10 x width separates
+# them (one borderline seed at 13.4 documented in the predictions file).
+# Applies from gap 0 itself, so a collapsed artifact stops the reach walk
+# immediately. Rows without ``pr_width`` (older results) skip this rule.
+COLLAPSE_PR_ABS_FRAC = 0.10
 
 
 def classify(curve: list[dict]) -> list[dict]:
@@ -63,14 +72,17 @@ def classify(curve: list[dict]) -> list[dict]:
     ref = None
     for c in curve:
         pr, cos = c.get("pr"), c.get("cos_ret")
+        width = c.get("pr_width")
         finite = c.get("health_finite", True) and all(
             isinstance(v, float) and v == v for v in (c["l1_repeat"], c["l1_cross"]))
         if ref is None and pr is not None and pr == pr:
             ref = pr
         if not finite:
             c["status"] = "diverge"
-        elif pr is not None and ref and (
-                pr < COLLAPSE_PR_FRAC * ref or (cos is not None and cos > COLLAPSE_COS)):
+        elif pr is not None and (
+                (ref and pr < COLLAPSE_PR_FRAC * ref)
+                or (width and pr < COLLAPSE_PR_ABS_FRAC * width)
+                or (cos is not None and cos > COLLAPSE_COS)):
             c["status"] = "collapse"
         else:
             c["status"] = "sain"
@@ -131,6 +143,8 @@ def retention_curve(model, va: torch.Tensor, T: int, K: int, gaps,
     four full-model passes over ``n_eval``.
     """
     out = []
+    w1_0 = model.blocks[0].memory.init_memory(1)[0]["w1"]
+    pr_width = int(min(w1_0.shape[-2:]))
     for n in gaps:
         if n + 2 > va.shape[0]:
             continue
@@ -157,6 +171,7 @@ def retention_curve(model, va: torch.Tensor, T: int, K: int, gaps,
             "gain_memoff": l_crs_off - l_rep_off,
             "mem_effect": l_rep_off - l_rep,
             "pr": h["pr"], "w1_norm": h["norm"], "cos_ret": h["cos_ret"],
+            "pr_width": pr_width,
             "health_finite": bool(h["finite"]),
         })
     return classify(out)
