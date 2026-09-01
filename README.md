@@ -3,10 +3,16 @@
 A from-scratch PyTorch implementation of Google Research's **Titans**
 ([arXiv:2501.00663](https://arxiv.org/abs/2501.00663)) and **ATLAS**
 ([arXiv:2505.23735](https://arxiv.org/abs/2505.23735)) neural long-term memory,
-applied to a **video world model in latent space**, plus one architectural idea
-of our own: a **metaplastic momentum cascade** that comes from neither paper.
+applied to a **video world model in latent space**, plus two ingredients of our
+own that come from neither paper: the **`unit_squash` / ψ_c magnitude rule**
+(§9.14) — the write-size law the stability results now rest on — and a
+**metaplastic momentum cascade** (§4; out of scope for the current paper).
 
-The memory is the research object; the world model is what stresses it.
+The memory is the research object; the world model is what stresses it. The
+repo's main product is the stability and rank-collapse analysis behind the
+theory paper (ICLR, end of September 2026; experiment freeze Sept 10-12). The
+Qwen graft (§6) is the second paper's thread; it trains on a separate machine
+and its results are journaled outside this README.
 
 ---
 
@@ -17,15 +23,15 @@ attention cannot hold at matched cost? Not "is it the best world model" — the 
 is an associative memory, judged on recall, not on prediction loss. Never call our own
 chunked block "quadratic"; it isn't.
 
-**Where the project stands.**
+**Where the project stands** (updated 2026-09-01).
 
 | | |
 |---|---|
-| settled | the divergence is a **curvature feedback** in the memory MLP's own hidden layer, and ATLAS's un-rescaled Newton-Schulz removes it — 104 800 writes with no wall against 80 for the control (§9.13, §9.14); reach is set by `α` alone under a bounded step, `α* ≈ 1/(2d)`, `SNR* ≈ 0.61√(P/d)` (§9.15); the gate/normalisation set that works (`SANE`, §9.1); the graft is bit-identical to the frozen host at init and costs 0.0092 % of its parameters (§6) |
-| live | what the bound **costs**: `unit` gave −59 % `memory_gain` on the world model, and whether that is the price of stability or a mis-scaled step is what the α-law sweep and the `squash` arm are measuring; whether the cascade still *functions* under a bound that discards its readout magnitude — a stability trace cannot tell, only retention can |
-| refuted | more memory buys more reach — it bought **less** (3.8 → 0.5 min, h32 → h512), because wider diverges sooner (§9.16); the stability *margin* as a survival criterion (§9.9); `normalize_hidden` as a fix — it is a 54× delay, still exponential (§9.14) |
-| abandoned | the synthetic MQAR/copy/needle benchmark and its `membench` package, removed 2026-08-14. EgoLifeQA is the benchmark; **we do not invent new ones** |
-| next | train the branch on EgoLife with the host frozen, `unit` (or `squash`) + cascade, `α` set from the closed form. The evaluation benchmark is still unchosen and must not be EgoLife |
+| settled | the divergence is a **curvature feedback** in the memory MLP's own hidden layer, and what removes it is bounding the write's **magnitude**, not its direction: un-rescaled NS (`unit`) takes 104 800 writes with no wall against 80 for the control (§9.13, §9.14), and `rawdir_usq` — raw direction, ψ_c magnitude — trains healthy 2/2, so the magnitude rule alone carries stability while NS buys ~+25 % quality; the **literal published rule is untrainable** (non-finite death on 8/8 seeds within ≤8 outer steps, `θ* < 0.03` on our bench, dies inside a single forward at `θ ≥ 0.08`) — no trainable unbounded reference exists; bounding each step does **not** bound the state — the state bound is the pair `(c, α)` (`‖M∞‖ ≤ c/α` aligned, `~c√(1/2α)` decorrelated; witness: softclip `c=64` bounded-step arm with hidden curvature 3.8e6); **rank collapse is a learned gate pathology** — the outer loop drives the momentum gate to η ≈ 0, the eta head alone carries the healthy/collapsed difference (chimera swaps, 3/3 seed pairs), and no replay-time intervention restores function (§9.17); reach is set by `α` alone under a bounded step, `α* ≈ 1/(2d)`, `SNR* ≈ 0.61√(P/d)` (§9.15); reproduced end-to-end on the lucidrains reference stack, where retraining with ψ_c improves LM from 6.42 to 3.25 bpc (§9.17.6); the SANE gate set (§9.1); the graft is bit-identical to the frozen host at init and costs 0.0092 % of its parameters (§6) |
+| live | **why** the outer loop abandons momentum when ψ is absent — the one open mechanism link, stated as open in the paper; the seed-consolidation pass, deferred until the paper's scope freezes |
+| refuted | more memory buys more reach — it bought **less** (3.8 → 0.5 min, h32 → h512), because wider diverges sooner (§9.16); the stability *margin* as a survival criterion (§9.9); `normalize_hidden` as a fix — a 54× delay, still exponential (§9.14); "η is too large" as the collapse story — inverted: in-replay η is effectively **zero** on the collapsed arm (§9.17.3; measurement trap in §7.4); κ diverging as η → 1 — it saturates at `m(m+1)/2`, `m` is the knob (§12); CV(θ) as a lever — r = −0.99 across arms, but the causal test refutes it |
+| abandoned | the synthetic MQAR/copy/needle benchmark and its `membench` package (2026-08-14); the `content_specificity` metric (§7.1); **every rescale-era result** — see the purge banner at the top of §9 |
+| next | experiment freeze Sept 10-12, then writing. The graft thread (Qwen distillation, LongVideoBench) continues separately on the other machine |
 
 **Standing constraints on new experiments.**
 
@@ -39,12 +45,24 @@ chunked block "quadratic"; it isn't.
 * Register predictions **before** launching anything that could be read either way —
   `results/predictions_*.md`. The margin was refuted this way and it is the reason we
   trust the refutation.
+* **The rescale purge.** No result measured under `orthogonalize_momentum=rescale`
+  (the default of every artefact before 2026-08-17) may be used or cited: those runs'
+  step scaled with the state and their stability was an accident (§9.14). The
+  Titans-literal arm is the only legitimate *unbounded* reference.
+* **Gates are measured in-replay only** — never by feeding raw latents into
+  `_project`. The heads are bimodal in their input; the raw-latent distribution reads
+  η ≈ 0.995 on an arm whose real in-replay η is ~1e-6 (§7.4).
 
 **Where things are.** Code here; real runs on the workstation
 (`~/work/titans-mac`, synced by rsync — verify with `md5sum`, not `git status`).
-Raw JSON is mirrored into `results/box/`, and `scripts/nightly_report.sh` renders the
-CSVs, figures and `ETAT.md` into Josep's results folder every 30 minutes. Multi-phase
-sweeps self-drive from one cron entry through `scripts/tau_chain.sh` (§11).
+Frozen artefacts of the collapse campaign live in `frozen_muon/` on the box (326 at
+last count, `mu_unit10k_s*/mu_usq10k_s*` plus per-step checkpoints); its outputs in
+`results/prlaw3/`. **The live lab log is `results/predictions_collapse_2026-08-28.md`**
+— predictions registered before launch, then verdicts, refutations and the two
+methodological retractions, appended in order; the other `predictions_*.md` are
+per-study. The cron-driven pools are torn down (the box crontab is empty as of
+2026-09-01); `scripts/nightly_report.sh` and `scripts/tau_chain.sh` remain as tooling,
+not as running processes. Paper drafts live outside the repo.
 
 ---
 
@@ -495,11 +513,43 @@ sorted glob of consecutive EgoLife clips, i.e. one continuous recording) for any
 that claims a wall; `--repeat` tiles a single clip and makes the probe **easier**, not
 harder — at period `P` the memory learns the loop and the driving gradient dies.
 
+### 7.4 Retention, the collapse detector, and how to measure gates
+
+Added during the collapse campaign (§9.17); these are now the instruments the paper's
+claims rest on.
+
+* **`worldmodel/retention.py`** sweeps the echo over distance: repeat
+  `[V ; D_1..D_n ; V]` against cross `[U ; D_1..D_n ; V]`, where the distractors are
+  *other* clips (distinct `torch.roll` offsets per row — none is that row's `V` or
+  `U`). Only the final block is scored (horizon `K=24`, first 4 positions skipped),
+  and each condition also runs with the memory reset per segment — the mem-off floor.
+  `mem_effect = l1_repeat_memoff − l1_repeat` is the headline (is carrying state worth
+  anything at all); `retention_gain = l1_cross − l1_repeat` is the content-specific
+  trace of `V`. **Retention and `memory_gain` disagree**: a wider memory scores better
+  at distance 0 *and* forgets faster — rank on the curve, never on the point.
+* **The absolute collapse rule**: flag any artefact whose state `pr < 0.10 ×` memory
+  width, readable from gap 0. It tags 5/5 collapsed `unit` seeds at gap 32 against
+  0/5 `usq`, and wherever it fires, `retention_gain ≤ +0.025` — it tracks functional
+  death. A *relative* rule (pr fallen to 25 % of its gap-0 value) is blind to an
+  artefact **trained into** collapse, whose degenerate gap-0 pr becomes its own
+  reference.
+* **Score divergence and collapse jointly.** Counting only NaN mismeasures stability:
+  a finite near-rank-1 state is just as dead. Every family-level scoring uses
+  `diverged` AND `acc_mean` together.
+* **Gates must be measured in-replay** (`scripts/diag_gates_shadow.py`: wrap
+  `_project` during a real replay and read the gate outputs there — optionally
+  evaluating a *donor's* heads on the same inputs). Feeding raw val latents into
+  `_project` (`scripts/measure_alpha.py`, kept as a cautionary tale) is the wrong
+  input distribution for the bimodal heads. Measured cost of that error: it read
+  η median 0.995 on an arm whose in-replay η is ~1e-6, and α windows of 15-36 writes
+  where the in-replay ones are ~200-500. Both wrong claims were retracted in the lab
+  log on 2026-09-01.
+
 ## 8. Tests
 
 ```bash
 pip install -e '.[test]'
-pytest                       # 161 tests
+pytest                       # 391 tests
 ```
 
 Beyond shapes and trainability, the suite guards the properties that turned out to
@@ -528,6 +578,14 @@ adding a flag.
 
 ## 9. Results
 
+> **The rescale purge (standing).** Every result below measured under the default
+> `orthogonalize_momentum=rescale` — §9.2, §9.3, §9.6-§9.10 among them — is
+> **retired as evidence**: those runs' inner step was `θ‖∇ℓ‖`-scaled, so their
+> stability was an accident of the NS rescale (§9.14). The sections are kept for
+> their instruments, orderings and lessons, not their numbers. Post-purge evidence
+> lives in the bounded family (`unit` / `unit_squash`, §9.14) and in the collapse
+> campaign (§9.17).
+
 > **Read every "η = x" label below as "`eta_init` = x", not as the momentum the
 > model ended up using.** Measured 2026-08-14 on 58 frozen artefacts: the outer loop
 > moves the momentum gate far off its initialisation, and it does so **bimodally** —
@@ -541,7 +599,12 @@ adding a flag.
 > | 0.995-0.999 | 0.98-0.997 on all seeds |
 >
 > So `eta_init` selects a **basin**, it does not set `η`, and the boundary sits near
-> 0.95. Two consequences, both unresolved at the time of writing: any statement here
+> 0.95. **Resolved 2026-08-31/09-01**: this bimodality is the rank-collapse mechanism
+> itself — the basin the outer loop picks decides whether the write stream keeps
+> rank, transplanting the eta head alone flips a collapsed artefact's write geometry
+> to healthy on 3/3 seed pairs, and forcing a constant η at replay reproduces the
+> whole dose curve; see §9.17.3. Two consequences, both unresolved at the time of
+> writing (and both since absorbed into §9.17): any statement here
 > of the form "at η = 0.9, so `τ_acc` = 10 tokens" is about a model whose real
 > `τ_acc` is ~1 for most seeds; and the `τ*` bracket of §9.9 is computed on that
 > mislabelled axis, so its *numbers* are provisional even though the transition it
@@ -874,6 +937,9 @@ a within-family diagnostic, never as a stability certificate.
 `cos_ret` at the end of the stream rises 0.29 → 0.64 and the tail penalty halves. Rank
 collapse and functional collapse are not the same thing.
 
+The mechanism behind the collapse column of this table — and why "training longer
+does not fix it" was exactly right — is now established: §9.17.
+
 ### 9.10 Past distance 0 the memory is a net cost, and it is interference not decay
 
 Scored with the memory-off control (`mem_effect = L1(memory off) − L1(repeat)`), at
@@ -933,6 +999,18 @@ Note the two divergence mechanisms are **not** the same: scalar arms diverge by 
 accumulation with *small* θ; cascade arms by θ compensation with margin < 1. They do
 not belong on one axis.
 
+**Resolved (collapse campaign, late August).** The cascade's divergence was a
+**conserved mode**: with no terminal leak, `B` has an eigenvalue exactly 1, the
+conserved total grows and κ grows *linearly* — it was not the leak rate being too
+high, and raising `r` could never fix it (the outer loop repays every increment in
+θ, as measured above). The admissible regime follows from the horizon alone:
+`K ≥ log₄(T)` and effective rate `r_eff ≤ 0.1/T`. Two more closures: the measured
+cascade spans **~1.7 independent filters regardless of K** — justify `K` by reach,
+never by "K timescales" — and the readout decays as `t^−0.07` against Benna-Fusi's
+`t^−0.5` envelope: the implementation is missing its beakers (no per-reservoir
+capacity `C_k`, no terminal leak, `r` orders of magnitude too high). The cascade
+thread is **out of scope for the theory paper** and parked here.
+
 ### 9.12 Seed variance is larger than most tables here admit
 
 Measured across 6 seeds per arm: `cas_none` spans a factor **24** on `θ_max`. Several
@@ -967,7 +1045,7 @@ never fitted to.
 (measured 35.2 at `m=8, η=0.995`, formula 36), so `θλ` at chunk 0 scales like `m²`:
 0.037 at `m=8`, 0.32 at 16, 1.02 at 64. All three still die after 5-11 *chunk steps*.
 
-### 9.14 Four magnitude conventions for the inner step
+### 9.14 Five magnitude conventions for the inner step
 
 `newton_schulz5` restored `‖G‖_F` — so orthogonalisation was purely **directional**
 and bounded nothing. "We already use Muon, so the step is bounded" was false for this
@@ -983,7 +1061,7 @@ as a stability result — ATLAS motivates Muon as second-order information, and 
 paper contains the words "stability", "divergence" or "clipping" at all. Structurally
 it is the only hard bound either has on the inner loop.
 
-`orthogonalize_momentum` now takes four values. `True` still means `rescale`,
+`orthogonalize_momentum` now takes five values. `True` still means `rescale`,
 bit-for-bit, so every frozen artefact reproduces.
 
 | | `‖ΔM‖` | surprise hierarchy |
@@ -992,6 +1070,7 @@ bit-for-bit, so every frozen artefact reproduces.
 | `unit` | `≈ θ` | only the learned gate `θ_t` |
 | `clip=c` | `min(‖S‖, c)` | flat above `c` |
 | `squash=c` | `(2c/π)·arctan(π‖S‖/2c)` | **monotone everywhere** |
+| `unit_squash=c` | `≈ θ·ψ_c(‖S‖)`, `ψ_c ∈ [0,1)` — bound exactly `unit`'s | **monotone everywhere** |
 
 `squash` is Josep's. `φ_c` is monotone at every scale, bounded by `c` (so `‖M‖` has a
 fixed point at **`c/α`** — which is how `c` should be chosen), and `≈ x` below `c` so
@@ -999,6 +1078,26 @@ normal operation is unchanged. arctan rather than tanh on purpose: polynomial ra
 than exponential saturation keeps ~1e6× more discriminability at `10c`, which is
 exactly where the surprising tokens are. It is also a **homotopy between the two
 papers**: `c → ∞` is Titans (unbounded), `c → 0` is ATLAS (magnitude discarded).
+
+**`unit_squash` (Josep, 2026-08-18) is the rule the paper is built on** — the `usq`
+family. It multiplies the un-rescaled NS output by the dimensionless
+`ψ_c(‖S‖) = (2/π)·arctan(π‖S‖/2c) ∈ [0, 1)`, so the bound is exactly `unit`'s
+(`‖ΔM‖₂ ≤ θ_t`) while the amplitude stays monotone in the *accumulated* surprise —
+ψ couples the deposit to `‖S‖` without adding a bound. `S` accumulates the **raw**
+gradient (`θ` never enters the momentum recurrence — squashing a θ-scaled quantity is
+what made the earlier `squash=0.25` arm silently reproduce `unit`), and `c` is set
+from the measured raw `‖S‖`, mid-transition. `unit` is the `c → 0` limit (coupling
+≡ 0), Titans-literal the `c → ∞` end, so the family is a homotopy with the
+**coupling** as the knob. State `c` in **effective units**: retrained with imposed
+`c ∈ {35 … 3500}` the outer loop compensates (deposit spread 3.5× for a ψ spread of
+10×) and gains stay flat 0.47-0.61 — what `c` keeps is the *rank* channel (§9.17.5).
+
+**On the world model the same conversion closes §9.4**: `unit` trains 5/5 seeds
+healthy where `rescale` diverged 0/5 at the same seeds, at −59 % `memory_gain` on
+that arm — the cost the `(c, α)` family was then built to price (the `usq` head of
+the 14-arm family table recovers 0.533 at 10k under the joint divergence+quality
+scoring). The `clip` arm's apparent free lunch was an artefact of the cap binding
+essentially always, which discards `θ_t` too.
 
 **The wall, on a continuous stream** — 40 consecutive EgoLife clips × 64 frames =
 104 800 fresh writes, ~20 min of egocentric video, `d_mem=128`, layer 24, chunk 8:
@@ -1091,6 +1190,131 @@ memory that dies sooner. The sweep is worth redoing under a bounded step, where 
 
 Caveat for any write-up: these artefacts ran ~2500 steps, so every magnitude is
 roughly half its converged value (§9.8). Absolute reaches are a lower bound.
+
+### 9.17 The rank-collapse campaign (2026-08-22 → 09-01)
+
+The paper's C3. Everything below is journaled with pre-registered predictions —
+including the refuted ones and two retractions — in
+`results/predictions_collapse_2026-08-28.md`; probes in `scripts/diag_*`, artefacts
+in `frozen_muon/`, outputs in `results/prlaw3/`. Baseline objects: matched twins
+`mu_unit10k_s*` (the `c → 0` limit, coupling off) and `mu_usq10k_s*` (`unit_squash`),
+5 seeds each, checkpoints every 2000 steps.
+
+#### 9.17.1 The phenomenon is learned, not dynamical
+
+Write diversity dies during **outer** training: `unit` state pr falls 69 → 2.9
+between 2k and 10k steps (checkpoints), and by 30k the collapse is an **attractor**
+— pr 2-7, write `r_eff` 1.3-3.5 from step 4000 on, both seeds, no lottery left. At
+10k the seed lottery *is* the learned write diversity: a `unit` seed whose write
+stream keeps `r_eff` 55 ends at state pr 49.5; its sisters at `r_eff` ~2 end at pr
+1.5-7.3. It is a property of the slow weights, not of the input stream: at real
+timescales the stride pair **inverts** the redundancy intuition — `str4` (≈ native
+470 ms/latent rate) collapses 2/2 (write `r_eff` 1.8-9, gain 0.27-0.30) while
+`ctrl64` (110 ms, 4× more temporally correlated) stays diverse (`r_eff` up to 42,
+gain 0.38-0.40); the learnability confound is assumed and stated. Text input does
+not protect either: 1/2 `tx10k` seeds collapse.
+
+#### 9.17.2 Why a momentum-less write is thin
+
+For one chunk of `m` tokens each layer's gradient is a sum of `m` outer products,
+so a single write has rank ≤ m by construction — and the measured `r_eff` of
+native `unit` writes is ~1.3-3.5 (§9.17.3). NS preserves singular vectors, so
+`rank(U) = rank(S)`: a write carries exactly the rank the momentum buffer holds,
+and at η = 0 that is one instant's worth. **Param naming trap**: in
+`mem.memory.params`, `w0` is the *input* layer and `w1` the **output** layer —
+every state-pr number in this campaign is measured on the output layer. The learned
+inits are healthy in both arms (`w0` pr 22-59, `w1` pr 38-82, no separation): the
+degeneracy is not baked in at init, it develops during replay.
+
+#### 9.17.3 The carrier is the eta head (chimera swaps, 31/08-01/09)
+
+Component transplants between frozen twins at replay (`scripts/diag_swap_probe.py`),
+all with the co-adaptation guard (read write norms before pr):
+
+| transplant into collapsed `unit` | verdict |
+|---|---|
+| replay rule alone | nothing carried — the reverse (usq weights + unit rule) even stays healthy, `r_eff` 49/49 |
+| `k/v/q` projections | no rescue (b1 stays at `r_eff` 1.7); reverse direction harmless — neither necessary nor sufficient |
+| theta head alone | disengages (usq's θ is 4× smaller; write norms 0.27 → nothing lands) |
+| alpha head alone | marginal |
+| learned memory init | nothing (consistent with healthy inits) |
+| **eta head alone** | **full rescue: write `r_eff` 2-4 → 38-68, state pr → 39-59, 3/3 matched seed pairs** |
+
+The in-replay shadow (`diag_gates_shadow.py`, same trunk inputs, both arms' heads):
+`unit`'s η **median ~1e-6** (99.9 % of tokens < 0.9) against 0.94-0.99 for `usq`;
+θ 4× larger on `unit` (med 0.28/0.13 vs 0.066/0.033); α comparable (~2e-4 →
+windows of ~200-500 writes). The dose is **monotone** (`diag_eta_probe.py`, constant
+η forced at replay on frozen `unit`): `r_eff` 1.3 (η=0) → 7.0 (0.5) → 14.5 (0.8) →
+23.3 (0.9) → 36.6 (0.95) → 52.4 (0.98); state pr 4.8 → 46.5. Native `unit` sits at
+the η=0 end. Reading: with η = 0 each write is a single chunk's gradient — rank ≤ m
+and measured ≈ 1, aligned chunk to chunk; **momentum is what feeds NS
+rank**. Write norms grow ×5.9 along the dose via the `√rank(S)` channel (σᵢ ≈ 1 on
+more directions) — *not* norm restoration; the `‖U‖ = θ‖S‖` reading was an error
+(the `rescale=True` semantics applied to arms that run `rescale=False`), caught by
+Josep on 01/09 and retracted in the lab log.
+
+#### 9.17.4 No replay-time cure
+
+Restoring η on a collapsed frozen artefact repairs the write geometry and destroys
+the function: on the retention protocol, gap-0 `mem_effect` goes **+0.221 (native)
+→ −0.72 (η forced 0.98) / −0.78 (eta head grafted)**, and the θ-compensation control
+(write norms brought to native scale or below) does not recover it (−0.32 at
+θ=0.03, −0.79 at 0.08). The read path is co-adapted to momentum-less writes.
+Consequence for the paper: stability against collapse is a **training-time design
+condition**, not an inference patch. (Protocol note: even healthy `usq` has negative
+`mem_effect` at gaps ≥ 1 on the spliced-distractor stream — the functional reference
+is gap 0, within-protocol.)
+
+#### 9.17.5 ψ_c is the operative ingredient — and the *why* is the open link
+
+Trained c-dose (`cdt`, imposed `c ∈ {35 … 3500}`): gains flat 0.47-0.61 (the outer
+loop compensates — state `c` in effective units), while write diversity **rises as
+`c` falls** (`r_eff` 35-52 at c=35 vs 17-33 at c ≥ 1400) — yet `unit`, the `c → 0`
+*limit* where the coupling is identically zero, collapses. So it is not the
+saturation level, not the hierarchy, not informativeness-weighting (each tested):
+it is the **presence of the ψ coupling in the loop**. At replay there is also a
+mechanical stage at frozen weights: small `c` sums the writes democratically (state
+pr med 47.7-53.1 at c 35-87.5) against plutocratically at large `c` (14.3 at 1400,
+9.7 at 3500). What ψ does to the *outer loop's* preference — why it keeps η alive —
+is the one mechanism link still open, and the paper states it as such.
+`usq`'s own profile: at 30k, gains 0.72-0.78 and 0/2 retention collapses, but slow
+erosion after ~16k steps (state pr min 30 → 12.7/14.0) — stop the outer loop at the
+plateau. Also settled here: `rawdir_usq` (raw direction + ψ_c magnitude) trains
+healthy 2/2 with *better* write rank (46-59) — stability and rank are carried by
+the magnitude rule; NS adds ~+25 % quality.
+
+#### 9.17.6 External reproduction (lucidrains `titans-pytorch`, enwik8)
+
+Their trained default collapses **within a sequence**: state pr 63.7 → 1-3, 12/12
+streams, 3/3 memory layers, and training worsens it (write `r_eff` med 2.1 → 1.7
+from ckpt 2000 to final). Verified by an independent path (all 4 heads, float64
+SVD, functional retrieval corroboration). Their channel differs from ours: **no η
+pathology** (momentum gate med 0.32-0.55 per chunk) — instead the learned
+*forgetting* is extreme (decay gate med 0.54-0.79 **per chunk** → a 1-2-chunk
+window; `‖W‖` 11.3 → 0.8-3 in half a sequence). Same retreat from long-term memory,
+through whichever gate the architecture leaves open (theirs runs three undocumented
+stabilisers: qk-rmsnorm, spectral-norm on surprises, per-parameter lr modulation).
+ψ_c applied at inference only does **not** repair (pr med 1.0). ψ_c **retrained**
+(4000 steps, `c` calibrated then frozen — `patch_psic.py`, ~15 lines): write
+`r_eff` 1.64 → 4.29 (max 48.8), state pr med 1.0 → 6.5 (max 92.6), writes alive at
+sequence end (last-50 norm 1.96 vs 0.22), and LM improves — bpc anchor **6.42 →
+3.25** global on 4096-char eval, 3.88 → 2.19 inside the 0-512 training window,
+extrapolation profile 3.88→8.11 vs 2.19→4.46 (slope halved). The learned gates are
+essentially unchanged after retraining: the rule acts through the writes, not the
+gates. Caveats: n=1 per arm, 4000 steps, may partly rescue the mistuned default
+`max_lr = 1e-1`, 1/12 NaN stream in the baseline measurements.
+
+#### 9.17.7 State-level law and non-levers
+
+Two channels at the state level: an early drop by correlated near-rank-1
+fluctuations, then lock-in by the coherent drift `m̄` (~2 % of a write's norm;
+mass ~L² against ~L for the fluctuations). The operational DC law
+`pr(L) = pr(dec^L·W₀ + (Σw)·m̄)` predicts the α-override dose within 2-24 % with no
+free parameter (12 configs); the harmonic form
+`1/pr = (α/r_eff)·Φ(ρ) + 1/d₁ + 1/g` sits at 1.2 % median over 89 synthetic
+configs. `α` is **not** a mitigation lever (override ≥ 3e-3 crushes pr to 1-3,
+exactly as the DC law predicts); decoupling read from write is causal (×10 pr at
+block 1) at −20 % gain.
 
 ## 10. Data/parameter proportions: an accepted deviation
 
@@ -1199,7 +1423,10 @@ JOBS=jobs_ref64.txt GUARD=13000 PREFIX=S bash scripts/keepalive.sh
 crontab -l | { cat; echo "*/10 * * * * JOBS=jobs_ref64.txt GUARD=13000 PREFIX=S /bin/bash \$HOME/work/titans-mac/scripts/keepalive.sh"; } | crontab -
 ```
 
-**Multi-phase studies run from one cron entry.** `scripts/tau_chain.sh` is the live
+**Multi-phase studies run from one cron entry.** (No pool is currently installed —
+the box crontab is empty as of 2026-09-01; the collapse campaign ran as
+self-chaining `run_*.sh` scripts launched detached instead, see
+`scripts/run_mechanism_day.sh` for the pattern.) `scripts/tau_chain.sh` is the worked
 example: each phase is gated on the previous one's jobs being *gone* (`pgrep`), not on
 its queue file being empty — the in-flight cells of a drained queue still hold cards,
 and starting the next phase then is what caused the OOMs of 2026-07-29. A phase that
@@ -1268,3 +1495,6 @@ Never built:
   35.2 at `η=0.995` against the bound 36. So "long retention and long accumulation in
   direct tension" does not hold as stated, and **`m` is the high-leverage knob**, not
   `η` — `κ` grows at least linearly in `m` in both regimes while `η` saturates.
+  A later m-sweep briefly appeared to *reverse* the sign of κ's prediction; rescored
+  under the joint divergence+quality rule (§7.4), the ceiling falls with `m` as κ
+  says — the reversal was a scoring artefact.
