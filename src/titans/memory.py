@@ -410,6 +410,7 @@ class NeuralMemory(nn.Module):
         normalize_hidden: "bool | float" = False,
         alpha_init: Optional[float] = None,
         eta_init: Optional[float] = None,
+        rank_cap: Optional[int] = None,
     ):
         super().__init__()
         # ATLAS Table 7 specifies the memory MLP as 2 layers, expansion factor 4,
@@ -617,6 +618,17 @@ class NeuralMemory(nn.Module):
         # architecture alone" -- the discriminating probe for artefacts whose
         # margin audit reads theta_t ~ 1e-6 while mem_effect stays positive.
         self.theta_override: Optional[float] = None
+        # Same instrument for the momentum gate. eta_override forces the per-token
+        # momentum gate to a constant at read time, to separate "the write RULE
+        # collapses the rank" from "the learned momentum gate carries the
+        # collapse" (override rescues without retraining). None leaves every code
+        # path bit-identical. Set on a loaded model, e.g. `mem.eta_override = 0.0`.
+        self.eta_override: Optional[float] = None
+        # rank_cap (probe only): cap the online write of w1 to a fixed rho-dim
+        # key-subspace inside _step, so the memory holds ~rho independent
+        # associations. None (default) leaves every code path bit-identical.
+        self.rank_cap = rank_cap
+        self._rank_bases: dict = {}
 
     # ------------------------------------------------------------------ utils
     def _grad_fn(self):
@@ -729,6 +741,8 @@ class NeuralMemory(nn.Module):
         if self.alpha_override is not None:
             alpha = torch.full_like(alpha, self.alpha_override)
         eta = torch.sigmoid(self.eta_head(x)).squeeze(-1)
+        if self.eta_override is not None:
+            eta = torch.full_like(eta, self.eta_override)
         theta = self._theta(self.theta_head(x)).squeeze(-1) * self.theta_scale
         if self.theta_override is not None:
             theta = torch.full_like(theta, self.theta_override)
@@ -779,6 +793,42 @@ class NeuralMemory(nn.Module):
         if self.window_size <= 1:
             return None
         return torch.sigmoid(self.gamma_head(x)).squeeze(-1)
+
+    def _rank_project(self, A: torch.Tensor, r: int) -> torch.Tensor:
+        """Cap each ``[B, out, in]`` matrix in ``A`` to rank <= ``r`` (probe only).
+
+        Projects the in-side (key discrimination) onto a FIXED r-dim orthonormal
+        subspace, cached per ``(r, in_dim, device, dtype)``, so the memory can
+        respond to at most ``r`` key-directions -> at most ~``r`` retrievable
+        associations. Pure matmul (no SVD sync), differentiable, so a rank-capped
+        arm still trains. r >= in_dim is a no-op (default full-rank == uncapped).
+        """
+        in_d = A.shape[-1]
+        if r >= in_d:
+            return A
+        key = (r, in_d, A.device, A.dtype)
+        proj = self._rank_bases.get(key)
+        if proj is None:
+            g = torch.Generator(device=A.device).manual_seed(1234 + r)
+            M = torch.randn(in_d, r, generator=g, device=A.device, dtype=A.dtype)
+            B, _ = torch.linalg.qr(M)              # [in, r] orthonormal (one-time)
+            proj = B @ B.transpose(-2, -1)         # [in, in] rank-r projector
+            self._rank_bases[key] = proj
+        return A @ proj
+
+    def _rank_w0(self, key: str, like: torch.Tensor) -> torch.Tensor:
+        """Cached init weight ``W_0[key]`` matching ``like``'s batch/device/dtype.
+
+        The rank cap bounds the *online write* ``W - W_0`` (the delta from the
+        learned initial memory), so it needs ``W_0``; init_state is deterministic.
+        """
+        ck = ("w0", key, like.shape[0], like.device, like.dtype)
+        w0 = self._rank_bases.get(ck)
+        if w0 is None:
+            w0 = self.memory.init_state(like.shape[0])[key].to(
+                device=like.device, dtype=like.dtype)
+            self._rank_bases[ck] = w0
+        return w0
 
     def _step(
         self,
@@ -919,6 +969,13 @@ class NeuralMemory(nn.Module):
                     # update_bias=False).
                     update = newton_schulz5(update, **self._orth_mag_kwargs())
                 new_state[key] = self._bcast(1.0 - alpha_t, w) * w + update
+        if self.rank_cap is not None and "w1" in new_state:
+            # Probe only: cap the online write of the key-side matrix w1 to a
+            # fixed rank-``rank_cap`` subspace, so the memory can hold ~rank_cap
+            # independent associations. Applied to the delta from the learned init.
+            _w0 = self._rank_w0("w1", new_state["w1"])
+            _w = new_state["w1"]
+            new_state["w1"] = _w0 + self._rank_project(_w - _w0, self.rank_cap)
         return new_state, new_S
 
     def retrieve(self, state: Params, q: torch.Tensor) -> torch.Tensor:
