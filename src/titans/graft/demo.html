@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mémoire greffée sur Qwen</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #14213D; --ink2: #3D4A63; --muted: #7A8699; --line: #E3E8EE;
+    --bg: #FFFFFF; --card: #FFFFFF; --soft: #F2F5F7;
+    --accent: #2A9D8F; --accentd: #1D6F65; --accentbg: #E6F4F2;
+    --warm: #E76F51; --warmbg: #FCEDE8;
+    --shadow: 0 1px 2px rgba(20,33,61,.06), 0 8px 24px rgba(20,33,61,.06);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 Inter, "Helvetica Neue", Helvetica, Arial, sans-serif;
+         -webkit-font-smoothing: antialiased; }
+  main { max-width: 1180px; margin: 0 auto; padding: 28px 16px 56px; }
+
+  /* ---------- en-tete ---------- */
+  header { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px;
+           flex-wrap: wrap; margin-bottom: 22px; }
+  .eyebrow { font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
+             color: var(--accent); margin-bottom: 6px; }
+  h1 { font-size: 30px; line-height: 1.15; margin: 0 0 6px; font-weight: 800; letter-spacing: -.01em; }
+  .lede { color: var(--ink2); margin: 0; max-width: 680px; }
+  .pills { display: flex; gap: 8px; flex-wrap: wrap; }
+  .pill { font-size: 12px; font-weight: 600; padding: 5px 10px; border-radius: 999px;
+          background: var(--card); border: 1px solid var(--line); color: var(--ink2); }
+
+  /* ---------- panneaux ---------- */
+  .grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 20px; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+           box-shadow: var(--shadow); padding: 18px; }
+  .step { display: flex; align-items: center; gap: 10px; font-weight: 700; margin: 0 0 12px; }
+  .step b { width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: #fff;
+            display: inline-flex; align-items: center; justify-content: center; font-size: 13px; }
+
+  .stage { position: relative; background: #000; border-radius: 10px; overflow: hidden;
+           aspect-ratio: 16 / 9; }
+  .stage video { width: 100%; height: 100%; display: block; object-fit: contain; }
+  .flash { position: absolute; inset: 0; display: none; }
+  .flash span { position: absolute; left: 12px; top: 12px; font-size: 12px; font-weight: 700;
+                background: rgba(0,0,0,.55); color: #fff; padding: 4px 8px; border-radius: 6px; }
+
+  /* ---------- frise ---------- */
+  .tl { position: relative; margin-top: 14px; height: 104px; user-select: none; cursor: crosshair; }
+  .tl .thumbs { position: absolute; left: 0; right: 0; top: 18px; height: 48px;
+                background-size: 100% 100%; border-radius: 6px; }
+  .tl .shade { position: absolute; top: 18px; height: 48px; left: 0;
+               background: linear-gradient(0deg, rgba(231,111,81,.35), rgba(231,111,81,.15));
+               border-radius: 6px 0 0 6px; pointer-events: none; }
+  .tl .win { position: absolute; top: 14px; height: 56px; right: -2px; border: 2.5px solid var(--accent);
+             border-radius: 7px; pointer-events: none; }
+  .tl .lab { position: absolute; top: 0; font-size: 11px; font-weight: 700; letter-spacing: .04em;
+             text-transform: uppercase; white-space: nowrap; }
+  .tl .lab.past { left: 0; color: var(--warm); }
+  .tl .lab.wl { right: 0; color: var(--accent); }
+  .tl .needle { position: absolute; top: 14px; height: 56px; width: 0; pointer-events: none; }
+  .tl .needle::before { content: ""; position: absolute; left: -2px; top: 0; width: 4px; height: 58px;
+                        background: var(--ink); border-radius: 2px; }
+  .tl .needle i { position: absolute; left: -9px; top: 54px; width: 18px; height: 18px; border-radius: 5px;
+                  transform: rotate(45deg); border: 2px solid var(--card); box-shadow: 0 0 0 1.5px var(--ink); }
+  .tl .play { position: absolute; top: 18px; width: 2px; height: 48px; background: #fff;
+              box-shadow: 0 0 0 1px rgba(0,0,0,.45); pointer-events: none; }
+  .tl .ticks { position: absolute; left: 0; right: 0; top: 84px; height: 18px; font-size: 11px;
+               color: var(--muted); }
+  .tl .ticks span { position: absolute; transform: translateX(-50%); }
+  .tl .ticks span:first-child { transform: none; }
+  .tl .ticks span:last-child { transform: translateX(-100%); }
+  .hint { font-size: 12.5px; color: var(--muted); margin-top: 4px; }
+
+  /* ---------- controles ---------- */
+  .field { margin-bottom: 16px; }
+  .field > .lbl { display: block; font-size: 12px; font-weight: 700; letter-spacing: .06em;
+                  text-transform: uppercase; color: var(--muted); margin-bottom: 7px; }
+  select { width: 100%; font: inherit; padding: 9px 10px; border: 1px solid var(--line);
+           border-radius: 8px; background: var(--card); color: var(--ink); }
+  .swatches { display: grid; grid-template-columns: repeat(9, 1fr); gap: 7px; }
+  .sw { aspect-ratio: 1; border-radius: 9px; cursor: pointer; position: relative;
+        border: 1px solid rgba(0,0,0,.12); transition: transform .12s; }
+  .sw:hover { transform: translateY(-2px); }
+  .sw.on { box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--ink); }
+  .sw.none { background: repeating-linear-gradient(45deg, var(--soft) 0 5px, var(--card) 5px 10px);
+             font-size: 9.5px; font-weight: 700; color: var(--muted); display: flex;
+             align-items: center; justify-content: center; text-align: center; }
+  .chosen { font-size: 13.5px; color: var(--ink2); margin-top: 8px; }
+  .when { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+          background: var(--soft); border-radius: 10px; padding: 10px 12px; }
+  .when .t { font-size: 22px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .when .z { font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 999px; }
+  .z.past { background: var(--warmbg); color: var(--warm); }
+  .z.win { background: var(--accentbg); color: var(--accentd); }
+  .z.none { background: var(--card); color: var(--muted); border: 1px solid var(--line); }
+  .btn { font: inherit; font-weight: 700; border: 0; border-radius: 10px; cursor: pointer;
+         padding: 12px 18px; transition: background .15s, transform .1s; }
+  .btn:active { transform: translateY(1px); }
+  .btn.ghost { background: var(--card); color: var(--ink); border: 1px solid var(--line);
+               padding: 8px 12px; font-size: 13px; font-weight: 600; }
+  .btn.go { width: 100%; background: var(--accent); color: #fff; font-size: 16px;
+            display: flex; align-items: center; justify-content: center; gap: 10px; }
+  .btn.go:hover { background: var(--accentd); }
+  .btn.go:disabled { opacity: .7; cursor: wait; }
+  .spin { width: 16px; height: 16px; border: 2.5px solid rgba(255,255,255,.4); border-top-color: #fff;
+          border-radius: 50%; animation: r .8s linear infinite; display: none; }
+  .btn.go:disabled .spin { display: inline-block; }
+  @keyframes r { to { transform: rotate(360deg); } }
+  details { margin-top: 14px; }
+  summary { cursor: pointer; font-size: 13px; color: var(--muted); font-weight: 600; }
+  .q { white-space: pre-line; font: 12.5px/1.5 ui-monospace, Menlo, Consolas, monospace;
+       background: var(--soft); border-radius: 8px; padding: 10px 12px; margin: 8px 0 0; color: var(--ink2); }
+
+  /* ---------- resultats ---------- */
+  .res { display: grid; grid-template-columns: 1fr auto 1fr; gap: 16px; margin-top: 22px; align-items: stretch; }
+  @media (max-width: 760px) { .res { grid-template-columns: 1fr; } .vs { display: none; } }
+  .vs { align-self: center; font-weight: 800; color: var(--muted); font-size: 13px; }
+  .model { position: relative; overflow: hidden; }
+  .model.mem { border-color: var(--accent); }
+  .model .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+  .model h3 { margin: 0; font-size: 17px; font-weight: 800; }
+  .model .what { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .tag { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+         padding: 4px 8px; border-radius: 6px; background: var(--soft); color: var(--muted); }
+  .model.mem .tag { background: var(--accentbg); color: var(--accentd); }
+  .ans { display: flex; align-items: center; gap: 14px; margin: 16px 0; min-height: 56px; }
+  .ans .big { width: 56px; height: 56px; border-radius: 12px; border: 1px solid rgba(0,0,0,.12);
+              flex: none; }
+  .ans .nm { font-size: 22px; font-weight: 800; line-height: 1.1; }
+  .ans .conf { font-size: 13px; color: var(--muted); }
+  .ans .empty { color: var(--muted); font-size: 14px; }
+  .verd { margin-left: auto; font-size: 13px; font-weight: 800; padding: 6px 12px; border-radius: 999px; }
+  .ok { background: var(--accentbg); color: var(--accentd); }
+  .ko { background: var(--warmbg); color: var(--warm); }
+  .bars .b { display: grid; grid-template-columns: 14px 56px 1fr 38px; gap: 8px; align-items: center;
+             font-size: 12.5px; padding: 3px 6px; border-radius: 6px; color: var(--ink2); }
+  .bars .b.gold { background: var(--soft); color: var(--ink); font-weight: 700; }
+  .bars .track { height: 9px; background: var(--soft); border-radius: 5px; overflow: hidden; }
+  .bars .b.gold .track { background: var(--card); }
+  .bars .fill { height: 100%; border-radius: 5px; transition: width .5s cubic-bezier(.2,.8,.2,1);
+                box-shadow: inset 0 0 0 1px rgba(0,0,0,.12); }
+  .bars .pc { text-align: right; font-variant-numeric: tabular-nums; }
+  .loading .ans, .loading .bars { opacity: .35; transition: opacity .2s; }
+
+  .verdict { margin-top: 16px; padding: 14px 16px; border-radius: 12px; display: flex; gap: 12px;
+             align-items: flex-start; background: var(--card); border: 1px solid var(--line); }
+  .verdict .ic { width: 28px; height: 28px; flex: none; border-radius: 50%; display: flex;
+                 align-items: center; justify-content: center; font-weight: 800; color: #fff;
+                 background: var(--muted); }
+  .verdict.good { border-color: var(--accent); background: var(--accentbg); }
+  .verdict.good .ic { background: var(--accent); }
+  .verdict.neutral .ic { background: var(--ink2); }
+  .err { color: var(--warm); font-weight: 600; }
+  footer { margin-top: 28px; font-size: 12.5px; color: var(--muted); text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <div class="eyebrow">Démo · mémoire TTT greffée</div>
+      <h1>Retrouver une image sortie du contexte</h1>
+      <p class="lede">Insérez un flash de couleur dans la vidéo, puis posez la même question aux deux modèles.
+        Qwen ne voit que la fenêtre récente. La version greffée a aussi une mémoire de tout le passé.</p>
+    </div>
+    <div class="pills">
+      <span class="pill">Qwen2.5-VL-3B gelé</span>
+      <span class="pill">vidéos jamais vues</span>
+      <span class="pill" id="pill-ck">checkpoint</span>
+    </div>
+  </header>
+
+  <div class="grid">
+    <section class="panel">
+      <p class="step"><b>1</b> Placer l'aiguille dans la vidéo</p>
+      <div class="stage">
+        <video id="vid" controls preload="metadata" muted></video>
+        <div class="flash" id="flash"><span>aiguille</span></div>
+      </div>
+      <div class="tl" id="tl" title="Cliquez pour placer l'aiguille">
+        <span class="lab past">passé · seule la mémoire le voit</span>
+        <span class="lab wl">fenêtre</span>
+        <div class="thumbs" id="thumbs"></div>
+        <div class="shade" id="shade"></div>
+        <div class="win" id="win"></div>
+        <div class="play" id="play"></div>
+        <div class="needle" id="needle"><i id="needle-i"></i></div>
+        <div class="ticks" id="ticks"></div>
+      </div>
+      <div class="hint">Cliquez sur la frise pour placer l'aiguille. La fenêtre (encadrée) est vue par les deux modèles.</div>
+    </section>
+
+    <section class="panel">
+      <p class="step"><b>2</b> Choisir et lancer</p>
+      <div class="field">
+        <span class="lbl">Vidéo</span>
+        <select id="sel"></select>
+      </div>
+      <div class="field">
+        <span class="lbl">Couleur de l'aiguille</span>
+        <div class="swatches" id="sw"></div>
+        <div class="chosen" id="chosen"></div>
+      </div>
+      <div class="field">
+        <span class="lbl">Instant</span>
+        <div class="when">
+          <div><div class="t" id="tlabel">0:00</div></div>
+          <span class="z" id="zone"></span>
+          <button class="btn ghost" id="here">Instant de lecture</button>
+        </div>
+      </div>
+      <button class="btn go" id="go"><span class="spin"></span><span id="go-txt">Poser la question</span></button>
+      <div class="hint" id="status" style="text-align:center;margin-top:8px"></div>
+      <details>
+        <summary>Voir la question posée aux deux modèles</summary>
+        <pre class="q" id="prompt"></pre>
+      </details>
+    </section>
+  </div>
+
+  <div class="res" id="res">
+    <div class="panel model">
+      <div class="top"><div><h3>Qwen seul</h3><div class="what">fenêtre récente uniquement</div></div>
+        <span class="tag">base</span></div>
+      <div class="ans" id="a-base"><span class="empty">En attente de la question…</span></div>
+      <div class="bars" id="b-base"></div>
+    </div>
+    <div class="vs">VS</div>
+    <div class="panel model mem">
+      <div class="top"><div><h3>Qwen + mémoire</h3><div class="what">même fenêtre + mémoire du passé</div></div>
+        <span class="tag">greffé</span></div>
+      <div class="ans" id="a-mem"><span class="empty">En attente de la question…</span></div>
+      <div class="bars" id="b-mem"></div>
+    </div>
+  </div>
+  <div class="verdict neutral" id="verdict"><span class="ic">i</span>
+    <div id="vtext">Choisissez une couleur et un instant, puis posez la question.</div></div>
+
+  <footer id="foot"></footer>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const FR = {red:"rouge", green:"vert", blue:"bleu", yellow:"jaune", orange:"orange",
+            purple:"violet", white:"blanc", black:"noir"};
+let META = null, cur = null, color = 0, t = 0;
+
+const fmt = (s) => { s = Math.max(0, Math.round(s));
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
+const rgb = (c) => `rgb(${c.join(",")})`;
+const name = (i) => FR[META.colors[i].name] || META.colors[i].name;
+const winFrac = () => META.window / META.total_frames;
+const winStart = () => cur.dur * (1 - winFrac());
+
+async function init() {
+  META = await (await fetch("/meta")).json();
+  $("prompt").textContent = META.prompt;
+  $("pill-ck").textContent = META.ckpt.replace(/\.pt$/, "");
+  $("foot").textContent = `${META.total_frames} images échantillonnées par vidéo, dont les `
+    + `${META.window} dernières forment la fenêtre · aiguille de ${META.needle_frames} images · `
+    + `la mémoire écrit 1 token sur ${META.write_stride} de tout le passé`;
+  for (const v of META.videos) {
+    const o = document.createElement("option");
+    o.value = v.name; o.textContent = `${v.name.replace(/\.mp4$/, "")}  ·  ${fmt(v.dur)}`;
+    $("sel").appendChild(o);
+  }
+  META.colors.forEach((c, i) => {
+    const d = document.createElement("div");
+    d.className = "sw"; d.style.background = rgb(c.rgb); d.title = name(i);
+    d.onclick = () => pick(i); $("sw").appendChild(d);
+  });
+  const n = document.createElement("div");
+  n.className = "sw none"; n.textContent = "aucune"; n.title = "pas d'aiguille (contrôle)";
+  n.onclick = () => pick(-1); $("sw").appendChild(n);
+  $("sel").onchange = () => load($("sel").value);
+  load(META.videos[0].name); pick(5);
+}
+
+function pick(i) {
+  color = i;
+  [...$("sw").children].forEach((el, j) =>
+    el.classList.toggle("on", i < 0 ? j === META.colors.length : j === i));
+  $("chosen").innerHTML = i < 0 ? "Aucune aiguille : contrôle, il n'y a rien à retrouver."
+    : `Aiguille <b>${name(i)}</b>, ${META.needle_frames} images d'aplat.`;
+  draw();
+}
+
+function load(nm) {
+  cur = META.videos.find((v) => v.name === nm);
+  $("vid").src = "/video?name=" + encodeURIComponent(nm);
+  $("thumbs").style.backgroundImage = `url(/thumbs?name=${encodeURIComponent(nm)})`;
+  t = cur.dur * 0.3;
+  const n = 5, tk = [];
+  for (let k = 0; k <= n; k++) tk.push(`<span style="left:${k / n * 100}%">${fmt(cur.dur * k / n)}</span>`);
+  $("ticks").innerHTML = tk.join("");
+  clearRes(); draw();
+}
+
+const needleDur = () => cur.dur * META.needle_frames / META.total_frames;
+
+function draw() {
+  if (!cur) return;
+  const wf = winFrac();
+  $("shade").style.width = `calc(${(1 - wf) * 100}% - 3px)`;
+  $("win").style.width = `calc(${wf * 100}% + 2px)`;
+  const nd = $("needle");
+  nd.style.display = color < 0 ? "none" : "block";
+  nd.style.left = `${(t / cur.dur) * 100}%`;
+  if (color >= 0) $("needle-i").style.background = rgb(META.colors[color].rgb);
+  $("tlabel").textContent = color < 0 ? "—" : fmt(t);
+  const z = $("zone");
+  if (color < 0) { z.className = "z none"; z.textContent = "pas d'aiguille"; }
+  else if (t < winStart()) { z.className = "z past"; z.textContent = "dans le passé"; }
+  else { z.className = "z win"; z.textContent = "dans la fenêtre"; }
+}
+
+$("tl").addEventListener("click", (e) => {
+  const r = $("tl").getBoundingClientRect();
+  t = Math.min(cur.dur, Math.max(0, (e.clientX - r.left) / r.width * cur.dur));
+  if (color < 0) pick(5);
+  draw(); $("vid").currentTime = Math.max(0, t - 1.5);
+});
+$("here").onclick = () => { t = $("vid").currentTime || 0; if (color < 0) pick(5); draw(); };
+
+function tick() {
+  const v = $("vid"); if (!cur) return;
+  $("play").style.left = `${(v.currentTime / cur.dur) * 100}%`;
+  const on = color >= 0 && v.currentTime >= t && v.currentTime < t + Math.max(1, needleDur());
+  $("flash").style.display = on ? "block" : "none";
+  if (on) $("flash").style.background = rgb(META.colors[color].rgb);
+}
+$("vid").addEventListener("timeupdate", tick);
+setInterval(tick, 100);
+
+function clearRes() {
+  for (const k of ["base", "mem"]) {
+    $("a-" + k).innerHTML = `<span class="empty">En attente de la question…</span>`;
+    $("b-" + k).innerHTML = "";
+  }
+  setVerdict("neutral", "i", "Choisissez une couleur et un instant, puis posez la question.");
+}
+
+function setVerdict(kind, ic, html) {
+  $("verdict").className = "verdict " + kind;
+  $("verdict").querySelector(".ic").textContent = ic;
+  $("vtext").innerHTML = html;
+}
+
+function render(k, p, gold) {
+  const best = p.indexOf(Math.max(...p)), c = META.colors[best];
+  const ok = gold >= 0 && best === gold;
+  $("a-" + k).innerHTML = `<div class="big" style="background:${rgb(c.rgb)}"></div>
+    <div><div class="nm">${META.letters[best]}. ${name(best)}</div>
+      <div class="conf">confiance ${(p[best] * 100).toFixed(0)} %</div></div>`
+    + (gold >= 0 ? `<span class="verd ${ok ? "ok" : "ko"}">${ok ? "✓ juste" : "✗ faux"}</span>` : "");
+  $("b-" + k).innerHTML = p.map((q, i) => `
+    <div class="b ${i === gold ? "gold" : ""}"><span>${META.letters[i]}</span><span>${name(i)}</span>
+      <div class="track"><div class="fill" style="width:${(q * 100).toFixed(1)}%;background:${rgb(META.colors[i].rgb)}"></div></div>
+      <span class="pc">${(q * 100).toFixed(0)}%</span></div>`).join("");
+  return ok;
+}
+
+$("go").onclick = async () => {
+  $("go").disabled = true; $("go-txt").textContent = "Inférence en cours…";
+  $("res").classList.add("loading"); $("status").textContent = "";
+  try {
+    const r = await fetch("/run", { method: "POST",
+      body: JSON.stringify({ video: cur.name, color, t }) });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    const okB = render("base", d.base, d.gold), okM = render("mem", d.memory, d.gold);
+    if (d.where === "aucune")
+      setVerdict("neutral", "i", "<b>Pas d'aiguille.</b> Il n'y a pas de bonne réponse : la mémoire n'a rien de précis à rappeler.");
+    else if (d.where === "passe")
+      setVerdict(okM && !okB ? "good" : "neutral", okM && !okB ? "✓" : "i",
+        `<b>L'aiguille est dans le passé, hors de la fenêtre.</b> Qwen seul ne peut pas la voir. `
+        + `La mémoire l'a écrite parmi ${d.writes} écritures ; ${d.writes_after} écritures sont venues après.`
+        + (okM && !okB ? " <b>La mémoire la retrouve.</b>" : ""));
+    else if (d.where === "fenetre")
+      setVerdict("neutral", "i", "<b>L'aiguille est dans la fenêtre.</b> Les deux modèles la voient directement : c'est le cas plafond.");
+    else setVerdict("neutral", "i", "<b>L'aiguille est à cheval sur la fenêtre :</b> une partie est visible directement.");
+    $("status").textContent = `réponse en ${d.seconds} s`;
+  } catch (e) {
+    $("status").innerHTML = `<span class="err">${e.message}</span>`;
+  } finally {
+    $("go").disabled = false; $("go-txt").textContent = "Poser la question";
+    $("res").classList.remove("loading");
+  }
+};
+
+init().then(() => { if (location.hash === "#run") setTimeout(() => $("go").click(), 300); })
+  .catch((e) => setVerdict("neutral", "!", `<span class="err">${e.message}</span>`));
+</script>
+</body>
+</html>
