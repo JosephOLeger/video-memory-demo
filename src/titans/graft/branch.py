@@ -139,6 +139,11 @@ def memory_kwargs_from_args(args) -> dict:
         kw["orthogonalize_clip"] = g("muon_scale")
     if g("cascade"):
         kw.update(use_cascade_momentum=True, cascade_reservoirs=g("reservoirs", 6))
+    if (g("omega_window") or 1) > 1:           # ATLAS Omega, vraie fenetre glissante
+        kw.update(window_size=g("omega_window"), window_stride=g("omega_stride") or 1,
+                  window_cross_chunk=True)
+    if (g("feature_degree") or 1) > 1:         # ATLAS : feature map polynomiale (diagonale)
+        kw["feature_degree"] = g("feature_degree")
     return kw
 
 

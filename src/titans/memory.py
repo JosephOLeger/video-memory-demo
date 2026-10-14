@@ -340,6 +340,15 @@ class NeuralMemory(nn.Module):
         memorises a local *context* rather than individual tokens. Because the
         gradient is linear, this is just a gated sliding-window sum of the
         per-token gradients we already compute -- no extra backward passes.
+    window_stride: with ``window_cross_chunk``, the window of token ``t`` is ``t``
+        itself plus the last ``c-1`` positions ``p < t`` with ``p % s == 0``: ``c``
+        gradients spanning about ``c*s`` tokens. Neighbouring video latents are
+        near-duplicates, so a stride buys span at the cost of ``c`` gradients.
+    window_cross_chunk: ``False`` (default) clamps the window at the chunk start,
+        the historical approximation (widths ``1..m`` inside a chunk, stride
+        ignored). ``True`` is a real sliding window: the gradients of the window
+        tokens from earlier chunks are recomputed at the current chunk-start
+        weights (about ``c-1`` extra gradients per chunk).
     use_cascade_momentum: opt-in flag (default ``False`` -> bit-identical to the
         original scalar-momentum Titans). When ``True`` the single momentum scalar
         ``S_t`` per weight is replaced by a length-``K`` metaplastic cascade state
@@ -384,6 +393,8 @@ class NeuralMemory(nn.Module):
         theta_gate: str = "softplus",
         window_size: int = 1,
         window_normalize: bool = False,
+        window_stride: int = 1,
+        window_cross_chunk: bool = False,
         use_cascade_momentum: bool = False,
         cascade_reservoirs: int = 4,
         cascade_beta1: float = 0.5,
@@ -468,6 +479,12 @@ class NeuralMemory(nn.Module):
         if window_size < 1:
             raise ValueError("window_size (Omega c) must be >= 1")
         self.window_size = window_size
+        if window_stride < 1:
+            raise ValueError("window_stride must be >= 1")
+        if window_stride > 1 and not window_cross_chunk:
+            raise ValueError("window_stride > 1 needs window_cross_chunk=True")
+        self.window_stride = window_stride
+        self.window_cross_chunk = window_cross_chunk
         # Divide the Omega window sum by its gate mass (see _scan_chunked). Off by
         # default: Eq 58 writes a plain sum, and turning this on is a deliberate
         # deviation to separate "more context" from "bigger inner step".
@@ -794,6 +811,21 @@ class NeuralMemory(nn.Module):
             return None
         return torch.sigmoid(self.gamma_head(x)).squeeze(-1)
 
+    def _window_idx(self, t: int, chunk_start: int) -> list:
+        """Positions of the Omega window of token ``t`` (ascending, ``t`` last).
+
+        Clamped mode: ``max(t-c+1, chunk_start, 0) .. t``. Cross-chunk mode: ``t``
+        plus the last ``c-1`` grid positions ``p < t``, ``p % stride == 0``.
+        """
+        c, s = self.window_size, self.window_stride
+        if not self.window_cross_chunk:
+            return list(range(max(t - c + 1, chunk_start, 0), t + 1))
+        if c == 1:
+            return [t]
+        last = ((t - 1) // s) * s                       # last grid point < t
+        grid = [p for p in range(last - (c - 2) * s, last + 1, s) if p >= 0]
+        return grid + [t]
+
     def _rank_project(self, A: torch.Tensor, r: int) -> torch.Tensor:
         """Cap each ``[B, out, in]`` matrix in ``A`` to rank <= ``r`` (probe only).
 
@@ -1062,14 +1094,25 @@ class NeuralMemory(nn.Module):
         for start in range(0, N, chunk_size):
             end = min(start + chunk_size, N)
             G = chunk_grad(state, k[:, start:end], v[:, start:end])
+            # Cross-chunk window: gradients of the earlier window tokens, at the
+            # same chunk-start weights as the chunk's own tokens.
+            old: dict = {}
+            if c > 1 and self.window_cross_chunk:
+                need = sorted({p for t in range(start, end)
+                               for p in self._window_idx(t, start) if p < start})
+                if need:
+                    ix = torch.tensor(need, device=k.device)
+                    Go = chunk_grad(state, k[:, ix], v[:, ix])
+                    old = {p: n for n, p in enumerate(need)}
             for j in range(end - start):
                 t = start + j
                 if c == 1:
                     g = {key: G[key][:, j] for key in state}
                 else:
-                    # Omega: decayed sum of per-token grads over the window,
-                    # clamped to the current chunk (local indices lo..j).
-                    lo = max(0, j - c + 1)
+                    # Omega: gated sum of per-token grads over the window. Clamped
+                    # mode stays inside the chunk; cross-chunk mode also reads the
+                    # recomputed earlier tokens (``Go``).
+                    win = self._window_idx(t, start)
                     g = {}
                     # Optional: divide by the window's total gate mass, turning
                     # Eq 58's plain sum into a weighted average. The sum makes the
@@ -1079,21 +1122,20 @@ class NeuralMemory(nn.Module):
                     # of causing Omega's measured recall regression in July. Off by
                     # default: the sum is what the paper writes.
                     if self.window_normalize and gamma is not None:
-                        mass = sum(gamma[:, start + i] for i in range(lo, j + 1))
+                        mass = sum(gamma[:, p] for p in win)
                     else:
                         mass = None
                     for key in state:
-                        Gk = G[key]
                         acc = None
-                        for i in range(lo, j + 1):
-                            gi = Gk[:, i]
+                        for p in win:
+                            gi = Go[key][:, old[p]] if p < start else G[key][:, p - start]
                             if gamma is not None:
-                                gi = self._bcast(gamma[:, start + i], gi) * gi
+                                gi = self._bcast(gamma[:, p], gi) * gi
                             acc = gi if acc is None else acc + gi
                         if mass is not None:
                             acc = acc / self._bcast(mass + 1e-6, acc)
                         elif self.window_normalize:
-                            acc = acc / (j - lo + 1)
+                            acc = acc / len(win)
                         g[key] = acc
                 x_t = x[:, t] if x is not None else None
                 state, S = self._step(
@@ -1168,22 +1210,23 @@ class NeuralMemory(nn.Module):
             # the current chunk when chunking, exactly as ``_scan_chunked`` does, so
             # the two paths stay comparable; with ``chunk_size=None`` the window is
             # unclamped, which is the fully-online reading of the rule.
-            lo = t - c + 1
-            if chunk_size is not None:
-                lo = max(lo, (t // chunk_size) * chunk_size)
-            lo = max(lo, 0)
+            cs = (t // chunk_size) * chunk_size if chunk_size is not None else 0
+            if chunk_size is None and not self.window_cross_chunk:
+                win = list(range(max(t - c + 1, 0), t + 1))
+            else:
+                win = self._window_idx(t, cs)
             g = None
-            for i in range(lo, t + 1):
+            for i in win:
                 gi = batched_grad(grad_state, k[:, i], v[:, i])
                 if gamma is not None:
                     gi = {key: self._bcast(gamma[:, i], val) * val
                           for key, val in gi.items()}
                 g = gi if g is None else {key: g[key] + gi[key] for key in gi}
             if self.window_normalize:
-                mass = (sum(gamma[:, i] for i in range(lo, t + 1))
+                mass = (sum(gamma[:, i] for i in win)
                         if gamma is not None else None)
                 g = {key: (val / self._bcast(mass + 1e-6, val) if mass is not None
-                           else val / (t - lo + 1)) for key, val in g.items()}
+                           else val / len(win)) for key, val in g.items()}
             state, S = self._step(
                 state, S, g, alpha[:, t], eta[:, t], theta[:, t], x_t=x[:, t]
             )

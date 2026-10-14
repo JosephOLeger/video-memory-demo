@@ -142,3 +142,82 @@ def test_c1_costs_nothing_extra():
     m4 = NeuralMemory(dim=8, num_layers=2, window_size=4)
     assert sum(p.numel() for p in m4.parameters()) > sum(p.numel() for p in m1.parameters())
     assert m1._gamma(torch.randn(2, 8, 8)) is None
+
+
+# ---------------------------------------------------------- cross-chunk window
+def _mem(c, s=1, cross=True, seed=0):
+    torch.manual_seed(seed)
+    return NeuralMemory(dim=8, num_layers=2, window_size=c, window_stride=s,
+                        window_cross_chunk=cross)
+
+
+def test_window_idx_grid():
+    """Cross-chunk window = t plus the last c-1 grid points (p % s == 0) before t."""
+    m = _mem(8, 2)
+    assert m._window_idx(20, 16) == [6, 8, 10, 12, 14, 16, 18, 20]
+    assert m._window_idx(21, 16) == [8, 10, 12, 14, 16, 18, 20, 21]
+    assert m._window_idx(3, 0) == [0, 2, 3]
+    assert m._window_idx(0, 0) == [0]
+    assert _mem(3, 1)._window_idx(5, 4) == [3, 4, 5]          # crosses the chunk
+    assert _mem(3, 1, cross=False)._window_idx(5, 4) == [4, 5]  # clamped
+
+
+def test_stride_needs_cross_chunk():
+    import pytest
+    with pytest.raises(ValueError):
+        NeuralMemory(dim=8, num_layers=2, window_size=4, window_stride=2)
+
+
+def test_cross_chunk_c1_is_titans():
+    """c=1 with the cross-chunk flag is bit-identical to the default memory."""
+    x = torch.randn(2, 13, 8)
+    a = _mem(1, cross=False)
+    b = _mem(1, cross=True)
+    b.load_state_dict(a.state_dict())
+    ya, sa = a.forward_chunked(x, chunk_size=4)
+    yb, sb = b.forward_chunked(x, chunk_size=4)
+    assert torch.equal(ya, yb)
+    for key in sa:
+        assert torch.equal(sa[key], sb[key])
+
+
+def test_cross_chunk_online_equals_unclamped_reference():
+    """Online (one token per chunk), stride 1: the cross-chunk window is the plain
+    last-c window, i.e. the unclamped fully-online reading of Eq 9."""
+    x = torch.randn(2, 11, 8)
+    a = _mem(3, 1, cross=True)
+    ref = _mem(3, 1, cross=False)
+    ref.load_state_dict(a.state_dict())
+    y, s = a.forward_chunked(x, chunk_size=1)
+    y_ref, s_ref = ref.forward_naive_sequential(x, chunk_size=None)
+    assert torch.allclose(y, y_ref, atol=1e-5)
+    for key in s:
+        assert torch.allclose(s[key], s_ref[key], atol=1e-5)
+
+
+def test_cross_chunk_strided_scan_matches_naive():
+    """Chunked scan with a strided cross-chunk window equals the naive loop with the
+    same semantics (all window gradients at the chunk-start weights)."""
+    x = torch.randn(2, 19, 8)
+    m = _mem(4, 2, cross=True)
+    y, s = m.forward_chunked(x, chunk_size=4)
+    y_ref, s_ref = m.forward_naive_sequential(x, chunk_size=4)
+    assert torch.allclose(y, y_ref, atol=1e-5)
+    for key in s:
+        assert torch.allclose(s[key], s_ref[key], atol=1e-5)
+    # and it differs from the clamped window: the earlier chunk does contribute
+    c = _mem(4, 1, cross=False)
+    c.load_state_dict(m.state_dict())
+    y_c, _ = c.forward_chunked(x, chunk_size=4)
+    assert not torch.allclose(y, y_c)
+
+
+def test_cross_chunk_update_matches_forward_state():
+    """``update`` (no retrieval) evolves the same state as ``forward_chunked``."""
+    x = torch.randn(2, 17, 8)
+    m = _mem(8, 2, cross=True)
+    _, s_f = m.forward_chunked(x, chunk_size=8)
+    st, S = m.init_memory(2)
+    s_u, _ = m.update(x, st, S, chunk_size=8)
+    for key in s_f:
+        assert torch.allclose(s_f[key], s_u[key], atol=1e-5)
