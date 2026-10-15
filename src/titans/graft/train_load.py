@@ -383,6 +383,8 @@ def main() -> None:
     ap.add_argument("--feature-degree", type=int, default=1, dest="feature_degree",
                     help="ATLAS : feature map polynomiale des cles (1 = identite)")
     ap.add_argument("--steps", type=int, default=4000)
+    ap.add_argument("--stop-after", type=int, default=None, dest="stop_after",
+                    help="arrete au pas N SANS changer le cosinus (qui suit --steps) : graines comparables a un run long, pas a pas")
     ap.add_argument("--lr", type=float, default=3e-3)
     ap.add_argument("--warmup", type=int, default=50)
     ap.add_argument("--clip-grad", type=float, default=1.0, dest="clip_grad")
@@ -586,6 +588,8 @@ def main() -> None:
             with open(a.out + ".json", "w") as f:
                 json.dump({"args": vars(a), "history": hist, "gates": gate_log,
                            "elapsed_s": time.time() - t0}, f, indent=1)
+        if a.stop_after and step + 1 >= a.stop_after:
+            break
     print("TRAIN-LOAD-FINIE", flush=True)
 
 
