@@ -36,7 +36,7 @@ from collections import defaultdict
 import torch
 import torch.nn.functional as F
 
-from .branch import MemoryBranch, fold_pca, memory_kwargs_from_args
+from .branch import MemoryBranch, fold_pca, memory_kwargs_from_args, add_memory_flags
 from .distill import forced_inputs
 from .qwen import default_layer, disabled, find_decoder_layers, graft
 from .train_load import pr, write_stream
@@ -145,11 +145,12 @@ def evaluate(model, processor, branch, wrapper, vids, ev, lid, a):
                 "lat_wrong": sum(r["lat_wrong"] for r in sel) / n}
 
     out = {"all": summ(rows)}
-    for k in ("shape", "natural"):
+    for k in ("shape", "natural", "color"):
         out[k] = summ([r for r in rows if r["kind"] == k])
         out[k + "_dur"] = summ([r for r in rows if r["kind"] == k and r["window"] != r["gold"]])
     for lo, hi in ((2, 4), (4, 10), (10, 100)):
-        out[f"shape_d{lo}-{hi}"] = summ([r for r in rows if r["kind"] == "shape" and lo <= r["dist"] < hi])
+        out[f"shape_d{lo}-{hi}"] = summ([r for r in rows if r["kind"] in ("shape", "color")
+                                         and lo <= r["dist"] < hi])
     return out
 
 
@@ -165,15 +166,7 @@ def main() -> None:
     ap.add_argument("--margin", type=float, default=0.05)
     ap.add_argument("--teacher-ok-only", type=int, default=1, dest="teacher_ok_only")
     ap.add_argument("--max-past", type=int, default=40, dest="max_past", help="clips de memoire au plus")
-    ap.add_argument("--d-mem", type=int, default=128, dest="d_mem")
-    ap.add_argument("--memory-hidden", type=int, default=64, dest="memory_hidden")
-    ap.add_argument("--chunk", type=int, default=8)
-    ap.add_argument("--write-stride", type=int, default=8, dest="write_stride")
-    ap.add_argument("--alpha-init", type=float, default=1.27e-4, dest="alpha_init")
-    ap.add_argument("--muon", default="unit")
-    ap.add_argument("--omega-window", type=int, default=1, dest="omega_window")
-    ap.add_argument("--omega-stride", type=int, default=1, dest="omega_stride")
-    ap.add_argument("--feature-degree", type=int, default=1, dest="feature_degree")
+    add_memory_flags(ap, write_stride=8)
     ap.add_argument("--init", default=None)
     ap.add_argument("--batch", type=int, default=4)
     ap.add_argument("--steps", type=int, default=3000)
@@ -206,7 +199,7 @@ def main() -> None:
         seen = set()
         ev = [q for q in tr if not (q["vid"] in seen or seen.add(q["vid"]))][:4]
     print(f"{len(vids)} videos ; entrainement {len(tr)} questions "
-          f"({sum(q['kind'] == 'shape' for q in tr)} formes) ; eval {len(ev)}", flush=True)
+          f"({sum(q['kind'] == 'shape' for q in tr)} formes, {sum(q['kind'] == 'color' for q in tr)} couleurs) ; eval {len(ev)}", flush=True)
 
     model = load_host(a.model, torch.bfloat16, a.device)
     processor = AutoProcessor.from_pretrained(a.model)
@@ -250,7 +243,8 @@ def main() -> None:
         print(f"  == eval {step}: memoire {100 * s['mem']:.1f} | autre video {100 * s['wrong']:.1f} | "
               f"fenetre {100 * s['window']:.1f} | enseignant {100 * s['teacher']:.1f} | lat {s['lat_mem']:.3f}"
               f"/{s['lat_wrong']:.3f}  || formes {f('shape')}  formes dures {f('shape_dur')}  "
-              f"naturel {f('natural')}  naturel dur {f('natural_dur')}  || dist "
+              f"naturel {f('natural')}  naturel dur {f('natural_dur')}  couleur {f('color')}  "
+              f"couleur dure {f('color_dur')}  || dist "
               + " ".join(f"{k[7:]} {f(k)}" for k in r if k.startswith("shape_d") and k[7].isdigit()), flush=True)
 
     report(0)

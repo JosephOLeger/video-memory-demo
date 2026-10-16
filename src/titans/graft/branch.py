@@ -36,10 +36,8 @@ The two are separated on purpose. A memory holds a trace for a finite number of
 *writes*, so at one write per token a memory sized for a GPU we own reaches minutes,
 not the 5.9 h median of EgoLifeQA. Writing once every ``write_stride`` tokens
 multiplies the reach by that stride at **no VRAM cost**, while the VLM still sees
-every frame and the branch still reads at every position. The alternative to a
-fixed stride is the surprise gate the memory already implements
-(``cascade_selective``); this class supports either (``write_stride``, or an
-explicit ``write_mask``).
+every frame and the branch still reads at every position. An explicit ``write_mask``
+replaces the fixed stride.
 
 Streaming callers must pass ``token_offset`` -- the absolute index of ``h[:, 0]``
 in the stream -- or the stride's phase silently resets at every call and the write
@@ -103,7 +101,7 @@ SANE_NS = dict(
     theta_scale=0.03,
     normalize_qk="l2",
     normalize_output=False,
-    orthogonalize_momentum=True,
+    orthogonalize_momentum="unit",
     update_bias=False,
 )
 
@@ -122,8 +120,8 @@ def memory_kwargs_from_args(args) -> dict:
     """The memory's construction kwargs, from a run's saved ``args``.
 
     Training and evaluation must build the **same** memory, and most of the ways
-    they can disagree do not change any parameter shape: ``orthogonalize_momentum``,
-    ``theta_gate`` and the cascade flags all leave ``state_dict`` identical. So
+    they can disagree do not change any parameter shape: ``orthogonalize_momentum``
+    and ``theta_gate`` leave ``state_dict`` identical. So
     ``load_state_dict`` succeeds, nothing warns, and the checkpoint is evaluated
     under a different inner loop than the one that trained it. Having one function
     called by both scripts is what keeps that from happening quietly.
@@ -135,16 +133,36 @@ def memory_kwargs_from_args(args) -> dict:
     kw = dict(hidden_dim=g("memory_hidden", 64),
               alpha_init=g("alpha_init", 1.27e-4),
               orthogonalize_momentum=g("muon", "unit"))
-    if g("muon_scale") is not None:            # 0.0 is a real clip, not "absent"
+    if g("muon_scale") is not None:
         kw["orthogonalize_clip"] = g("muon_scale")
-    if g("cascade"):
-        kw.update(use_cascade_momentum=True, cascade_reservoirs=g("reservoirs", 6))
     if (g("omega_window") or 1) > 1:           # ATLAS Omega, vraie fenetre glissante
         kw.update(window_size=g("omega_window"), window_stride=g("omega_stride") or 1,
                   window_cross_chunk=True)
     if (g("feature_degree") or 1) > 1:         # ATLAS : feature map polynomiale (diagonale)
         kw["feature_degree"] = g("feature_degree")
     return kw
+
+
+def add_memory_flags(ap, write_stride: int = 8):
+    """The memory flags every graft script shares; read back by :func:`memory_kwargs_from_args`."""
+    ap.add_argument("--d-mem", type=int, default=128, dest="d_mem")
+    ap.add_argument("--memory-hidden", type=int, default=64, dest="memory_hidden")
+    ap.add_argument("--chunk", type=int, default=8)
+    ap.add_argument("--write-stride", type=int, default=write_stride, dest="write_stride",
+                    help="write one token in s (1 = every token)")
+    ap.add_argument("--alpha-init", type=float, default=1.27e-4, dest="alpha_init",
+                    help="forget gate at rest; alpha ~ 1/(2d) to reach d writes")
+    ap.add_argument("--muon", default="unit", choices=["unit", "unit_squash"],
+                    help="write rule (titans.memory.WRITE_RULES)")
+    ap.add_argument("--muon-scale", type=float, default=None, dest="muon_scale",
+                    help="the scale c of psi_c under unit_squash")
+    ap.add_argument("--omega-window", type=int, default=1, dest="omega_window",
+                    help="ATLAS Omega: sliding window of c writes (1 = Titans)")
+    ap.add_argument("--omega-stride", type=int, default=1, dest="omega_stride",
+                    help="Omega window: t plus the last c-1 positions taken 1 in s")
+    ap.add_argument("--feature-degree", type=int, default=1, dest="feature_degree",
+                    help="ATLAS polynomial feature map on the keys (1 = identity)")
+    return ap
 
 
 class MemoryBranch(nn.Module):
@@ -168,9 +186,7 @@ class MemoryBranch(nn.Module):
         projection (the ablation, and the only option before a basis exists).
     train_down: override the freeze. Defaults to ``down_pca is None``.
     **memory_kwargs: forwarded to :class:`~titans.memory.NeuralMemory`, on top of
-        :func:`sane_memory_kwargs`. This is where the cascade options land
-        (``use_cascade_momentum``, ``cascade_areas``, ``cascade_terminal_leak``,
-        ``cascade_leak_rate``, ...).
+        :func:`sane_memory_kwargs`.
     """
 
     def __init__(self, d_model: int, d_mem: int = 128, *, chunk_size: int = 8,

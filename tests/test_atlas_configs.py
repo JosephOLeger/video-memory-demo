@@ -16,7 +16,7 @@ from titans.worldmodel.model import WorldModel
 def test_ladder_is_cumulative():
     """Each rung must be a strict superset of the one above it, so a difference
     between two adjacent configs isolates exactly one ingredient."""
-    order = ["titans", "phi", "table7", "omega", "atlas", "atlas_cascade"]
+    order = ["titans", "phi", "table7", "omega", "atlas"]
     for lower, upper in zip(order, order[1:]):
         a, b = CONFIGS[lower], CONFIGS[upper]
         assert set(a) <= set(b), f"{upper} drops flags from {lower}"
@@ -47,24 +47,9 @@ def test_each_config_builds_and_differs_from_the_baseline():
         assert not torch.allclose(outs[name], outs["titans"]), \
             f"{name} is numerically identical to the baseline -- a flag is inert"
 
-
-def test_atlas_cascade_trains_end_to_end():
-    """The full stack (phi + Table 7 + Omega + Muon + cascade) must produce finite
-    gradients through the outer loop -- Newton-Schulz on the cascade readout was
-    only wired today, so this path is new."""
-    torch.manual_seed(0)
-    m = WorldModel(latent_dim=16, dim=16, depth=1, segment_size=8,
-                   **CONFIGS["atlas_cascade"])
-    z = torch.randn(2, 16, 16)
-    loss = (m(z)[:, :-1] - z[:, 1:]).abs().mean()
-    loss.backward()
-    grads = [p.grad for p in m.parameters() if p.grad is not None]
-    assert grads and all(torch.isfinite(g).all() for g in grads)
-
-
 def test_describe_names_the_flags():
     assert describe("titans").endswith("(paper default)")
-    assert "feature_degree=2" in describe("atlas_cascade")
+    assert "feature_degree=2" in describe("atlas")
 
 
 def test_run_smoke(tmp_path):
@@ -115,22 +100,3 @@ def test_heads_flag_changes_the_attention_and_defaults_to_one():
 
     z = torch.randn(2, 8, 16)
     assert not torch.allclose(one(z), many(z), atol=1e-6)
-
-
-def test_cascade_beta1_flag_reaches_the_edge_couplings():
-    """beta1 was reachable in NeuralMemory but not from any sweep, so every cascade
-    run so far drained a quarter of reservoir 0 per token. Pin the wiring, not the value."""
-    from titans.worldmodel.frozen import build_cfg
-    from titans.worldmodel.model import WorldModel
-
-    default = build_cfg("sane_ns", cascade=True, leak="surprise", leak_rate=0.1)
-    assert "cascade_beta1" not in default          # absent => NeuralMemory's own 0.5
-
-    cfg = build_cfg("sane_ns", cascade=True, leak="surprise", leak_rate=0.1, beta1=0.1)
-    assert cfg["cascade_beta1"] == 0.1
-    m_lo = WorldModel(latent_dim=32, dim=32, **cfg).blocks[0].memory
-    m_hi = WorldModel(latent_dim=32, dim=32, **default).blocks[0].memory
-    b_lo = float(m_lo.cascade.base_betas[0])
-    b_hi = float(m_hi.cascade.base_betas[0])
-    assert b_lo < b_hi                              # less mass leaves reservoir 0
-    assert b_hi == pytest.approx(0.25)   # beta1 * g^-1, not beta1

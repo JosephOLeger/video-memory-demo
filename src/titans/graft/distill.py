@@ -58,7 +58,7 @@ import time
 import torch
 import torch.nn.functional as F
 
-from .branch import (MemoryBranch, memory_kwargs_from_args,  # noqa: F401
+from .branch import (MemoryBranch, add_memory_flags, memory_kwargs_from_args,  # noqa: F401
                      stride_for_reach)
 from .qwen import branch_report, default_layer, find_decoder_layers, graft
 
@@ -245,19 +245,7 @@ def main() -> None:
                          "la memoire")
     ap.add_argument("--max-new", type=int, default=48, dest="max_new")
     # --- memoire ---
-    ap.add_argument("--d-mem", type=int, default=128, dest="d_mem")
-    ap.add_argument("--memory-hidden", type=int, default=64, dest="memory_hidden")
-    ap.add_argument("--chunk", type=int, default=8)
-    ap.add_argument("--write-stride", type=int, default=2, dest="write_stride")
-    ap.add_argument("--alpha-init", type=float, default=1.27e-4, dest="alpha_init",
-                    help="loi 1/(2d) : d = ecritures a couvrir. 1.27e-4 <-> 3940 "
-                         "ecritures <-> demi-vie de 13.9 min a 22 tokens/s.")
-    ap.add_argument("--muon", default="unit",
-                    choices=["rescale", "unit", "clip", "squash", "unit_squash",
-                             "softclip"])
-    ap.add_argument("--muon-scale", type=float, default=None, dest="muon_scale")
-    ap.add_argument("--cascade", action="store_true")
-    ap.add_argument("--reservoirs", type=int, default=6)
+    add_memory_flags(ap, write_stride=2)
     # --- optimisation ---
     ap.add_argument("--steps", type=int, default=4000)
     ap.add_argument("--lr", type=float, default=1e-3)

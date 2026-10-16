@@ -1,16 +1,8 @@
 """Measure each arm's peak VRAM at the exact shape a sweep will run.
 
 Sizing a pool's memory guard by extrapolating from the lightest arm has cost this
-project three sweeps (74 jobs on 2026-07-29, 22 on 07-31, 2 on 08-03). The arms are
-not close: at ``T=64`` / doubled 128 / ``K=24`` / batch 8 / full BPTT,
-
-    nocas        6.36 GiB
-    nocas_eta10  6.36 GiB
-    cas_tag      9.34 GiB      <- +47%, from the gated readout and selective heads
-
-so a guard set from ``nocas`` puts two ``cas_tag`` jobs on one card and OOMs.
-``--cascade`` costs almost nothing in the *reservoirs* themselves (~1.01x whatever
-``K`` is); the cost is ``--readout gated`` and ``--selective``, about +24% each.
+project three sweeps (74 jobs on 2026-07-29, 22 on 07-31, 2 on 08-03): measure every
+arm at the shape it will run.
 
 Run it once per (cache, horizon, batch, window) before writing the queue:
 
@@ -19,8 +11,8 @@ Run it once per (cache, horizon, batch, window) before writing the queue:
         --val cache/egolife_full_pca128_T64_val.pt --horizon 24 --batch 8
 
 Then set the guard above the heaviest number *plus* the allocator's reserve (which
-runs ~15-25% over ``max_memory_allocated``), and see ``scripts/pool4.sh`` for why
-the guard also has to be read under a per-card lock.
+runs ~15-25% over ``max_memory_allocated``). The guard must also be read under a
+per-card lock: a free-VRAM check is check-then-act.
 """
 
 from __future__ import annotations
@@ -35,10 +27,8 @@ from .training import tbptt_step
 
 #: The reference arms, as their flags appear in a jobs file.
 ARMS = {
-    "nocas": "",
-    "nocas_eta10": "--eta-init 0.9",
-    "cas_tag": "--cascade --reservoirs 6 --leak none --readout gated "
-               "--selective --gate surprise",
+    "unit": "--muon unit --eta-init 0.995",
+    "usq": "--muon unit_squash --muon-scale 350 --eta-init 0.995",
 }
 
 

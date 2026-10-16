@@ -31,7 +31,7 @@ from collections import defaultdict
 import torch
 import torch.nn.functional as F
 
-from .branch import MemoryBranch, memory_kwargs_from_args
+from .branch import MemoryBranch, memory_kwargs_from_args, add_memory_flags
 from .qwen import default_layer, disabled, find_decoder_layers, graft
 from .train_distill import load_targets
 from .train_load import pr, take, write_stream
@@ -112,15 +112,7 @@ def main() -> None:
     ap.add_argument("--mcq", required=True)
     ap.add_argument("--basis", required=True)
     ap.add_argument("--init", default=None, help="checkpoint de depart (branche entiere)")
-    ap.add_argument("--d-mem", type=int, default=128, dest="d_mem")
-    ap.add_argument("--memory-hidden", type=int, default=64, dest="memory_hidden")
-    ap.add_argument("--chunk", type=int, default=8)
-    ap.add_argument("--write-stride", type=int, default=8, dest="write_stride")
-    ap.add_argument("--alpha-init", type=float, default=1.27e-4, dest="alpha_init")
-    ap.add_argument("--muon", default="unit")
-    ap.add_argument("--omega-window", type=int, default=1, dest="omega_window")
-    ap.add_argument("--omega-stride", type=int, default=1, dest="omega_stride")
-    ap.add_argument("--feature-degree", type=int, default=1, dest="feature_degree")
+    add_memory_flags(ap, write_stride=8)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--steps", type=int, default=1500)
     ap.add_argument("--lr", type=float, default=3e-4)

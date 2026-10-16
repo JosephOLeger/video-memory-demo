@@ -95,14 +95,8 @@ def measure(model, z: torch.Tensor, info: dict) -> dict:
         "h0_norm_max": max(col("h0_norm_max")),
         # health: a huge margin reached by having no memory left is not stability
         "pr": h["pr"], "w1_norm": h["norm"], "cos_ret": h["cos_ret"],
-        "cascade": bool(cfg.get("memory_use_cascade")),
-        "leak": cfg.get("cascade_leak"), "leak_rate": cfg.get("cascade_leak_rate"),
+        "muon": cfg.get("memory_orthogonalize_momentum"),
         "eta_init": cfg.get("eta_init"), "theta_scale": cfg.get("theta_scale"),
-        # The two axes of the dilution study: which reservoirs are read, and how fast
-        # reservoir 0 drains into the deeper ones. Without them the audit rows are only
-        # separable by label, which is one rename away from being unreadable.
-        "readout": cfg.get("cascade_readout"), "beta1": cfg.get("cascade_beta1"),
-        "reservoirs": cfg.get("cascade_reservoirs"),
         "label": info["meta"].get("label"), "seed": info["meta"].get("seed"),
     }
 

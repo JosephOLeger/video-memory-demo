@@ -7,12 +7,12 @@
 Sortie : figs/fig_mechanism.pdf
 """
 import json
+import os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-S = ("/tmp/claude-1000/-home-josep-projects/"
-     "53019517-9373-4e5d-b120-604194f089a9/scratchpad")
+S = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "results", "d2interne")
 THR = 2.37
 
 

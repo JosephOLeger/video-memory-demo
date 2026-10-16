@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # Dose de c au rejeu sur les usq10k geles (P-CD-1) : c natif 350 deja
 # sonde (M_usq10k.jsonl) ; on ajoute 35 / 87.5 / 1400 / 3500.
-# Attend la fin de run_ret10k.sh, co-schedule nice sur la carte 3.
+# Co-schedule nice sur la carte 3.
 set -u
 cd "$HOME/work/titans-mac" || exit 1
 PY="$HOME/venvs/titans/bin/python"
 LOG=logs/cdose.log
 : > "$LOG"
-while pgrep -f "run_ret10k.sh" > /dev/null; do sleep 600; done
 echo "depart cdose $(date +%H:%M:%S)" >> "$LOG"
 for c in 35 87.5 1400 3500; do
   echo "--- c=$c ---" >> "$LOG"

@@ -1,16 +1,14 @@
 """A trained world model, packaged so inference needs no configuration.
 
 The problem this solves. A checkpoint stores only ``state_dict``, so reloading one
-means re-specifying the architecture by hand -- for the cascade that is six flags
-(``--cascade --reservoirs 6 --leak none --readout gated --selective --gate surprise``)
-and getting any of them wrong is *not* reliably an error: several change no parameter
-shape, so ``load_state_dict`` succeeds and the model quietly computes something else.
+means re-specifying the architecture by hand, and getting a flag wrong is *not*
+reliably an error: the write rule and the gates change no parameter shape, so ``load_state_dict`` succeeds and the model quietly computes something else.
 Every inference experiment then silently measures a different architecture.
 
 A frozen artifact carries its own config. :func:`load_frozen` returns a model in
 ``eval()`` with ``requires_grad_(False)`` everywhere and nothing left to decide::
 
-    model, info = load_frozen("frozen/nocas.pt")
+    model, info = load_frozen("frozen_muon/mu_unit10k_s0.pt")
 
 "Frozen" here means the *outer* weights: attention, gates, projections and the
 memory's own parameters (its heads and its initial weights). The memory's **state**
@@ -41,12 +39,7 @@ def build_cfg(config: str = "sane_ns", *, eta_init: Optional[float] = None,
               muon: Optional[str] = None,
               muon_scale: Optional[float] = None,
               alpha_init: Optional[float] = None,
-              cascade: bool = False, reservoirs: int = 6, leak: str = "none",
-              leak_rate: float = 1.0, readout: str = "gated",
-              selective: bool = False, gate: str = "surprise",
-              beta1: Optional[float] = None, g: Optional[float] = None,
-              areas: Optional[float] = None, terminal_leak: bool = False,
-              topology: str = "chain", use_memory: bool = True,
+              use_memory: bool = True,
               memory_hidden_dim: Optional[int] = None,
               memory_chunk_size: Optional[int] = None,
               num_heads: Optional[int] = None) -> dict:
@@ -93,42 +86,11 @@ def build_cfg(config: str = "sane_ns", *, eta_init: Optional[float] = None,
         # of 1.39*d. Derived and checked numerically 2026-08-18.
         cfg["alpha_init"] = alpha_init
     if muon is not None:
-        # Which magnitude convention Newton-Schulz uses. sane_ns already turns NS
-        # on in "rescale" mode, which restores ||G|| and therefore bounds nothing;
-        # "unit" is ATLAS Eq 32 literally and "clip" caps only the tail. See
-        # titans.memory.newton_schulz5.
+        # The write rule (titans.memory.WRITE_RULES); sane_ns defaults to "unit".
         cfg["memory_orthogonalize_momentum"] = muon
     if muon_scale is not None:
-        # The magnitude scale c, for `clip` (hard cap) and `squash`
-        # (arctan saturation). ||M|| settles at ~c/alpha, so pick it from
-        # the state norm you want, not by feel.
+        # The scale c of psi_c under "unit_squash".
         cfg["memory_orthogonalize_clip"] = muon_scale
-    if cascade:
-        cfg.update(memory_use_cascade=True, cascade_reservoirs=reservoirs,
-                   cascade_leak=leak, cascade_leak_rate=leak_rate,
-                   cascade_gate_signal=gate, cascade_topology=topology)
-        if readout != "none":
-            cfg["cascade_readout"] = readout
-        if selective:
-            cfg["cascade_selective"] = True
-        # The edge couplings were reachable in NeuralMemory but not from any sweep,
-        # so every cascade run so far used beta1=0.5, i.e. a first edge coupling of
-        # beta1*g^-1 = 0.25: reservoir 0 sheds a quarter of its mass per token into the
-        # deeper ones. With the shallow-ish readouts that is a
-        # standing dilution of the visible momentum, and the cascade arms end up ~19x
-        # higher than the scalar ones on theta*lambda_hidden -- the product the
-        # stability bound is written in (theta alone is only ~3x, and the per-seed
-        # spread makes the two groups overlap). Exposed so the drainage is swept.
-        if beta1 is not None:
-            cfg["cascade_beta1"] = beta1
-        if g is not None:
-            cfg["cascade_g"] = g
-        # Benna-Fusi's beaker areas and u_{K}=0 boundary. Off by default, so every
-        # artefact frozen before 2026-08-14 rebuilds exactly as it was trained.
-        if areas is not None:
-            cfg["cascade_areas"] = areas
-        if terminal_leak:
-            cfg["cascade_terminal_leak"] = True
     return cfg
 
 
@@ -185,19 +147,6 @@ def add_config_flags(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     ap.add_argument("--theta-gate", default=None, dest="theta_gate",
                     choices=["softplus", "sigmoid"])
     ap.add_argument("--normalize-hidden", type=float, default=None, dest="normalize_hidden")
-    ap.add_argument("--cascade", action="store_true")
-    ap.add_argument("--reservoirs", type=int, default=6)
-    ap.add_argument("--leak", default="none")
-    ap.add_argument("--leak-rate", type=float, default=1.0, dest="leak_rate")
-    ap.add_argument("--readout", default="gated")
-    ap.add_argument("--selective", action="store_true")
-    ap.add_argument("--gate", default="surprise")
-    ap.add_argument("--cascade-beta1", type=float, default=None, dest="cascade_beta1",
-                    help="coupling scale; NeuralMemory's default 0.5 gives a first edge "
-                         "of 0.25, draining a quarter of reservoir 0 per token")
-    ap.add_argument("--cascade-g", type=float, default=None, dest="cascade_g",
-                    help="geometric falloff of the couplings with depth (default 2)")
-    ap.add_argument("--topology", default="chain")
     ap.add_argument("--no-memory", action="store_true", dest="no_memory",
                     help="ablate the memory branch entirely (attention-only control)")
     ap.add_argument("--memory-hidden", type=int, default=None, dest="memory_hidden_dim",
@@ -212,12 +161,7 @@ def add_config_flags(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
 def cfg_from_args(a) -> dict:
     return build_cfg(a.config, eta_init=a.eta_init, theta_scale=a.theta_scale,
                      theta_gate=getattr(a, "theta_gate", None),
-                     normalize_hidden=a.normalize_hidden, cascade=a.cascade,
-                     reservoirs=a.reservoirs, leak=a.leak, leak_rate=a.leak_rate,
-                     readout=a.readout, selective=a.selective, gate=a.gate,
-                     beta1=getattr(a, "cascade_beta1", None),
-                     g=getattr(a, "cascade_g", None),
-                     topology=getattr(a, "topology", "chain"),
+                     normalize_hidden=a.normalize_hidden,
                      use_memory=not getattr(a, "no_memory", False),
                      memory_hidden_dim=getattr(a, "memory_hidden_dim", None),
                      memory_chunk_size=getattr(a, "memory_chunk_size", None),
@@ -251,8 +195,7 @@ def main() -> None:
     check, info = load_frozen(a.out)
     assert not any(p.requires_grad for p in check.parameters())
     print(json.dumps({"out": a.out, "params": sum(p.numel() for p in check.parameters()),
-                      "arch": info["arch"], "meta": info["meta"],
-                      "cascade": bool(cfg.get("memory_use_cascade"))}))
+                      "arch": info["arch"], "meta": info["meta"]}))
 
 
 if __name__ == "__main__":

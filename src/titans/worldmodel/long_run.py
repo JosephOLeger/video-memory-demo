@@ -1,9 +1,8 @@
 """Is the memory stable when the sequence never ends?
 
 Every result in this project comes from sequences of 64 to 144 latents. The scalar
-momentum has a fixed point at that length and the cascade at ``cascade_leak="none"``
-is a pure accumulator (``rho(B) = 1``, mass-conserving), so a linear ramp and a fixed
-point are indistinguishable over 144 steps. This module removes the length limit.
+momentum has a fixed point at that length, but a slow drift and a fixed point are
+indistinguishable over 144 steps. This module removes the length limit.
 
 Everything outside the memory is frozen -- the model is in ``eval()`` under
 ``no_grad``, so the *only* thing evolving is the memory carry ``(state, S)``,
@@ -254,8 +253,7 @@ def main() -> None:
     out = {
         "label": a.label or info["meta"].get("label") or os.path.basename(a.frozen),
         "frozen": os.path.basename(a.frozen), "meta": info["meta"],
-        "cascade": bool(cfg.get("memory_use_cascade")),
-        "leak": cfg.get("cascade_leak"), "leak_rate": cfg.get("cascade_leak_rate"),
+        "muon": cfg.get("memory_orthogonalize_momentum"),
         "eta_init": cfg.get("eta_init"), "theta_scale": cfg.get("theta_scale"),
         "reps": a.reps, "T": va.shape[1], "dim": dim, "seg": arch["segment_size"],
         "pool": a.pool, "diag_every": a.diag_every,

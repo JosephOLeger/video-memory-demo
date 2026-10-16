@@ -198,13 +198,6 @@ def probe_chunk(mem, x_chunk: torch.Tensor, state: dict, S: Optional[dict] = Non
 
     w1 = state["w1"][b].double()
     w0 = state["w0"][b].double()
-    # The 2x2 chunk map is derived for the SCALAR momentum. With the cascade, S
-    # carries a [..., K] reservoir state whose update is
-    # u_t = u_{t-1} + (weighted graph Laplacian) u_{t-1} + e_1 g_t -- so B = I + L
-    # with L symmetric NSD, rho = 1 exactly (the constant vector is in L's null
-    # space), eta never enters, and kappa = Q_m/(1-eta) simply does not describe it.
-    # Report the measured curvatures, withhold a rho that would be meaningless.
-    cascade = bool(getattr(mem, "use_cascade_momentum", False))
     return {
         "m": m, "alpha": al, "eta": et, "theta": th, "kappa": kap,
         # the curvatures, both Gram matrices
@@ -225,11 +218,9 @@ def probe_chunk(mem, x_chunk: torch.Tensor, state: dict, S: Optional[dict] = Non
         "w1_fro": float(w1.norm()),
         "S_norm": (float(sum(float(t[b].double().pow(2).sum()) for t in S.values()) ** 0.5)
                    if S is not None else None),
-        # spectral radii; > 1 predicts the chunk map is expansive. None under the
-        # cascade: the scalar chunk map does not apply, see the note above.
-        "cascade": cascade,
-        "rho_keys": None if cascade else rho_k,
-        "rho_hidden": None if cascade else rho_h,
+        # spectral radii; > 1 predicts the chunk map is expansive
+        "rho_keys": rho_k,
+        "rho_hidden": rho_h,
         "theta_lambda_hidden": th * lam_h_w,
         "finite": bool(torch.isfinite(state["w1"][b]).all()),
     }
@@ -260,9 +251,6 @@ def trace_forward(mem, x: torch.Tensor, chunk_size: int, b: int = 0,
     k, v, q, alpha, eta, theta = mem._project(x)[:6]
     gamma = mem._gamma(x)
     B, N = x.shape[0], x.shape[1]
-    # init_memory, not zeros_like(state): under the cascade S carries a trailing
-    # reservoir axis [..., K] the weight tensors do not have, so zeros_like gives
-    # a shape cascade_step rejects.
     state, S = mem.init_memory(B)
     out = []
     for c, start in enumerate(range(0, N, chunk_size)):
@@ -282,7 +270,6 @@ def trace_forward(mem, x: torch.Tensor, chunk_size: int, b: int = 0,
             k[:, start:end], v[:, start:end], alpha[:, start:end],
             eta[:, start:end], theta[:, start:end], state, S, end - start,
             q=None, gamma=None if gamma is None else gamma[:, start:end],
-            x=x[:, start:end],
         )
         if not torch.isfinite(state["w1"]).all():
             rec = {"chunk": c + 1, "token": end, "finite": False,

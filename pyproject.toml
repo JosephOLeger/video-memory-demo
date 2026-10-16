@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "titans-mac"
 version = "0.1.0"
-description = "From-scratch PyTorch reimplementation of Titans neural long-term memory + MAC (arXiv:2501.00663), an ATLAS Omega-rule sliding-window memory extension (arXiv:2505.23735), a Titans-MAC world model over frozen V-JEPA-2 video latents with long-term-memory ablations, and a metaplastic momentum cascade of our own."
+description = "Deep test-time memories (Titans, ATLAS) from scratch: divergence and silent collapse of bounded writes, a latent video world-model bench, and a memory graft on a frozen Qwen2.5-VL."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

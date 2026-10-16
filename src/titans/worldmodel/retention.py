@@ -228,9 +228,7 @@ def main() -> None:
                     b.memory.theta_override = a.theta_override
             curve = retention_curve(model, va, T, a.horizon, gaps, a.batch)
             rec = {"arm": arm_of(p), "file": os.path.basename(p),
-                   "cascade": bool(info["cfg"].get("memory_use_cascade")),
-                   "leak": info["cfg"].get("cascade_leak"),
-                   "leak_rate": info["cfg"].get("cascade_leak_rate"),
+                   "muon": info["cfg"].get("memory_orthogonalize_momentum"),
                    "eta_init": info["cfg"].get("eta_init"),
                    "alpha_override": a.alpha_override,
                    "theta_override": a.theta_override,
@@ -251,7 +249,7 @@ def main() -> None:
         print("statut : . sain / c collapse (pr ou cos_ret) / X diverge")
         print("%-18s" % "bras" + "".join("%11s" % f"+{g}" for g in gaps_seen))
         print("-" * (18 + 11 * len(gaps_seen)))
-        for r in sorted(ok, key=lambda r: (not r["cascade"], r["arm"])):
+        for r in sorted(ok, key=lambda r: r["arm"]):
             line = "%-18s" % r["arm"]
             for c in r["curve"]:
                 tag = {"sain": ".", "collapse": "c", "diverge": "X"}[c["status"]]
@@ -261,7 +259,7 @@ def main() -> None:
         print("retention_gain = l1(cross) - l1(repeat) ; > 0 => une trace de V survit")
         print("%-18s" % "bras" + "".join("%11s" % f"+{g}" for g in gaps_seen))
         print("-" * (18 + 11 * len(gaps_seen)))
-        for r in sorted(ok, key=lambda r: (not r["cascade"], r["arm"])):
+        for r in sorted(ok, key=lambda r: r["arm"]):
             print("%-18s" % r["arm"] + "".join(
                 "%11.4f" % c["retention_gain"] for c in r["curve"]))
         print()

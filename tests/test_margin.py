@@ -60,10 +60,9 @@ def test_health_is_reported_alongside_so_a_dead_memory_cannot_pass(tmp_path):
 
 def test_config_travels_into_the_record(tmp_path):
     """The record must be self-describing: it is joined to echo results by arm."""
-    model, info = _artifact(tmp_path, cascade=True, leak="surprise", leak_rate=0.3)
+    model, info = _artifact(tmp_path, muon="unit_squash", eta_init=0.9)
     r = measure(model, _z(), info)
-    assert r["cascade"] is True
-    assert r["leak"] == "surprise" and r["leak_rate"] == 0.3
+    assert r["muon"] == "unit_squash" and r["eta_init"] == 0.9
     assert r["label"] == "t" and r["seed"] == 3
 
 

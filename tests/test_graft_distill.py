@@ -75,32 +75,6 @@ def test_context_write_carries_a_gradient_to_the_memory_gates():
     assert any(named[n].grad is not None and named[n].grad.abs().max() > 0
                for n in gates), "no gradient reached any gate head"
 
-
-def test_rescale_kills_the_gradient_before_the_context_is_written():
-    """Why the graft is trained under ``unit`` and not the library default.
-
-    ``SANE_NS`` sets ``orthogonalize_momentum=True`` (= ``rescale``), which restores
-    ``||S||`` after Newton-Schulz and so bounds nothing. Two hundred writes of plain
-    noise are enough: the state goes non-finite and every gradient with it. This is
-    the graft's whole blocker, reproduced without a video, a GPU or a 3B host -- and
-    it is a regression test, not a curiosity: anything that silently reinstates
-    ``rescale`` on this path fails here.
-    """
-    torch.manual_seed(0)
-    br = _branch()                                   # library default = rescale
-    assert br.memory._orth_mode == "rescale"
-    state, _, _ = write_context(br, torch.randn(400, 16), 0, 400, stride=2,
-                                device="cpu")
-    assert not torch.isfinite(state["w1"]).all()
-
-    torch.manual_seed(0)
-    ok = _branch(orthogonalize_momentum="unit")
-    state, _, _ = write_context(ok, torch.randn(400, 16), 0, 400, stride=2,
-                                device="cpu")
-    assert torch.isfinite(state["w1"]).all()
-    assert float(state["w1"].detach().norm()) < 100.0         # and settled, not merely finite
-
-
 def test_stride_is_the_only_thing_that_sets_the_write_count():
     br = _branch()
     z = torch.randn(240, 16)

@@ -146,7 +146,7 @@ def test_mac_block_with_full_atlas_memory_trains():
     block = TitansMACBlock(
         dim=32, num_heads=2, segment_size=8,
         feature_degree=2, memory_window_size=4,
-        memory_orthogonalize_momentum=True, memory_update_bias=False,
+        memory_orthogonalize_momentum="unit", memory_update_bias=False,
         memory_expansion=4, memory_activation="gelu", memory_residual=True,
     )
     out, state, _ = block(torch.randn(2, 16, 32))
@@ -199,57 +199,6 @@ def test_residual_is_verbatim_when_widths_match():
         off_pre = mlp_forward(p, x, mem.num_layers, "silu", False)
     # on == rms_norm(pre_norm + x); check the skip moved the output toward x
     assert not torch.allclose(on, off_pre)
-
-
-def test_newton_schulz_is_applied_on_the_cascade_path():
-    """orthogonalize_momentum used to be scoped to the scalar branch only, so
-    cascade + NS ran as plain cascade with no warning."""
-    torch.manual_seed(2)
-    x = torch.randn(2, 8, 16)
-    outs = {}
-    for tag, kw in [("off", {}), ("on", dict(orthogonalize_momentum=True))]:
-        torch.manual_seed(3)
-        m = NeuralMemory(16, hidden_dim=16, use_cascade_momentum=True, **kw)
-        st, S = m.init_memory(2)
-        with torch.no_grad():
-            st2, _ = m.update(x, st, S, chunk_size=8)
-        outs[tag] = st2["w1"]
-    assert not torch.equal(outs["off"], outs["on"]), "NS must affect the cascade path"
-
-
-def test_window_normalize_removes_the_step_size_confound():
-    """Eq 58 sums c gradients, so a larger window silently means a larger inner
-    step -- 'more context' and 'bigger step' change together. window_normalize
-    divides by the gate mass so only the context varies."""
-    torch.manual_seed(0)
-    x = torch.randn(2, 8, 16)
-
-    def step_norm(c, normalize):
-        torch.manual_seed(1)
-        m = NeuralMemory(16, hidden_dim=16, window_size=c, window_normalize=normalize)
-        st, S = m.init_memory(2)
-        with torch.no_grad():
-            st2, _ = m.update(x, st, S, chunk_size=8)
-            return sum(float((st2[k] - st[k]).norm()) for k in st if k.startswith("w"))
-
-    raw = [step_norm(c, False) for c in (1, 4, 8)]
-    normed = [step_norm(c, True) for c in (1, 4, 8)]
-    assert raw[2] > 2 * raw[0], f"unnormalised window should inflate the step: {raw}"
-    assert normed[2] < 1.3 * normed[0], f"normalised window should not: {normed}"
-
-
-def test_window_normalize_is_plumbed_through_the_block():
-    """Same defect family as the three above: a NeuralMemory option that never
-    reached TitansMACBlock, so every experiment configured through the block
-    would have silently run unnormalised."""
-    on = TitansMACBlock(dim=16, segment_size=8, memory_window_size=4,
-                        memory_window_normalize=True)
-    off = TitansMACBlock(dim=16, segment_size=8, memory_window_size=4)
-    assert on.memory.window_normalize is True
-    assert off.memory.window_normalize is False
-    out, _, _ = on(torch.randn(2, 16, 16))
-    assert torch.isfinite(out).all()
-
 
 def test_module_forward_matches_the_functional_inner_loop():
     """NeuralMemoryMLP.forward used to hardcode SiLU/no-residual while the inner

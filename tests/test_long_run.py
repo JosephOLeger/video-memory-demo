@@ -89,18 +89,6 @@ def test_state_diagnostics_covers_every_block():
     d = state_diagnostics(m, carry)
     assert set(d) == {f"b{i}" for i in range(len(m.blocks))}
 
-
-def test_cascade_carry_is_diagnosable():
-    """The cascade's S has a trailing reservoir axis; ||S|| must still be a scalar."""
-    torch.manual_seed(0)
-    m = WorldModel(latent_dim=8, dim=8, depth=1, segment_size=4, memory_num_layers=2,
-                   memory_use_cascade=True, cascade_reservoirs=4,
-                   cascade_leak="none").eval()
-    tr = run_stream(m, build_stream(_va(), reps=3, mode="loop"))
-    assert len(tr) == 3 and all(r["b0"]["finite"] for r in tr)
-    assert tr[-1]["b0"]["S_norm"] > 0.0
-
-
 def test_cycle_reuses_a_small_pool_round_robin():
     """The regime between loop and shuffle: repetition exists but is interleaved."""
     va = _va(n=20)

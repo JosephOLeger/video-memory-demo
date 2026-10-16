@@ -109,12 +109,6 @@ def build_cfg(a) -> dict:
         muon=getattr(a, "muon", None),
         muon_scale=getattr(a, "muon_scale", None),
         alpha_init=getattr(a, "alpha_init", None),
-        cascade=a.cascade, reservoirs=a.reservoirs, leak=a.leak,
-        leak_rate=getattr(a, "leak_rate", 1.0), readout=a.readout,
-        selective=a.selective, gate=a.gate, topology=a.topology,
-        beta1=getattr(a, "cascade_beta1", None), g=getattr(a, "cascade_g", None),
-        areas=getattr(a, "cascade_areas", None),
-        terminal_leak=getattr(a, "cascade_terminal_leak", False),
         use_memory=not getattr(a, "no_memory", False),
         memory_hidden_dim=getattr(a, "memory_hidden_dim", None),
         memory_chunk_size=getattr(a, "memory_chunk_size", None),
@@ -267,13 +261,6 @@ def run(a, device) -> dict:
                 # still doubling at 10000), so a result is uninterpretable without
                 # the step count it was taken at.
                 steps=a.steps,
-                cascade=a.cascade, reservoirs=a.reservoirs if a.cascade else 0,
-                cascade_areas=getattr(a, "cascade_areas", None),
-                cascade_terminal_leak=getattr(a, "cascade_terminal_leak", False),
-                leak=a.leak if a.cascade else None,
-                leak_rate=(getattr(a, "leak_rate", 1.0) if a.cascade else None),
-                readout=(a.readout if a.cascade else None),
-                topology=(a.topology if a.cascade else None),
                 use_memory=not getattr(a, "no_memory", False),
                 memory_hidden_dim=getattr(a, "memory_hidden_dim", None),
                 memory_chunk=getattr(a, "memory_chunk_size", None),
@@ -310,32 +297,6 @@ def build_parser() -> argparse.ArgumentParser:
                     help="model width; ignored for a PCA cache, where dim = k")
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--seg", type=int, default=8)
-    ap.add_argument("--cascade", action="store_true")
-    ap.add_argument("--reservoirs", type=int, default=4)
-    ap.add_argument("--leak", default="none")
-    ap.add_argument("--leak-rate", type=float, default=1.0, dest="leak_rate",
-                    help="rate of the surprise-driven leak: u <- exp(-r*theta_t) u. "
-                         "Below ~0.1 it is indistinguishable from leak=none.")
-    ap.add_argument("--readout", default="mean")     # "none" -> leave default
-    ap.add_argument("--selective", action="store_true")
-    ap.add_argument("--gate", default="content")
-    ap.add_argument("--cascade-beta1", type=float, default=None, dest="cascade_beta1",
-                    help="coupling scale; the default 0.5 gives a first edge of "
-                         "beta1*g^-1 = 0.25, i.e. reservoir 0 sheds a quarter of its "
-                         "mass per token into the deeper ones")
-    ap.add_argument("--cascade-areas", type=float, default=None, dest="cascade_areas",
-                    help="Benna-Fusi beaker areas C_k = c^k (pass c; the paper's "
-                         "Fig 2c has c = g). Off by default = C_k identically 1, "
-                         "which is what every run before 2026-08-14 used and which "
-                         "costs the t^-1/2 decay (measured -0.066 vs -0.500).")
-    ap.add_argument("--cascade-terminal-leak", action="store_true",
-                    dest="cascade_terminal_leak",
-                    help="give the deepest beaker its own leak (the paper's "
-                         "u_{K}=0 boundary), removing the lambda=1 conserved mode. "
-                         "Decisive at K<=8, no effect at K>=10.")
-    ap.add_argument("--cascade-g", type=float, default=None, dest="cascade_g",
-                    help="geometric falloff of the couplings with depth (default 2)")
-    ap.add_argument("--topology", default="chain")
     ap.add_argument("--no-memory", action="store_true", dest="no_memory",
                     help="ablate the memory branch: the attention-only control that "
                          "gives 'the memory helps' a denominator")
@@ -362,20 +323,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "d writes the closed form is alpha ~ 1/(2d) (half-life 1.39d); "
                          "under --muon unit this is the only knob that sets reach.")
     ap.add_argument("--muon-scale", type=float, default=None, dest="muon_scale",
-                    help="magnitude scale c. For clip/squash/softclip it is the cap "
-                         "on the deposit, so ||M|| -> c/alpha; set it near the median "
-                         "of the quantity being squashed, not by feel (c=0.25 on "
-                         "||S||~6 saturated 98%% of the time and silently became "
-                         "'unit'). For softclip that quantity is theta_t*||S||.")
-    ap.add_argument("--muon", default=None,
-                    choices=["rescale", "unit", "clip", "squash", "unit_squash",
-                             "softclip"],
-                    help="Newton-Schulz magnitude convention, i.e. what bounds one "
-                         "inner step. 'rescale' restores ||G|| and bounds nothing "
-                         "(sane_ns default); 'unit' is ATLAS Eq 32 literally, bounded "
-                         "by theta_t; 'clip' caps the tail with a hard corner; "
-                         "'softclip' is that corner smoothed -- bounded by the "
-                         "CONSTANT c, and monotone in the surprise everywhere.")
+                    help="the scale c of psi_c under unit_squash (350 on the bench)")
+    ap.add_argument("--muon", default=None, choices=["unit", "unit_squash"],
+                    help="write rule (titans.memory.WRITE_RULES); sane_ns default is "
+                         "'unit' (ATLAS Eq 32, bounded by theta_t)")
     ap.add_argument("--bptt-window", type=int, default=None, dest="bptt_window",
                     help="truncate BPTT to this many steps; VRAM becomes independent\n"
                          "of sequence length (measured: 0.82 GiB at T=128..2048)")

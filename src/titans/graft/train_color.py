@@ -63,7 +63,7 @@ import time
 import torch
 import torch.nn.functional as F
 
-from .branch import MemoryBranch, memory_kwargs_from_args
+from .branch import MemoryBranch, memory_kwargs_from_args, add_memory_flags
 from .needle import COLORS, build_prompt, make_needle
 from .qwen import (default_layer, disabled, find_decoder_layers, graft)
 
@@ -278,18 +278,7 @@ def main() -> None:
     ap.add_argument("--depth-max", type=float, default=1.0, dest="depth_max",
                     help="borne haute (ex. 0.8..1.0 = aiguille proche de la fenetre, cas facile)")
     # --- memoire ---
-    ap.add_argument("--d-mem", type=int, default=128, dest="d_mem")
-    ap.add_argument("--memory-hidden", type=int, default=64, dest="memory_hidden")
-    ap.add_argument("--chunk", type=int, default=8)
-    ap.add_argument("--write-stride", type=int, default=1, dest="write_stride",
-                    help="1 : l'aiguille doit etre ecrite")
-    ap.add_argument("--alpha-init", type=float, default=1.27e-4, dest="alpha_init")
-    ap.add_argument("--muon", default="unit",
-                    choices=["rescale", "unit", "clip", "squash", "unit_squash",
-                             "softclip"])
-    ap.add_argument("--muon-scale", type=float, default=None, dest="muon_scale")
-    ap.add_argument("--cascade", action="store_true")
-    ap.add_argument("--reservoirs", type=int, default=6)
+    add_memory_flags(ap, write_stride=1)
     # --- optimisation ---
     ap.add_argument("--train-head", default="none", dest="train_head",
                     choices=["none", "full"],

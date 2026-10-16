@@ -84,11 +84,10 @@ def test_the_evaluation_builds_the_same_memory_as_the_training():
     from titans.graft.branch import memory_kwargs_from_args
 
     saved = {"memory_hidden": 64, "alpha_init": 1.27e-4, "muon": "unit_squash",
-             "muon_scale": 0.0, "cascade": True, "reservoirs": 6}
+             "muon_scale": 0.0}
     kw = memory_kwargs_from_args(saved)
     assert kw["orthogonalize_momentum"] == "unit_squash"
-    assert kw["orthogonalize_clip"] == 0.0, "0.0 est un clip reel, pas une absence"
-    assert kw["use_cascade_momentum"] and kw["cascade_reservoirs"] == 6
+    assert kw["orthogonalize_clip"] == 0.0, "0.0 est une valeur, pas une absence"
 
 
 def test_a_namespace_and_a_dict_give_the_same_memory():

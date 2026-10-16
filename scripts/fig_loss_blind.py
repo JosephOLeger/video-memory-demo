@@ -7,13 +7,13 @@ Donnees : results/d2interne/fine_t008_s0.jsonl (rapatrie).
 Sortie : figs/fig_loss_blind.pdf
 """
 import json
+import os
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-S = ("/tmp/claude-1000/-home-josep-projects/"
-     "53019517-9373-4e5d-b120-604194f089a9/scratchpad")
+S = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "results", "d2interne")
 steps, w1, smax, loss = [], [], [], []
 for line in open(f"{S}/fine_t008_s0.jsonl"):
     r = json.loads(line)

@@ -192,7 +192,7 @@ def test_the_branch_is_built_on_sane_not_on_library_defaults():
     branch = make_branch()
     assert branch.memory.normalize_qk == "l2"
     assert branch.memory.normalize_output is False
-    assert branch.memory.orthogonalize_momentum is True
+    assert branch.memory.orthogonalize_momentum == "unit"
     assert sane_memory_kwargs()["eta_init"] == 0.995
     assert sane_memory_kwargs(theta_scale=0.01)["theta_scale"] == 0.01
 

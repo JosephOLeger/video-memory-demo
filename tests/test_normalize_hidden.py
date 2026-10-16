@@ -147,41 +147,8 @@ def test_named_config_is_a_delta_on_sane_ns():
     """Standing directive: new arms are deltas on `sane_ns`."""
     from titans.worldmodel.atlas import CONFIGS
 
-    base, nh = CONFIGS["sane_ns"], CONFIGS["sane_ns_nh"]
+    from titans.worldmodel.frozen import build_cfg
+    base, nh = CONFIGS["sane_ns"], build_cfg("sane_ns", normalize_hidden=1.0)
     assert set(nh) - set(base) == {"normalize_hidden"}
     assert all(nh[k] == v for k, v in base.items())
-    assert nh["normalize_hidden"] is True
-
-
-def test_cascade_leak_rate_is_a_real_lever():
-    """The surprise leak's rate must be settable without moving theta_scale.
-
-    `exp(-theta_t)` ties the memory's horizon to the inner step: at
-    theta_scale 0.03 the retained fraction is 0.979, at 2.0 it is 0.25. A theta
-    sweep would then move the step and the horizon together and measure neither.
-    """
-    import math
-
-    from titans.memory import NeuralMemory
-
-    def build(rate):
-        torch.manual_seed(0)
-        return NeuralMemory(dim=16, theta_scale=0.03, normalize_qk="l2",
-                            normalize_output=False, use_cascade_momentum=True,
-                            cascade_reservoirs=4, cascade_leak="surprise",
-                            cascade_leak_rate=rate)
-
-    x = torch.randn(2, 16, 16)
-    outs = {}
-    for rate in (1.0, 0.01):
-        m = build(rate)
-        assert m.cascade_leak_rate == rate
-        outs[rate] = m.forward_chunked(x, chunk_size=8)[-1]["w1"]
-    assert not torch.allclose(outs[1.0], outs[0.01]), "leak rate left the state unchanged"
-
-    # rate=1.0 must reproduce the pre-parameter behaviour exactly
-    torch.manual_seed(0)
-    ref = NeuralMemory(dim=16, theta_scale=0.03, normalize_qk="l2",
-                       normalize_output=False, use_cascade_momentum=True,
-                       cascade_reservoirs=4, cascade_leak="surprise")
-    assert torch.equal(ref.forward_chunked(x, chunk_size=8)[-1]["w1"], outs[1.0])
+    assert nh["normalize_hidden"] == 1.0

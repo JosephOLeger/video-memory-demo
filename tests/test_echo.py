@@ -176,15 +176,15 @@ def test_frozen_out_writes_a_loadable_artifact(tmp_path):
 
     a = _args(info["train"], info["val"])
     a.frozen_out = str(tmp_path / "f.pt")
-    a.cascade, a.leak, a.leak_rate = True, "surprise", 0.1
+    a.muon, a.muon_scale = "unit_squash", 350.0
     r = run(a, "cpu")
 
     model, meta = load_frozen(a.frozen_out)
-    assert meta["cfg"]["cascade_leak"] == "surprise"
-    assert meta["cfg"]["cascade_leak_rate"] == 0.1
+    assert meta["cfg"]["memory_orthogonalize_momentum"] == "unit_squash"
+    assert meta["cfg"]["memory_orthogonalize_clip"] == 350.0
     assert meta["meta"]["seed"] == r["seed"]
     assert not any(p.requires_grad for p in model.parameters())
-    assert r["leak_rate"] == 0.1
+    assert r["muon"] == "unit_squash"
 
 
 def test_cost_profile_separates_constant_state_from_growing_context():

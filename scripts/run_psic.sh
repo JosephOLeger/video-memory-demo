@@ -11,7 +11,7 @@ OUT="$HOME/work/titans-mac/results/prlaw3"
 LOG="$HOME/work/titans-mac/logs/psic.log"
 : > "$LOG"
 echo "attente fin runner c2 $(date +%H:%M:%S)" >> "$LOG"
-while pgrep -f "run_collapse_night.sh c2" > /dev/null; do sleep 600; done
+
 echo "carte 2 libre $(date +%H:%M:%S)" >> "$LOG"
 echo "--- R2a sonde inference ---" >> "$LOG"
 CUDA_VISIBLE_DEVICES=2 nice -n 10 timeout 14400 "$PY" probe_r_psic.py \

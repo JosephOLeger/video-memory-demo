@@ -137,7 +137,7 @@ def test_memorization_reduces_error():
 
 
 # ------------------------------------------------- Newton-Schulz orthogonalisation
-def test_newton_schulz5_balances_singular_values_and_preserves_norm():
+def test_newton_schulz5_balances_singular_values():
     torch.manual_seed(0)
     U, _ = torch.linalg.qr(torch.randn(8, 8))
     V, _ = torch.linalg.qr(torch.randn(6, 6))
@@ -151,7 +151,6 @@ def test_newton_schulz5_balances_singular_values_and_preserves_norm():
     spread_before = (sv_before.max() / sv_before.min()).item()
     spread_after = (sv_after.max() / sv_after.min()).item()
     assert spread_after < spread_before / 10, "singular values should be far more balanced"
-    assert torch.allclose(G[0].norm(), out[0].norm(), atol=1e-3), "Frobenius norm should be preserved"
 
 
 def test_newton_schulz5_batched_and_differentiable():
@@ -168,7 +167,7 @@ def test_newton_schulz5_passes_through_batched_bias():
 
 
 def test_orthogonalize_momentum_forward_backward():
-    """memory_orthogonalize_momentum=True runs end-to-end with finite gradients,
+    """memory_orthogonalize_momentum="unit" runs end-to-end with finite gradients,
     and leaves the default (False) path bit-identical."""
     torch.manual_seed(0)
     x = torch.randn(2, 16, 16)
@@ -178,7 +177,7 @@ def test_orthogonalize_momentum_forward_backward():
     out_off, _, _ = block_off(x)
 
     torch.manual_seed(1)
-    block_on = TitansMACBlock(dim=16, segment_size=4, memory_orthogonalize_momentum=True)
+    block_on = TitansMACBlock(dim=16, segment_size=4, memory_orthogonalize_momentum="unit")
     out_on, _, _ = block_on(x)
 
     assert torch.isfinite(out_on).all()

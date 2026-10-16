@@ -44,7 +44,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .branch import MemoryBranch, memory_kwargs_from_args
+from .branch import MemoryBranch, memory_kwargs_from_args, add_memory_flags
 from .needle import COLORS, LETTERS
 from .qwen import default_layer, disabled, find_decoder_layers, graft
 from .train_color import answer_logits, video_pool
@@ -218,8 +218,7 @@ def write_stream(branch, z, chunk, dense_head=None, delta=1, noise=0.0):
     qd = (dense_head.query.expand(z.shape[0], z.shape[1], -1)
           if dense_head is not None else None)
     state, S, ys = mem._scan_chunked(k, v, al, et, th, state, S, min(chunk, z.shape[1]),
-                                     q=qd,
-                                     gamma=mem._gamma(z), x=z)
+                                     q=qd, gamma=mem._gamma(z))
     ld = None
     if dense_head is not None:
         Y = torch.stack(ys, 1)                                  # [1, N, d]
@@ -367,21 +366,7 @@ def main() -> None:
     ap.add_argument("--reach-after", default="0,2,4,8,16,24", dest="reach_after")
     ap.add_argument("--reach-n", type=int, default=0, dest="reach_n",
                     help="> 0 : eval de portee a chaque eval")
-    ap.add_argument("--d-mem", type=int, default=128, dest="d_mem")
-    ap.add_argument("--memory-hidden", type=int, default=64, dest="memory_hidden")
-    ap.add_argument("--chunk", type=int, default=8)
-    ap.add_argument("--write-stride", type=int, default=8, dest="write_stride")
-    ap.add_argument("--alpha-init", type=float, default=1.27e-4, dest="alpha_init")
-    ap.add_argument("--muon", default="unit")
-    ap.add_argument("--muon-scale", type=float, default=None, dest="muon_scale")
-    ap.add_argument("--cascade", action="store_true")
-    ap.add_argument("--reservoirs", type=int, default=6)
-    ap.add_argument("--omega-window", type=int, default=1, dest="omega_window",
-                    help="ATLAS Omega : fenetre glissante de c ecritures (1 = Titans)")
-    ap.add_argument("--omega-stride", type=int, default=1, dest="omega_stride",
-                    help="fenetre Omega : t + les c-1 derniers latents pris 1 sur s")
-    ap.add_argument("--feature-degree", type=int, default=1, dest="feature_degree",
-                    help="ATLAS : feature map polynomiale des cles (1 = identite)")
+    add_memory_flags(ap, write_stride=8)
     ap.add_argument("--steps", type=int, default=4000)
     ap.add_argument("--stop-after", type=int, default=None, dest="stop_after",
                     help="arrete au pas N SANS changer le cosinus (qui suit --steps) : graines comparables a un run long, pas a pas")
