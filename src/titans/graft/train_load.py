@@ -357,6 +357,9 @@ def main() -> None:
     ap.add_argument("--dense-lambda", type=float, default=0.0, dest="dense_lambda")
     ap.add_argument("--dense-delta", type=int, default=1, dest="dense_delta",
                     help="horizon de la cible dense, en ecritures : predit z_{t+delta} ; negatif = z_{t-D} (rappel)")
+    ap.add_argument("--dense-gate-sg", action="store_true", dest="dense_gate_sg",
+                    help="la loss dense n'entraine PAS les portes (alpha, eta, theta) : elles "
+                         "ne recoivent que le gradient de la tache (remede a l'extinction)")
     ap.add_argument("--clamp-eta", type=float, default=None, dest="clamp_eta",
                     help="U2 bras C : eta force a cette valeur (ecriture), entrainement compris")
     ap.add_argument("--clamp-alpha", type=float, default=None, dest="clamp_alpha")
@@ -460,6 +463,9 @@ def main() -> None:
     params = list(branch.trainable_parameters())
     hparams = list(dense_head.parameters()) if dense_head is not None else []
     opt = torch.optim.AdamW(params + hparams, lr=a.lr, weight_decay=0.01)
+    gate_ids = {id(p) for h in (branch.memory.alpha_head, branch.memory.eta_head,
+                                branch.memory.theta_head) for p in h.parameters()}
+    non_gate = [p for p in params + hparams if id(p) not in gate_ids]
     print(f"greffe couche {site} : {sum(p.numel() for p in params)} params, "
           f"muon={mem_kw['orthogonalize_momentum']} lambda={a.dense_lambda} delta={a.dense_delta}", flush=True)
 
@@ -514,8 +520,13 @@ def main() -> None:
                                                   torch.tensor([col], device=a.device)) / a.batch
                     hits.append(int(int(cls.argmax()) == col))
                 frac = z.shape[0] / a.batch
-                loss = ce_m + (a.dense_lambda * ld * frac if ld is not None else 0.0)
-                loss.backward()
+                if a.dense_gate_sg and ld is not None:
+                    torch.autograd.backward(a.dense_lambda * ld * frac, inputs=non_gate,
+                                            retain_graph=True)
+                    ce_m.backward()
+                else:
+                    loss = ce_m + (a.dense_lambda * ld * frac if ld is not None else 0.0)
+                    loss.backward()
                 ce = ce + float(ce_m)
                 if ld is not None:
                     ld_sum = (ld_sum or 0.0) + float(ld) * frac

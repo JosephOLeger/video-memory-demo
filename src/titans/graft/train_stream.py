@@ -36,10 +36,11 @@ from collections import defaultdict
 import torch
 import torch.nn.functional as F
 
-from .branch import MemoryBranch, fold_pca, memory_kwargs_from_args, add_memory_flags
+from .branch import MemoryBranch, fold_pca, memory_kwargs_from_args
 from .distill import forced_inputs
 from .qwen import default_layer, disabled, find_decoder_layers, graft
 from .train_load import pr, write_stream
+from .write_ckpt import write_stream_ckpt
 
 LET = "ABCD"
 
@@ -60,9 +61,24 @@ def load(pattern, basis, max_past):
             q = dict(q, vid=v, qid=f"{v}#{i}", eval=d["eval"],
                      patch=None if q["patch"] is None else proj(q["patch"]),
                      teacher_ok=int(q["lt_teacher"].argmax()) == q["answer"],
-                     window_ok=int(q["lt_window"].argmax()) == q["answer"])
+                     window_ok=int(q["lt_window"].argmax()) == q["answer"],
+                     blind_ok=("lt_blind" in q and int(q["lt_blind"].argmax()) == q["answer"]))
             qs.append(q)
     return vids, qs
+
+
+def load_variants(pattern, basis):
+    """Variantes de couleur (stream_color_variants) : qid -> liste de {prompt, y, answer, patch}."""
+    W, b = fold_pca(torch.load(basis, map_location="cpu", weights_only=False)["pca"])
+    W, b = W.float(), b.float()
+    out = {}
+    for f in sorted(glob.glob(os.path.expanduser(pattern))):
+        d = torch.load(f, map_location="cpu", weights_only=False)
+        for i, rows in d["variants"].items():
+            out[f"{d['vid']}#{i}"] = [{"prompt": r["prompt"], "y": r["y"], "answer": r["answer"],
+                                       "patch": (r["patch"].float() @ W.T + b).half(), "variant": r["color"]}
+                                      for r in rows]
+    return out
 
 
 def past(vids, q, max_past, device):
@@ -120,8 +136,10 @@ def evaluate(model, processor, branch, wrapper, vids, ev, lid, a):
     rows = []
     for i, q in enumerate(ev):
         z = past(vids, q, a.max_past, a.device)
-        st, S, _, _ = write_stream(branch, z, a.chunk)
-        hb = base_states(model, processor, wrapper, vids, q, lid, a.device)
+        st, S, _, _ = (write_stream_ckpt(branch, z, a.chunk, a.ckpt_seg) if a.ckpt_seg
+                       else write_stream(branch, z, a.chunk))
+        lat = q.get("h_teacher") is not None
+        hb = base_states(model, processor, wrapper, vids, q, lid, a.device) if lat else None
         lm, _, hm = student(model, processor, wrapper, vids, q, (st, S), lid, a.device)
         # memoire d'une AUTRE video : la question suivante d'une autre video
         o = next((ev[(i + k) % len(ev)] for k in range(1, len(ev))
@@ -132,8 +150,8 @@ def evaluate(model, processor, branch, wrapper, vids, ev, lid, a):
         rows.append({"kind": q["kind"], "dist": q["c"] - q["p"], "gold": q["answer"],
                      "mem": int(lm.argmax()), "wrong": int(lw.argmax()),
                      "window": int(q["lt_window"].argmax()), "teacher": int(q["lt_teacher"].argmax()),
-                     "lat_mem": float(lat_loss(hm, q, hb, a.device)),
-                     "lat_wrong": float(lat_loss(hw, q, hb, a.device))})
+                     "lat_mem": float(lat_loss(hm, q, hb, a.device)) if lat else 1.0,
+                     "lat_wrong": float(lat_loss(hw, q, hb, a.device)) if lat else 1.0})
     branch.train()
 
     def summ(sel):
@@ -145,9 +163,11 @@ def evaluate(model, processor, branch, wrapper, vids, ev, lid, a):
                 "lat_wrong": sum(r["lat_wrong"] for r in sel) / n}
 
     out = {"all": summ(rows)}
-    for k in ("shape", "natural", "color"):
+    for k in ("shape", "natural", "color", "cgb"):
         out[k] = summ([r for r in rows if r["kind"] == k])
         out[k + "_dur"] = summ([r for r in rows if r["kind"] == k and r["window"] != r["gold"]])
+    for lo, hi in ((2, 5), (5, 15), (15, 100)):                  # cgb : distance en clips
+        out[f"cgb_d{lo}-{hi}"] = summ([r for r in rows if r["kind"] == "cgb" and lo <= r["dist"] < hi])
     for lo, hi in ((2, 4), (4, 10), (10, 100)):
         out[f"shape_d{lo}-{hi}"] = summ([r for r in rows if r["kind"] in ("shape", "color")
                                          and lo <= r["dist"] < hi])
@@ -166,8 +186,22 @@ def main() -> None:
     ap.add_argument("--margin", type=float, default=0.05)
     ap.add_argument("--teacher-ok-only", type=int, default=1, dest="teacher_ok_only")
     ap.add_argument("--max-past", type=int, default=40, dest="max_past", help="clips de memoire au plus")
-    add_memory_flags(ap, write_stride=8)
+    ap.add_argument("--ckpt-seg", type=int, default=0, dest="ckpt_seg",
+                    help="recalcul par segments de N tokens (0 = non ; gradient identique)")
+    ap.add_argument("--d-mem", type=int, default=128, dest="d_mem")
+    ap.add_argument("--memory-hidden", type=int, default=64, dest="memory_hidden")
+    ap.add_argument("--chunk", type=int, default=8)
+    ap.add_argument("--write-stride", type=int, default=8, dest="write_stride")
+    ap.add_argument("--alpha-init", type=float, default=1.27e-4, dest="alpha_init")
+    ap.add_argument("--muon", default="unit")
+    ap.add_argument("--omega-window", type=int, default=1, dest="omega_window")
+    ap.add_argument("--omega-stride", type=int, default=1, dest="omega_stride")
+    ap.add_argument("--feature-degree", type=int, default=1, dest="feature_degree")
     ap.add_argument("--init", default=None)
+    ap.add_argument("--variants", default=None,
+                    help="variantes de couleur (glob) : une couleur tiree au hasard a chaque passage")
+    ap.add_argument("--drop-blind", action="store_true", dest="drop_blind",
+                    help="entrainement sans les questions que Qwen resout sans video")
     ap.add_argument("--batch", type=int, default=4)
     ap.add_argument("--steps", type=int, default=3000)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -190,10 +224,17 @@ def main() -> None:
     kinds = set(a.kinds.split(","))
     vids, qs = load(a.targets, a.basis, a.max_past)
     qs = [q for q in qs if q["kind"] in kinds]
-    tr = [q for q in qs if not q["eval"] and (q["teacher_ok"] or not a.teacher_ok_only)]
+    tr = [q for q in qs if not q["eval"] and (q["teacher_ok"] or not a.teacher_ok_only)
+          and not (a.drop_blind and q["blind_ok"])]
     ev = [q for q in qs if q["eval"]]
     random.Random(1).shuffle(ev)
     ev = ev[:a.max_eval]
+    V = None
+    if a.variants:
+        assert a.lam_lat == 0 and a.lam_con == 0, "variantes : CE seule"
+        V = load_variants(a.variants, a.basis)
+        tr = [q for q in tr if q["qid"] in V]
+        print(f"variantes : {len(V)} questions, {len(tr)} questions d'entrainement couvertes", flush=True)
     if not ev:                                    # smoke sur quelques videos sans eval
         print("  (aucune video d'eval : eval sur 4 questions d'entrainement, smoke seulement)", flush=True)
         seen = set()
@@ -253,17 +294,23 @@ def main() -> None:
         for g in opt.param_groups:
             g["lr"] = a.lr * lr_scale(step)
         bs = rng.sample(tr, a.batch)
+        if V is not None:
+            bs = [dict(q, **rng.choice(V[q["qid"]])) for q in bs]
         try:
             opt.zero_grad(set_to_none=True)
             tot = {"ce": 0.0, "lat": 0.0, "con": 0.0, "hit": 0}
             gates = pr_w = None
             for j, q in enumerate(bs):
-                hb = base_states(model, processor, wrapper, vids, q, lid, a.device)
-                st, S, _, g3 = write_stream(branch, past(vids, q, a.max_past, a.device), a.chunk)
+                use_lat = a.lam_lat > 0 and q.get("h_teacher") is not None
+                hb = base_states(model, processor, wrapper, vids, q, lid, a.device) if use_lat else None
+                zq = past(vids, q, a.max_past, a.device)
+                st, S, _, g3 = (write_stream_ckpt(branch, zq, a.chunk, a.ckpt_seg) if a.ckpt_seg
+                                else write_stream(branch, zq, a.chunk))
                 if gates is None:
                     gates, pr_w = g3, pr(st["w1"][0].detach())
                 lm, ce, h = student(model, processor, wrapper, vids, q, (st, S), lid, a.device)
-                lat = lat_loss(h, q, hb, a.device)
+                lat = (lat_loss(h, q, hb, a.device) if use_lat and not q.get("variant")
+                       else h.new_zeros(()))
                 loss = a.lam_ce * ce + a.lam_lat * lat
                 if a.lam_con > 0:
                     o = next((x for x in bs[j + 1:] + bs[:j] if x["vid"] != q["vid"]), None)
