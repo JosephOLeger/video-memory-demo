@@ -57,17 +57,44 @@ def resize_frames(frames: torch.Tensor, max_side: int) -> torch.Tensor:
     return x.permute(0, 2, 3, 1).round().clamp(0, 255).to(torch.uint8)
 
 
+def check_temporal(inputs, fps: float, processor, n_videos: int = 1) -> None:
+    """Assert that M-RoPE time matches the real cadence: one grid = ``tps / fps`` seconds.
+
+    transformers 5.x silently IGNORES ``fps=`` in the processor call and falls back to
+    the video processor's default (24 fps), so ``second_per_grid_ts`` came out 1/12 s
+    instead of ``2 / fps`` and every temporal position was compressed (at 1 fps: 24x;
+    ``get_rope_index`` then floors ``t * spg * 2`` to 0 for the first six grids).
+    """
+    spg = inputs.get("second_per_grid_ts")
+    if spg is None:                   # image-only or non-Qwen2.5 processor
+        return
+    tps = int(getattr(getattr(processor, "video_processor", None), "temporal_patch_size", 2))
+    want = torch.full((n_videos,), tps / float(fps))
+    got = torch.as_tensor(spg, dtype=torch.float32).flatten()
+    assert got.shape == want.shape and torch.allclose(got, want, rtol=1e-4), (
+        f"second_per_grid_ts {got.tolist()} != {tps}/fps = {want.tolist()} (M-RoPE time wrong)")
+
+
 def video_inputs(processor, frames: torch.Tensor, prompt: str, fps: float):
-    """One video turned into the exact dict the model's forward expects."""
+    """One video turned into the exact dict the model's forward expects.
+
+    The frames are ALREADY sampled at ``fps``: we pass the real cadence as
+    ``video_metadata`` with ``do_sample_frames=False`` (``fps=`` alone is ignored by
+    transformers >= 5, see ``check_temporal``), and assert the resulting time step.
+    """
     messages = [{"role": "user", "content": [{"type": "video"},
                                              {"type": "text", "text": prompt}]}]
     text = processor.apply_chat_template(messages, tokenize=False,
                                          add_generation_prompt=True)
     arr = frames.round().clamp(0, 255).to(torch.uint8).numpy()
     try:
-        return processor(text=[text], videos=[arr], fps=fps, return_tensors="pt")
-    except TypeError:                 # older processors do not take fps
-        return processor(text=[text], videos=[arr], return_tensors="pt")
+        inp = processor(text=[text], videos=[arr], return_tensors="pt",
+                        video_metadata=[{"fps": float(fps), "total_num_frames": int(arr.shape[0])}],
+                        do_sample_frames=False)
+    except TypeError:                 # older processors: no video_metadata, fps honoured
+        inp = processor(text=[text], videos=[arr], fps=fps, return_tensors="pt")
+    check_temporal(inp, fps, processor)
+    return inp
 
 
 @torch.no_grad()
