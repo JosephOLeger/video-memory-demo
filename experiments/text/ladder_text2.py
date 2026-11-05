@@ -32,7 +32,8 @@ import torch
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import gen_story as G1  # noqa: E402
-import gen_story2 as G  # noqa: E402
+import importlib  # noqa: E402
+G = importlib.import_module(os.environ.get("TEXT_GEN", "gen_story2"))  # gen_story3: cumulative families
 from ladder_text import Host, STOP  # noqa: E402
 
 GEN_MD5 = hashlib.md5(open(G.__file__, "rb").read()).hexdigest()[:8]
@@ -76,14 +77,29 @@ class Host2(Host):
             self._soft = None
         n = x.shape[1]
         out = []
-        for p in prompts:
-            s = torch.tensor([self._t(p) + self._t(END)], device=self.device)
+
+        def run(ids, keep):
+            s = torch.tensor([ids], device=self.device)
             pos = torch.arange(n, n + s.shape[1], device=self.device)
             lg = self.model(input_ids=s, past_key_values=cache, use_cache=True, cache_position=pos,
                             attention_mask=torch.ones(1, n + s.shape[1], device=self.device, dtype=torch.long),
-                            logits_to_keep=1).logits[0, -1].float()
-            out.append(lg[self.lid].cpu())
+                            logits_to_keep=keep).logits[0].float()
             cache.crop(n)
+            return lg
+        for p in prompts:
+            if isinstance(p, str):                   # letter MCQ only (legacy)
+                out.append(run(self._t(p) + self._t(END), 1)[-1][self.lid].cpu())
+                continue
+            # item: letter MCQ logits [4] + option log-likelihood in the free-answer format [4]
+            # (same prompt as the trained student: "Answer with a few words.", option capitalised)
+            lg4 = run(self._t(prompt_of(p)) + self._t(END), 1)[-1][self.lid].cpu()
+            q = self._t(f"Question: {p['question']}\nAnswer with a few words." + END)
+            lk = []
+            for o in p["options"]:
+                at = self._t(o[0].upper() + o[1:])
+                lg = run(q + at, len(at) + 1)[:-1]               # positions predicting the option tokens
+                lk.append(float(torch.log_softmax(lg, -1).gather(1, torch.tensor(at, device=lg.device)[:, None]).sum()))
+            out.append(torch.cat([lg4, torch.tensor(lk)]))
         return out, n
 
 
@@ -132,11 +148,14 @@ def main():
 
     def emit(its, cond, lgs, ntok, mtok, extra=None):
         nonlocal nf
-        for it, lg in zip(its, lgs):
+        for it, lg_all in zip(its, lgs):
+            lg, lk = lg_all[:4], (lg_all[4:] if lg_all.numel() > 4 else None)
             pred = int(lg.argmax())
             r = {"family": it["family"], "kind": it["kind"], "group": it["group"], "variant": it["variant"],
                  "answer": it["answer"], "cond": cond, "pred": pred, "correct": int(pred == it["answer"]),
                  "lg": [round(x, 3) for x in lg.tolist()], "ntok": ntok, "mem_tok": mtok, "gen": GEN_MD5}
+            if lk is not None:
+                r["lk"] = [round(x, 3) for x in lk.tolist()]
             if extra:
                 r.update(extra(it) if callable(extra) else extra)
             fo.write(json.dumps(r) + "\n")
@@ -171,14 +190,14 @@ def main():
                 ex = {"D": L["D"], "Dnom": D}
                 if D == dists[0]:
                     if need(g, v, "empty"):
-                        lgs, n = host.score_many(host.ctx_ids(None, win), prs)
+                        lgs, n = host.score_many(host.ctx_ids(None, win), its)
                         emit(its, "empty", lgs, n, 0)
                     if need(g, v, "blind"):
-                        lgs, n = host.score_many(host.ctx_ids(None, None), prs)
+                        lgs, n = host.score_many(host.ctx_ids(None, None), its)
                         emit(its, "blind", lgs, n, 0)
                     if need(g, v, "ep"):
                         a0, b0 = L["ep"]
-                        lgs, n = host.score_many(host.ctx_ids(L["past"][a0:b0], win), prs)
+                        lgs, n = host.score_many(host.ctx_ids(L["past"][a0:b0], win), its)
                         emit(its, "ep", lgs, n, b0 - a0)
                     for c in ("oracle", "other", "sel_best"):
                         if not need(g, v, c):
@@ -196,7 +215,7 @@ def main():
                                 extra = None
                             else:
                                 mem, _ = sel(L, random.Random(f"best-{g}-{f}"), keep_fam=f)
-                            lgs, n = host.score_many(host.ctx_ids(mem, win), [pr])
+                            lgs, n = host.score_many(host.ctx_ids(mem, win), [it])
                             if c == "other":
                                 emit([it], c, lgs, n, len(mem), {"donor_answer": dans,
                                                                   "donor_hit": int(int(lgs[0].argmax()) == dans)})
@@ -204,14 +223,14 @@ def main():
                                 emit([it], c, lgs, n, len(mem))
                 c = f"full@{D}"
                 if need(g, v, c):
-                    lgs, n = host.score_many(host.ctx_ids(None, None, full=L["past"] + win), prs)
+                    lgs, n = host.score_many(host.ctx_ids(None, None, full=L["past"] + win), its)
                     emit(its, c, lgs, n, P, ex)
                 c = f"fifo@{D}"
                 if need(g, v, c):
                     mem = L["past"][-B:]
                     cov = lambda it: {"cov": sum(e - s for s, e in G.facts_of(L, it["family"]) if s >= P - B) /  # noqa
                                       max(1, sum(e - s for s, e in G.facts_of(L, it["family"])))}
-                    lgs, n = host.score_many(host.ctx_ids(mem, win), prs)
+                    lgs, n = host.score_many(host.ctx_ids(mem, win), its)
                     emit(its, c, lgs, n, B, lambda it: dict(ex, **cov(it)))
                 c = f"evfifo@{D}"
                 if need(g, v, c):
@@ -222,7 +241,7 @@ def main():
                             break
                         chosen.insert(0, (s, e)); tot += e - s
                     mem = [x for s, e in chosen for x in L["past"][s:e]]
-                    lgs, n = host.score_many(host.ctx_ids(mem, win), prs)
+                    lgs, n = host.score_many(host.ctx_ids(mem, win), its)
                     emit(its, c, lgs, n, len(mem), ex)
                 c = f"sel_rand@{D}"
                 if need(g, v, c):
@@ -230,7 +249,7 @@ def main():
                     chs = set(ch)
                     covf = lambda it: {"cov": sum(1 for x in G.facts_of(L, it["family"]) if x in chs) /  # noqa
                                        len(G.facts_of(L, it["family"]))}
-                    lgs, n = host.score_many(host.ctx_ids(mem, win), prs)
+                    lgs, n = host.score_many(host.ctx_ids(mem, win), its)
                     emit(its, c, lgs, n, len(mem), lambda it: dict(ex, **covf(it)))
                 c = f"key@{D}"
                 if need(g, v, c):
@@ -246,7 +265,7 @@ def main():
                         chosen.add((s, e))
                     covf = lambda it: {"cov": sum(1 for x in G.facts_of(L, it["family"]) if x in chosen) /  # noqa
                                        len(G.facts_of(L, it["family"]))}
-                    lgs, n = host.score_many(host.ctx_ids(mem, win), prs)
+                    lgs, n = host.score_many(host.ctx_ids(mem, win), its)
                     emit(its, c, lgs, n, len(mem), lambda it: dict(ex, **covf(it)))
                 c = f"mean@{D}"
                 if need(g, v, c):
@@ -254,7 +273,7 @@ def main():
                     ids = torch.tensor(L["past"], device=e_.device)
                     nseg = P // B
                     soft = e_[ids[-nseg * B:]].float().view(nseg, B, -1).mean(0)
-                    lgs, n = host.score_many(host.ctx_ids([-1] * B, win), prs, soft=soft)
+                    lgs, n = host.score_many(host.ctx_ids([-1] * B, win), its, soft=soft)
                     emit(its, c, lgs, n, B, ex)
                 c = f"lex@{D}"
                 if need(g, v, c):
@@ -262,7 +281,7 @@ def main():
                     words = sorted(set(w for w in re.findall(r"[A-Za-z0-9\-']+", txt)
                                        if w.lower() not in G1.FILLER_VOCAB and w.lower() not in STOP))
                     mem = tok.encode(" " + ", ".join(words), add_special_tokens=False)[:B]
-                    lgs, n = host.score_many(host.ctx_ids(mem, win), prs)
+                    lgs, n = host.score_many(host.ctx_ids(mem, win), its)
                     emit(its, c, lgs, n, len(mem), dict(ex, lex_words=len(words)))
             fo.flush()
         print(f"g{g} done [{nf} rows, {(time.time() - t0) / 60:.1f} min]", flush=True)

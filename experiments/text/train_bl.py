@@ -341,6 +341,9 @@ def main():
                     help="positive control: write ONLY the tokens of the fact sentences (stride 1), per stream")
     ap.add_argument("--oracle-support", action="store_true", dest="oracle_support",
                     help="oracle write = end-of-sentence states of the SUPPORTING facts (bAbI support indices)")
+    ap.add_argument("--oracle-support-content", action="store_true", dest="oracle_support_content",
+                    help="28/10: question-AWARE oracle = content tokens (as --oracle-content) of the SUPPORTING fact "
+                         "sentences only (read upper bound at tiny load); implies --oracle-content")
     ap.add_argument("--label-loss", type=int, default=1, dest="label_loss",
                     help="1: CE, KL and margin only on the answer LABEL tokens of the target sentence (26/10: with the "
                          "whole official sentence the format tokens dominate, the memory went extinct: theta -> 6e-4, "
@@ -362,12 +365,49 @@ def main():
                          "full (whole context, graft off; skipped above --full-max tokens), orc (oracle write of the "
                          "bAbI sentences located through the 0k file, diagnostic)")
     ap.add_argument("--full-max", type=int, default=33000, dest="full_max")
+    ap.add_argument("--preserve", type=float, default=0.0,
+                    help="28/10 host protection: weight of a 'stay quiet' loss = KL(host graft-off || graft-on, own "
+                         "memory) on (i) a bAbI qa11-qa20 TRAIN story whose facts are in the WINDOW (question not "
+                         "answerable from memory; never qa5/qa6/qa8), on the host's own answer tokens, and (ii) the "
+                         "last 64 tokens of the PG19 window (plain continuation). Read side only (memory detached).")
+    ap.add_argument("--preserve-txt", type=float, default=1.0, dest="preserve_txt",
+                    help="relative weight of part (ii) inside --preserve")
+    ap.add_argument("--gate", action="store_true",
+                    help="28/10: learned per-token gate on the branch output, sigmoid(w . h + b) from the host state "
+                         "at the graft site, w = 0 and b = 4 at init (gate 0.98)")
+    ap.add_argument("--official-mid", default="", dest="official_mid",
+                    help="28/10: during training, official test 'tasks:lengths' every --official-mid-every steps "
+                         "(checkpoint <out>_step<N>.pt, results <out>_step<N>_official*.json[l])")
+    ap.add_argument("--official-mid-every", type=int, default=0, dest="official_mid_every")
+    ap.add_argument("--layout", choices=["dev", "official"], default="dev",
+                    help="28/10 (agent): TRAINING layout. dev = facts only in the past, >= D tokens before the window "
+                         "(default, unchanged). official = G.layout_official: facts anywhere in past + window, as the "
+                         "official BABILong (per-variant window; margin loss off for items whose support touches the "
+                         "window). Dev eval (evaluate) keeps the dev layout.")
+    ap.add_argument("--slot-pos", action="store_true", dest="slot_pos",
+                    help="28/10 (agent), kvfull: learned recency bias on the read, q . p_r added to the slot logits "
+                         "(r = rank from the most recent slot; p = 0 at init), and short slot sets padded with masked "
+                         "ZERO slots at the front instead of a cyclic repeat")
+    ap.add_argument("--write-topk", action="store_true", dest="write_topk",
+                    help="28/10 (agent), kvfull: LEARNED selective write = a scorer MLP on the host state; the slots "
+                         "are the raw states of the most recent tokens with score > 0 (at most --slots), in order "
+                         "(rest masked). Straight-through gradient to the scorer + --topk-bce aux loss")
+    ap.add_argument("--topk-bce", type=float, default=1.0, dest="topk_bce",
+                    help="weight of the aux BCE of the --write-topk scorer on the fact sentence ENDS of the past "
+                         "(question-agnostic training labels; balanced positives / negatives)")
+    ap.add_argument("--oracle-distract", default="", dest="oracle_distract",
+                    help="28/10 (agent), LOAD CURRICULUM for the oracle write: 'K0:K1:S' = the end states of the "
+                         "SUPPORTING fact sentences plus random other fact sentence ends of the past, K facts in all, "
+                         "K growing linearly from K0 to K1 over S steps (then K1). Training only; on the official test "
+                         "orc (all fact ends) and sup (support ends) are unchanged")
     ap.add_argument("--init", default=None, help="load a branch state_dict (same architecture flags)")
     ap.add_argument("--eval-only", action="store_true", dest="eval_only")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", default="cuda")
     a = ap.parse_args()
+    if a.write_topk and not a.slot_pos:
+        a.slot_pos = True                   # rejected slots are zeros: they must be masked on the read
     TextHost.past_chunk, TextHost.past_mode = a.past_chunk, a.past_mode
     if a.past_chunk:
         print(f"past prefill: {a.past_mode} blocks of {a.past_chunk} tokens", flush=True)
@@ -441,8 +481,12 @@ def main():
                 if s_.shape[1] == 0:
                     return torch.zeros(*h.shape[:-1], self.dk, device=h.device, dtype=h.dtype)
                 l2 = lambda x: x / (x.norm(dim=-1, keepdim=True) + 1e-6)  # noqa: E731
-                att_ = torch.softmax(self.log_tau.exp() * torch.einsum("bnd,bkd->bnk", l2(self.q_proj(h)),
-                                                                       l2(self.k_proj(s_))), -1)
+                qn_ = l2(self.q_proj(h))
+                lg_ = torch.einsum("bnd,bkd->bnk", qn_, l2(self.k_proj(s_)))
+                if hasattr(self, "pos"):         # --slot-pos: recency bias, masked zero slots
+                    lg_ = lg_ + torch.einsum("bnd,kd->bnk", qn_, self.pos[-s_.shape[1]:].to(qn_.dtype))
+                    lg_ = lg_.masked_fill((s_.abs().sum(-1) == 0)[:, None, :], -1e4)
+                att_ = torch.softmax(self.log_tau.exp() * lg_, -1)
                 return torch.einsum("bnk,bkd->bnd", att_, self.v_proj(s_))
 
     if a.mem_type == "hybrid":
@@ -467,6 +511,13 @@ def main():
         branch.memory = KVFull(2048, a.d_mem, a.slots, a.tau_init).to(a.device)
         branch.slot_q = nn.Parameter(torch.randn(a.slots, a.d_mem, device=a.device) * 0.02)
         branch.slot_k = nn.Linear(2048, a.d_mem, bias=False).to(a.device)
+        if a.slot_pos:
+            branch.memory.pos = nn.Parameter(torch.zeros(a.slots, a.d_mem, device=a.device))
+            print("slot-pos: recency bias on the cache read (zero at init), masked zero padding", flush=True)
+        if a.write_topk:
+            branch.write_score = nn.Sequential(nn.Linear(2048, 128), nn.GELU(), nn.Linear(128, 1)).to(a.device)
+            nn.init.zeros_(branch.write_score[2].weight); nn.init.constant_(branch.write_score[2].bias, -1.0)
+            print(f"write-topk: learned scorer, the {a.slots} most recent tokens with score > 0 are written", flush=True)
 
         def _delta(self, h, state=None, S=None, *, token_offset=0, write_mask=None):
             if state is None:
@@ -575,7 +626,27 @@ def main():
         print(f"init from {a.init} (step {blob_.get('step')}): {missing}", flush=True)
     if a.proj_hidden and a.proj_residual and not pre_wrapped:
         wrap_residual()
+    if a.gate:
+        import torch.nn as nn
+        branch.gate = nn.Linear(2048, 1).to(a.device)
+        nn.init.zeros_(branch.gate.weight); nn.init.constant_(branch.gate.bias, 4.0)
+        if a.init:
+            gk_ = {k_[5:]: v_ for k_, v_ in torch.load(a.init, map_location="cpu", weights_only=False)["branch"].items()
+                   if k_.startswith("gate.")}
+            if gk_:
+                branch.gate.load_state_dict(gk_); print("gate loaded from --init", flush=True)
+        gate_mon = []
+        _delta_ng = branch.delta
+
+        def _delta_gated(h, state=None, S=None, **kw):
+            d_, st_, S_ = _delta_ng(h, state, S, **kw)
+            g_ = torch.sigmoid(branch.gate(h.to(branch.gate.weight.dtype))).to(d_.dtype)
+            gate_mon.append(float(g_.detach().float().mean()))
+            return d_ * g_, st_, S_
+        branch.delta = _delta_gated
+        print("gate: sigmoid(w.h + b) on the branch output, b = 4", flush=True)
     keyreg = {"z": [], "q": None}
+    aux = {}                                # --write-topk: aux BCE and selection stats of the last write
     if a.addr_nce > 0:
         import torch.nn as nn
         branch.addr_logtau = nn.Parameter(torch.tensor(math.log(10.0), device=a.device))
@@ -671,11 +742,30 @@ def main():
     slotlike = a.mem_type in ("pool", "kvfull")
 
     content_ids = None
+    if a.oracle_support_content:
+        a.oracle_content = True
     if a.oracle_content:
         words = G.LOCS + G.PEOPLE + ["Bill", "Fred", "Jeff", "apple", "football", "milk", "north", "south", "east", "west"]
         content_ids = {tok.encode(" " + w, add_special_tokens=False)[0] for w in words}
 
     def orc_pos(L_):
+        if a.oracle_distract and branch.training and "support_ends" in L_:
+            se_ = sorted(set(L_["support_ends"]))
+            oth_ = [e_ - 1 for s_, e_, k_ in L_["bounds"] if k_ not in ("scen", "dist") and e_ - 1 not in se_]
+            if slotlike:
+                kk_ = max(len(se_), min(a.slots, mix.get("K", 8)))
+                return sorted(se_ + random.sample(oth_, min(len(oth_), kk_ - len(se_))))[-a.slots:] if se_ else se_
+            # deep (28/10 14 h 30): same sentence choice, written as the content tokens of the chosen sentences
+            kk_ = max(len(se_), mix.get("K", 8))
+            ch_ = set(se_ + random.sample(oth_, min(len(oth_), kk_ - len(se_))))
+            pos_ = [p for s_, e_, k_ in L_["bounds"] if k_ not in ("scen", "dist") and e_ - 1 in ch_
+                    for p in range(s_, e_) if content_ids is None or L_["past"][p] in content_ids]
+            return pos_ or sorted(ch_)
+        if a.oracle_support_content and content_ids is not None and "support_ends" in L_:
+            se_ = set(L_["support_ends"])
+            pos_ = [p for s_, e_, k_ in L_["bounds"] if k_ not in ("scen", "dist") and e_ - 1 in se_
+                    for p in range(s_, e_) if L_.get("past") is None or L_["past"][p] in content_ids]
+            return pos_ or [L_["support_ends"][-1]]
         if a.oracle_support and "support_ends" in L_:
             return L_["support_ends"]
         if content_ids is not None:           # question-agnostic: the content tokens of EVERY fact sentence
@@ -782,10 +872,39 @@ def main():
         memory itself; k < n: cyclic repeat, which leaves the attention read nearly unchanged)."""
         if x.shape[1] >= n:
             return x[:, -n:]
+        if a.slot_pos:                   # 28/10: masked zero slots in front (recency ranks stay exact)
+            return torch.cat([x.new_zeros(x.shape[0], n - x.shape[1], x.shape[2]), x], 1)
         reps = -(-n // x.shape[1])
         return x.repeat(1, reps, 1)[:, -n:]
 
     def pooled_write(h, lays_):
+        if a.mem_type == "kvfull" and a.write_topk:
+            sc = branch.write_score(h.float()).squeeze(-1)                       # [B, N]
+            Bn, Nn = sc.shape
+            pos_ = torch.arange(Nn, device=h.device, dtype=torch.float32) / Nn
+            key_ = (sc.detach() > 0).float() * 2.0 + pos_[None]                  # most recent positives first
+            k_ = min(a.slots, Nn)
+            idx = key_.topk(k_, dim=1).indices.sort(dim=1).values                # [B, k], in stream order
+            sel = h.gather(1, idx[..., None].expand(-1, -1, h.shape[-1]))
+            sg = torch.sigmoid(sc.gather(1, idx))
+            ok_ = (sc.detach().gather(1, idx) > 0).to(h.dtype)
+            sel = sel * ((sg / sg.detach()).to(h.dtype) * ok_)[..., None]        # straight-through; rejects -> 0
+            if lays_ is not None and branch.training:
+                lab = torch.zeros(Bn, Nn, device=h.device)
+                for i, L_ in enumerate(lays_):
+                    for s_, e_, kind in L_["bounds"]:
+                        if kind not in ("scen", "dist") and 0 < e_ <= Nn:
+                            lab[i, e_ - 1] = 1.0
+                bce = F.binary_cross_entropy_with_logits(sc, lab, reduction="none")
+                npos = lab.sum().clamp_min(1.0)
+                aux["bce"] = 0.5 * ((bce * lab).sum() / npos + (bce * (1 - lab)).sum() / (1 - lab).sum().clamp_min(1.0))
+                with torch.no_grad():
+                    hit = lab.gather(1, idx) * ok_.float()
+                    aux["prec"] = float(hit.sum() / ok_.float().sum().clamp_min(1.0))
+                    aux["n_sel"] = float(ok_.float().sum(1).mean())
+                    aux["n_pos_gt0"] = float((sc > 0).float().sum(1).mean())
+                    aux["recall_pos"] = float(((sc > 0).float() * lab).sum() / npos)
+            return branch.memory.write(sel)
         if a.mem_type == "kvfull":
             kk = branch.slot_k(h)
             kk = kk / (kk.norm(dim=-1, keepdim=True) + 1e-6)
@@ -960,6 +1079,14 @@ def main():
             for t in tasks_.split(","):
                 ds = json.load(open(os.path.join(HERE, "bl_data", "babilong_test", Ln, f"{t}.json")))[:a.official_n]
                 z0 = json.load(open(os.path.join(HERE, "bl_data", "babilong_test", "0k", f"{t}.json")))
+                # 28/10: bAbI TEST supporting facts, for the support-only oracle ("sup"): the official files carry
+                # no support indices; the 0k sample is matched to its bAbI test sample (facts + question).
+                sup_key = {}
+                for sub_ in ("en-10k", "en"):
+                    p_ = os.path.join(G.BABI, sub_, G.FILES[t] + "_test.txt") if t in G.FILES else ""
+                    if p_ and os.path.exists(p_):
+                        for s_ in G.parse_babi(p_):
+                            sup_key.setdefault((tuple(s_["facts"]), s_["question"]), s_["support"])
                 acc, prev, t_wr, t0_ = defaultdict(list), None, 0.0, time.time()
                 for i, ex in enumerate(ds):
                     text = ex["input"].strip()
@@ -995,29 +1122,50 @@ def main():
                             rows_q.append(("mem", st_, S_))
                         if "omem" in conds and prev is not None:
                             rows_q.append(("omem", prev[0], prev[1]))
-                        if "orc" in conds:
+                        if "orc" in conds or "sup" in conds:
                             # locate the bAbI sentences of the 0k version of this sample (same question/target)
                             zz = z0[i] if i < len(z0) else None
-                            spans = []
+                            spans, facts0 = [], []
                             if zz and zz["question"] == ex["question"] and zz["target"] == ex["target"]:
                                 pos_c = 0
-                                for f_ in [x.strip() + "." for x in zz["input"].split(".") if x.strip()]:
+                                facts0 = [x.strip() + "." for x in zz["input"].split(".") if x.strip()]
+                                for f_ in facts0:
                                     k_ = text.find(f_, pos_c)
                                     if k_ < 0:
                                         spans = []
                                         break
                                     spans.append((k_, k_ + len(f_))); pos_c = k_ + len(f_)
-                            if spans:
-                                tpos = [j for j, (c0, c1) in enumerate(offs[:len(past)])
-                                        if any(c0 < e_ and c1 > s_ for s_, e_ in spans)]
-                                if tpos:
-                                    fake = {"bounds": [(p_, p_ + 1, t) for p_ in tpos], "vals": tpos,
-                                            "support_ends": tpos}
-                                    a.oracle_write = True
-                                    so_, So_, _ = write_mem([past], [fake])
-                                    a.oracle_write = orc_flag
-                                    rows_q.append(("orc", so_, So_))
-                                    rec["orc_writes"] = len(tpos)
+                            # 28/10: one bound per fact SENTENCE (token range inside the past) and "past" given,
+                            # so orc_pos applies the same rule as in training (--oracle-content: content tokens
+                            # only; before 28/10 the official orc wrote ALL tokens of the facts, a mismatch).
+                            sb = []
+                            for s_, e_ in spans:
+                                tp_ = [j for j, (c0, c1) in enumerate(offs[:len(past)]) if c0 < e_ and c1 > s_]
+                                sb.append((tp_[0], tp_[-1] + 1) if tp_ else None)
+                            rec["n_facts"] = len(spans)
+                            rec["facts_in_win"] = sum(1 for x in sb if x is None)
+                            sel_ = {}
+                            if "orc" in conds:
+                                sel_["orc"] = [x for x in sb if x]
+                            if "sup" in conds and spans:
+                                sup_ = sup_key.get((tuple(facts0), ex["question"].strip()))
+                                if sup_ is None:
+                                    rec["sup_missing"] = 1
+                                else:
+                                    rec["sup_idx"] = sup_
+                                    rec["sup_in_win"] = sum(1 for k in sup_ if k < len(sb) and sb[k] is None)
+                                    sel_["sup"] = [sb[k] for k in sup_ if k < len(sb) and sb[k]]
+                            for name_, bb in sel_.items():
+                                if not bb:
+                                    continue
+                                fake = {"bounds": [(b0, b1, t) for b0, b1 in bb], "past": past,
+                                        "vals": [p_ for b0, b1 in bb for p_ in range(b0, b1)],
+                                        "support_ends": [b1 - 1 for b0, b1 in bb]}
+                                a.oracle_write = True
+                                so_, So_, _ = write_mem([past], [fake])
+                                a.oracle_write = orc_flag
+                                rows_q.append((name_, so_, So_))
+                                rec[name_ + "_writes"] = len(orc_pos(fake))
                         for name_, s1, S1 in rows_q:
                             set_carry(wrapper, s1, S1, [0])
                             outs[name_] = greedy([q], 16)[0]
@@ -1338,6 +1486,44 @@ def main():
         print("TRAIN-TEXT-AB-FINI", flush=True)
         return
 
+    pres_pool = []
+    if a.preserve > 0:
+        PRES_FILES = ["qa11_basic-coreference", "qa12_conjunction", "qa13_compound-coreference", "qa14_time-reasoning",
+                      "qa15_basic-deduction", "qa16_basic-induction", "qa17_positional-reasoning", "qa18_size-reasoning",
+                      "qa19_path-finding", "qa20_agents-motivations"]       # never qa5 / qa6 / qa8 (held out)
+        for f_ in PRES_FILES:
+            t_ = f_.split("_")[0]
+            for s_ in G.parse_babi(os.path.join(G.BABI, "en-10k", f_ + "_train.txt")):
+                ft_ = tok.encode(" " + " ".join(s_["facts"]), add_special_tokens=False)
+                if len(ft_) <= 192:
+                    pres_pool.append((t_, ft_, s_["question"]))
+        print(f"preserve pool: {len(pres_pool)} bAbI qa11-qa20 TRAIN samples (facts <= 192 tokens)", flush=True)
+
+    def preserve_loss(state_, S_, win_):
+        """KL(host graft-off || graft-on with this memory): qa11-qa20 story in the window + plain PG19 window."""
+        t_, ft_, q_ = pres_pool[rng.randrange(len(pres_pool))]
+        ctx_ = list(win_[-(a.window - len(ft_)):]) + ft_
+        qi_ = G.student_ids(tok, ctx_, {"task": t_, "question": q_})
+        with torch.no_grad(), disabled(wrapper):
+            x_ = torch.tensor([qi_], device=a.device)
+            go_ = host.model.generate(input_ids=x_, attention_mask=torch.ones_like(x_), max_new_tokens=12, do_sample=False)
+            gt_ = go_[0, len(qi_):].tolist()
+            for stop in (host.im_end, tok.eos_token_id):
+                if stop in gt_:
+                    gt_ = gt_[:gt_.index(stop)]
+            seq_ = torch.tensor([qi_ + gt_ + [host.im_end]], device=a.device)
+            k_ = len(gt_) + 2
+            lp_h = F.log_softmax(host.model(input_ids=seq_, use_cache=False, logits_to_keep=k_).logits[:, :-1].float(), -1)
+            wt_ = torch.tensor([list(win_)], device=a.device)
+            lp_ht = F.log_softmax(host.model(input_ids=wt_, use_cache=False, logits_to_keep=65).logits[:, :-1].float(), -1)
+        set_carry(wrapper, state_, S_, [0])
+        lp_b = F.log_softmax(host.model(input_ids=seq_, use_cache=False, logits_to_keep=k_).logits[:, :-1].float(), -1)
+        kl_q = (lp_h.exp() * (lp_h - lp_b)).sum(-1).mean()
+        set_carry(wrapper, state_, S_, [0])
+        lp_bt = F.log_softmax(host.model(input_ids=wt_, use_cache=False, logits_to_keep=65).logits[:, :-1].float(), -1)
+        kl_t = (lp_ht.exp() * (lp_ht - lp_bt)).sum(-1).mean()
+        return kl_q + a.preserve_txt * kl_t, {"pres_kl_q": float(kl_q), "pres_kl_txt": float(kl_t), "pres_task": t_}
+
     hist, log, t0 = [], [], time.time()
     kept = defaultdict(list)          # teacher kept (right) per family, for the KL mask
     fams = TRAIN_FAMS.get(a.arm)
@@ -1367,6 +1553,9 @@ def main():
             gr["lr"] = a.lr * lr_scale(step) * gr["mult"]
         mon["up"].clear(); mon["h"].clear()
         mix["p"] = max(0.0, 1.0 - step / a.oracle_mix_steps) if a.oracle_mix_steps else 0.0
+        if a.oracle_distract:
+            k0_, k1_, s_ = (int(x_) for x_ in a.oracle_distract.split(":"))
+            mix["K"] = round(k0_ + (k1_ - k0_) * min(1.0, step / max(1, s_)))
         g = 1_000_000 + a.seed * 100_000 + step
         st = G.make_story(g, "train")
         if a.past_choices:
@@ -1376,13 +1565,14 @@ def main():
             P_ = a.past
             D = rng.randrange(0, a.dmax + 1)
         try:
-            lays = G.layout(st, tok, P=P_, W=a.window, D=D)
+            lays = G.layout(st, tok, P=P_, W=a.window, D=D, **({"official": True} if a.layout == "official" else {}))
         except ValueError as e_:
             print(f"  step {step}: layout refused ({e_}), skipped", flush=True)
             continue
         annotate_values(st, lays)
         v1, v2 = rng.sample(range(4), 2)
         win = lays[0]["window"]
+        aux.clear()
         try:
             state, S, (al, et, th) = write_mem([lays[v1]["past"], lays[v2]["past"]], [lays[v1], lays[v2]])
             if a.arm in ("A", "B"):
@@ -1393,6 +1583,7 @@ def main():
                 for r, v in enumerate((v1, v2)):
                     for f in qf:
                         it = st["items"][f][v]
+                        win = lays[v]["window"]          # 28/10: per variant (official layout: a fact may be in it)
                         q, ans = build_qa(host, win, it)
                         fb_ = G.facts_of(lays[v], f)
                         if a.teacher_notes == "support" and "support" in it:   # supporting sentences only
@@ -1461,11 +1652,23 @@ def main():
                 cmask = torch.tensor([float(st["items"][meta[i]][(v1, v2)[r]]["answer_text"] !=
                                             st["items"][meta[i]][(v1, v2)[1 - r]]["answer_text"])
                                       for i, (_q, _an, r) in enumerate(stu)], device=a.device)
+                if a.layout == "official":      # 28/10: no margin when a supporting fact touches the window
+                    npast_ = [lays[(v1, v2)[r]].get("n_fact_past", 10 ** 9) for (_q, _an, r) in stu]
+                    sw_ = [any(k_ >= npast_[i] for k_ in st["items"][meta[i]][(v1, v2)[r]]["support"])
+                           for i, (_q, _an, r) in enumerate(stu)]
+                    cmask = cmask * torch.tensor([0.0 if x_ else 1.0 for x_ in sw_], device=a.device)
+                    info_sw = sum(sw_) / len(sw_)
                 # margin only where the two memories imply different answers (extra simulated questions may not)
                 l_c = (F.relu(a.margin + ce_own - ce_oth) * cmask).sum() / cmask.sum().clamp_min(1.0)
                 loss = l_ce + a.lam_kl * l_kl + a.lam_c * l_c
                 info = {"ce": float(l_ce), "kl": float(l_kl), "con": float(l_c), "gap": float((ce_oth - ce_own).mean()),
                         "teach_ok": sum(tok_ok) / n}
+                if a.layout == "official":
+                    info["sup_in_win"] = info_sw
+                if aux.get("bce") is not None:
+                    loss = loss + a.topk_bce * aux["bce"]
+                    info.update({"topk_bce": float(aux["bce"]), "topk_prec": aux["prec"], "topk_nsel": aux["n_sel"],
+                                 "topk_npos": aux["n_pos_gt0"], "topk_recall": aux["recall_pos"]})
                 if a.addr_nce > 0 and keyreg["z"] and keyreg["q"] is not None:
                     nces, rks = [], []
                     lays_w = [lays[v1], lays[v2]]
@@ -1530,6 +1733,13 @@ def main():
                         "mem_gain": gain, "w_mean": float(w_t.mean()), "w_max": float(w_t.max())}
             opt.zero_grad(set_to_none=True)
             loss.backward()
+            if a.preserve > 0 and a.arm in ("A", "B"):
+                pl_, pinfo_ = preserve_loss({k_: v_.detach() for k_, v_ in state.items()},
+                                            {k_: v_.detach() for k_, v_ in S.items()} if S else S, win)
+                (a.preserve * pl_).backward()
+                info.update(pinfo_)
+            if a.gate and gate_mon:
+                info["gate_mean"] = sum(gate_mon[-20:]) / len(gate_mon[-20:]); gate_mon.clear()
         except torch.OutOfMemoryError:
             opt.zero_grad(set_to_none=True)
             torch.cuda.empty_cache()
@@ -1550,7 +1760,7 @@ def main():
             else:
                 wn = float(state["slots"][0].norm(dim=-1).mean())
             dr = (sum(mon["up"]) / max(1, len(mon["up"]))) / max(1e-9, sum(mon["h"]) / max(1, len(mon["h"])))
-            gl = {"step": step, "P": P_, "D": D, "loss": float(loss), "loss_run": run, "gn": gn, **info,
+            gl = {"step": step, "P": P_, "D": D, **({"K": mix["K"]} if a.oracle_distract else {}), "loss": float(loss), "loss_run": run, "gn": gn, **info,
                   "write_rel_norm": wn, "delta_over_h": dr, "mix_p": mix["p"],
                   "peak_gib": round(torch.cuda.max_memory_allocated() / 2 ** 30, 2),
                   "pool_w": {k_: round(sum(v_[-200:]) / len(v_[-200:]), 3) for k_, v_ in pool_stats.items()},
@@ -1568,6 +1778,16 @@ def main():
         if (step + 1) % 500 == 0 or step + 1 == a.steps:
             torch.save({"branch": branch.state_dict(), "step": step + 1, "args": vars(a), "budget": budget},
                        a.out + ".pt")
+        if a.official_mid and a.official_mid_every and (step + 1) % a.official_mid_every == 0:
+            out_, off_ = a.out, a.official
+            torch.save({"branch": branch.state_dict(), "step": step + 1, "args": vars(a), "budget": budget},
+                       f"{out_}_step{step + 1}.pt")
+            a.out, a.official = f"{out_}_step{step + 1}", a.official_mid
+            try:
+                official_eval()
+            finally:
+                a.out, a.official = out_, off_
+                branch.train()
         if step % 50 == 0 or step + 1 == a.steps:
             with open(a.out + ".json", "w") as fo:
                 json.dump({"args": vars(a), "budget": budget, "history": hist, "log": log,

@@ -68,12 +68,13 @@ def main():
             win = lays[0]["window"]
             for v in range(4):
                 its = [st["items"][f][v] for f in G.FAMILIES]
-                lgs, n = h.score_many(h.ctx_ids(notes[v], win), [prompt_of(it) for it in its])
-                for it, lg in zip(its, lgs):
+                lgs, n = h.score_many(h.ctx_ids(notes[v], win), its)
+                for it, lg_all in zip(its, lgs):
+                    lg, lk = lg_all[:4], lg_all[4:]
                     pred = int(lg.argmax())
                     fo.write(json.dumps({"family": it["family"], "kind": it["kind"], "group": g, "variant": v,
                                          "answer": it["answer"], "cond": cond, "pred": pred,
-                                         "correct": int(pred == it["answer"]), "lg": [round(x, 3) for x in lg.tolist()],
+                                         "correct": int(pred == it["answer"]), "lg": [round(x, 3) for x in lg.tolist()], "lk": [round(x, 3) for x in lk.tolist()],
                                          "ntok": n, "mem_tok": len(notes[v]), "gen": GEN_MD5,
                                          "notes": tok.decode(notes[v]), "D": lays[v]["D"]}) + "\n")
             fo.flush()

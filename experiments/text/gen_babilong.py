@@ -419,10 +419,68 @@ def background(story, tok, need):
     return out
 
 
-def layout(story, tok, P=4096, W=256, D=0, margin=16):
+def layout_official(story, tok, P=3400, W=256, margin=16):
+    """28/10 (agent): OFFICIAL-like layout, as booydar/babilong: the facts go, in order, at sentence boundaries
+    drawn uniformly (with replacement, sorted) over the WHOLE context (past + window), so a fact may fall inside
+    the window and the last facts are often near the end. Total = P + W tokens; past = first P, window = last W.
+    Differences with layout(): no distance D; the window may differ across variants (when it holds a fact);
+    bounds keep only the PAST part of the facts (a fact cut by the past/window seam is kept clipped), in order,
+    so facts_of()[i] is still fact i for i < n_fact_past. Extra keys: n_fact_past (facts fully in the past),
+    n_fact_win (facts touching the window)."""
+    task = story["task"]
+    enc = lambda s: tok.encode(" " + s, add_special_tokens=False)  # noqa: E731
+    fids = [[enc(f) for f in fv] for fv in story["facts"]]
+    F = [sum(len(x) for x in fv) for fv in fids]
+    if max(F) > MAX_FACT_FRAC * P:
+        raise ValueError(f"facts {max(F)} tokens > {MAX_FACT_FRAC} x P {P}")
+    T = P + W
+    bg = background(story, tok, T - min(F) + 2 * margin)
+    toks, starts = [], []
+    for s in bg:
+        starts.append(len(toks))
+        toks += s
+    hi = T - max(F)                                         # boundaries common to all variants
+    elig = [b for b in starts if b <= hi] + ([hi] if hi not in starts else [])
+    r = random.Random(story["rng_seed"] * 37 + P + 1)
+    chosen = sorted(r.choice(elig) for _ in range(len(fids[0])))
+    at = {}
+    for i, b in enumerate(chosen):
+        at.setdefault(b, []).append(i)
+    out = []
+    for v in range(4):
+        nb = T - F[v]
+        pts = sorted({0, nb} | {b for b in starts if 0 < b < nb} | {b for b in at if b <= nb})
+        seq, bnd = [], []
+        for a_, b_ in zip(pts, pts[1:] + [None]):
+            for i in at.get(a_, []):
+                q0 = len(seq)
+                seq += fids[v][i]
+                bnd.append((q0, len(seq), task))
+            if b_ is not None and b_ > a_:
+                q0 = len(seq)
+                seq += toks[a_:b_]
+                bnd.append((q0, len(seq), "scen"))
+        assert len(seq) == T, (len(seq), T)
+        past, window = seq[:P], seq[P:]
+        bounds = [(a_, min(b_, P), k) for a_, b_, k in bnd if a_ < P]
+        fall = [(a_, b_) for a_, b_, k in bnd if k == task]
+        n_past = sum(1 for a_, b_ in fall if b_ <= P)
+        fb = [(a_, b_) for a_, b_, k in bounds if k == task]
+        sup = story["items"][task][v]["support"]
+        se = [fb[i][1] - 1 for i in sup if i < len(fb)] or ([fb[-1][1] - 1] if fb else [P - 1])
+        out.append(dict(past=past, window=window, bounds=bounds, D=P - fb[-1][1] if fb else P,
+                        ep=(fb[0][0], fb[-1][1]) if fb else (0, 0), support_ends=se,
+                        n_fact_past=n_past, n_fact_win=len(fall) - n_past))
+    return out
+
+
+def layout(story, tok, P=4096, W=256, D=0, margin=16, official=False):
     """4 variants: past (exactly P tokens: PG19 background with the facts at sentence boundaries, every fact at
     least ~D tokens before the end of the past), window (the W background tokens that follow, identical across
-    variants), bounds [(a, b, kind)] with kind 'scen' (background piece) or the task (one fact sentence)."""
+    variants), bounds [(a, b, kind)] with kind 'scen' (background piece) or the task (one fact sentence).
+    official=True (28/10): layout_official() instead (facts anywhere, window included; D ignored)."""
+    if official:
+        return layout_official(story, tok, P=P, W=W, margin=margin)
     task = story["task"]
     enc = lambda s: tok.encode(" " + s, add_special_tokens=False)  # noqa: E731
     fids = [[enc(f) for f in fv] for fv in story["facts"]]
