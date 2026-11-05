@@ -126,6 +126,11 @@ init. It reads PCA-128 projections of the layer states (`fit_basis.py`, one toke
   `eval_stream.py` scores it with the right memory, a wrong-video memory, the window
   alone, and the teacher.
 * `demo_server.py` and `demo.html`: the interactive colour demo.
+* `experiments/text/demo_text_server.py` and `demo_text.html`: the text demo. A story
+  (drawn from the v2 or v3 bench, or pasted), a question and up to 4 options; the past is
+  read in stream and written into the memory, then Qwen alone, Qwen with the memory and
+  Qwen with the full story answer. Run it from the text working directory (with `pylib/`):
+  `CUDA_VISIBLE_DEVICES=2 PYTHONPATH=pylib python demo_text_server.py --ckpt "Name=run.pt"`.
 
 ```bash
 python -m titans.graft.stream_color_targets --reuse ~/work/iclr/stream/tg \

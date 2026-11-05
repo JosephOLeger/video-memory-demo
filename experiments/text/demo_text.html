@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Mémoire greffée, texte</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: light;
+    --ink: #172033; --ink2: #47536A; --muted: #8590A3; --line: #E4E8EE; --line2: #D3D9E2;
+    --bg: #FFFFFF; --soft: #F6F8FA; --soft2: #EEF2F6;
+    --mem: #0F7B6C; --membg: #E8F5F2; --memline: #A9DCD3;
+    --win: #2F6FD0; --winbg: #EAF1FC;
+    --ko: #C2410C; --kobg: #FDEEE6; --gold: #B7791F;
+    --f-count_start: #F6D7C8; --f-order: #D6E4F7; --f-main_object: #DCD3F5; --f-place: #D3EFDB;
+    --f-colour: #F7EBC4; --f-number: #F4D3E2; --f-object_name: #CFEDEB; --f-presence: #E8E2D6;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.55 Inter, "Helvetica Neue", Helvetica, Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+  main { max-width: 1120px; margin: 0 auto; padding: 36px 16px 72px; display: grid; gap: 28px; }
+  h1 { font-size: 34px; line-height: 1.12; margin: 0 0 10px; font-weight: 800; letter-spacing: -.02em; text-wrap: balance; }
+  h2 { font-size: 19px; margin: 0; font-weight: 700; letter-spacing: -.01em; }
+  .kicker { font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--mem); margin-bottom: 8px; }
+  .lede { color: var(--ink2); margin: 0; max-width: 720px; font-size: 16px; }
+
+  /* comment ça marche */
+  .how { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+  .how > div { padding: 16px 18px; position: relative; min-width: 0; }
+  .how > div + div { border-left: 1px solid var(--line); }
+  .how b { display: block; font-size: 13px; margin-bottom: 4px; }
+  .how p { margin: 0; font-size: 13.5px; color: var(--ink2); }
+  .how .n { display: inline-flex; width: 22px; height: 22px; border-radius: 50%; align-items: center; justify-content: center;
+            font-size: 12px; font-weight: 700; margin-right: 6px; color: #fff; }
+  .how .c1 .n { background: var(--muted); } .how .c2 { background: var(--membg); } .how .c2 .n { background: var(--mem); }
+  .how .c3 .n { background: var(--win); }
+  @media (max-width: 760px) { .how { grid-template-columns: 1fr; } .how > div + div { border-left: 0; border-top: 1px solid var(--line); } }
+
+  .sec { display: grid; gap: 14px; }
+  .sechead { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .num { font-size: 13px; font-weight: 700; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .note { font-size: 13px; color: var(--muted); margin: 0; }
+  .controls { display: flex; gap: 14px; flex-wrap: wrap; align-items: end; }
+  label.f { display: grid; gap: 5px; font-size: 11.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  select, input[type=number], input[type=text], textarea {
+    font: inherit; color: var(--ink); background: #fff; border: 1px solid var(--line2); border-radius: 8px; padding: 8px 10px; }
+  input[type=number] { width: 100px; }
+  textarea { width: 100%; resize: vertical; font: 15px/1.6 "Source Serif 4", Georgia, serif; }
+  button { font: inherit; font-weight: 600; border-radius: 8px; border: 1px solid var(--line2); background: #fff; color: var(--ink);
+           padding: 8px 14px; cursor: pointer; }
+  button:hover { border-color: var(--ink2); }
+  .seg { display: inline-flex; border: 1px solid var(--line2); border-radius: 8px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; padding: 8px 14px; }
+  .seg button + button { border-left: 1px solid var(--line2); }
+  .seg button.on { background: var(--ink); color: #fff; }
+  .tabs { display: inline-flex; gap: 4px; background: var(--soft2); padding: 4px; border-radius: 10px; }
+  .tabs button { border: 0; background: transparent; padding: 6px 12px; }
+  .tabs button.on { background: #fff; box-shadow: 0 1px 2px rgba(23,32,51,.12); }
+
+  /* frise */
+  .tl { display: grid; gap: 6px; }
+  .tl .bar { position: relative; height: 30px; background: var(--soft2); border-radius: 6px; overflow: hidden; }
+  .tl .bar .w { position: absolute; top: 0; bottom: 0; right: 0; background: var(--winbg); border-left: 2px solid var(--win); }
+  .tl .bar .m { position: absolute; top: 5px; bottom: 5px; width: 4px; border-radius: 2px; transform: translateX(-2px); box-shadow: 0 0 0 1px rgba(23,32,51,.35); }
+  .tl .scale { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+  .tl .scale span:last-child { color: var(--win); font-weight: 600; }
+
+  .story { max-height: 340px; overflow: auto; border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px;
+           font: 15.5px/1.7 "Source Serif 4", Georgia, serif; color: var(--ink); }
+  .story .scen { color: #9AA3B2; }
+  .story .fact { border-radius: 4px; padding: 1px 2px; color: var(--ink); }
+  .story .window { background: var(--winbg); border-radius: 4px; box-shadow: 0 0 0 2px var(--win); }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12.5px; color: var(--ink2); }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -2px; margin-right: 5px; }
+
+  /* question */
+  .qgroups { display: grid; gap: 10px; }
+  .qg { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .qg .lab { font-size: 12px; font-weight: 700; color: var(--muted); width: 170px; }
+  .qg button { font-size: 13.5px; padding: 6px 12px; border-radius: 999px; }
+  .qg button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .qg.untrained button { border-style: dashed; }
+  .qbox { border: 1px solid var(--line); border-radius: 12px; padding: 14px; display: grid; gap: 8px; }
+  .qbox input#question { width: 100%; font-weight: 600; }
+  .opt { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+  .opt b { font-size: 13px; color: var(--muted); }
+  .opt label { font-size: 12px; color: var(--muted); display: flex; gap: 5px; align-items: center; white-space: nowrap; }
+  .go { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+  .go button { background: var(--mem); border-color: var(--mem); color: #fff; padding: 11px 22px; font-size: 15.5px; border-radius: 10px; }
+  .go button:disabled { opacity: .6; cursor: wait; }
+  .err { color: var(--ko); font-weight: 600; }
+
+  /* réponses */
+  .res { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+  @media (max-width: 880px) { .res { grid-template-columns: 1fr; } }
+  .card { border: 1px solid var(--line); border-radius: 14px; padding: 16px; display: grid; gap: 10px; align-content: start; min-width: 0; }
+  .card.mem { border: 2px solid var(--mem); background: var(--membg); }
+  .card .who { font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .card.mem .who { color: var(--mem); }
+  .card .sees { font-size: 13px; color: var(--ink2); margin-top: -6px; }
+  .card .ans { font: 600 22px/1.25 "Source Serif 4", Georgia, serif; }
+  .badge { display: inline-block; font: 700 11.5px Inter, sans-serif; letter-spacing: .06em; text-transform: uppercase; padding: 3px 8px;
+           border-radius: 999px; vertical-align: 4px; margin-left: 8px; }
+  .badge.ok { background: var(--mem); color: #fff; } .badge.ko { background: var(--kobg); color: var(--ko); }
+  .pbar { display: grid; grid-template-columns: minmax(0, 1fr) 46px; gap: 8px; align-items: center; font-size: 13px; }
+  .pbar .t { position: relative; border-radius: 6px; background: var(--soft2); overflow: hidden; padding: 3px 8px; white-space: nowrap; text-overflow: ellipsis; }
+  .card.mem .pbar .t { background: #fff; }
+  .pbar .t i { position: absolute; inset: 0 auto 0 0; background: #C9D1DC; }
+  .card.mem .pbar .t i { background: var(--memline); }
+  .pbar .t span { position: relative; }
+  .pbar.gold .t { box-shadow: inset 0 0 0 2px var(--gold); }
+  .pbar .p { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; color: var(--ink2); }
+  .free { font-size: 13px; color: var(--ink2); border-top: 1px solid var(--line); padding-top: 8px; }
+  .free q { font-family: "Source Serif 4", Georgia, serif; font-size: 14.5px; color: var(--ink); }
+  .stats { display: flex; gap: 8px 22px; flex-wrap: wrap; font-size: 13px; color: var(--ink2); }
+  .stats b { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .empty { border: 1px dashed var(--line2); border-radius: 14px; padding: 28px; text-align: center; color: var(--muted); }
+  .tip { background: var(--soft); border-radius: 12px; padding: 14px 16px; font-size: 13.5px; color: var(--ink2); }
+  .tip b { color: var(--ink); }
+  footer { font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 14px; }
+  footer code { font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="kicker">Qwen2.5-VL-3B · mémoire greffée</div>
+    <h1>Lire une longue histoire en continu, puis répondre</h1>
+    <p class="lede">Qwen ne garde sous les yeux que la fin du texte. Tout ce qui précède passe par une petite mémoire de taille fixe,
+      qui apprend elle même quoi retenir. On pose la même question à trois lecteurs pour voir ce que la mémoire apporte.</p>
+  </header>
+
+  <section class="how" aria-label="Comment ça marche">
+    <div class="c1"><b><span class="n">1</span>Le passé défile</b><p>Le début de l'histoire est lu par morceaux de 256 jetons, comme un flux. Qwen ne le revoit jamais.</p></div>
+    <div class="c2"><b><span class="n">2</span>La mémoire retient</b><p id="memSummary">Chaque morceau est écrit dans la mémoire : 64 Ko d'état, 3,3 millions de paramètres appris.</p></div>
+    <div class="c3"><b><span class="n">3</span>Qwen répond</b><p>Qwen lit la fin de l'histoire (en bleu) et la question, en consultant la mémoire.</p></div>
+  </section>
+
+  <section class="sec">
+    <div class="sechead"><span class="num">01</span><h2>L'histoire</h2>
+      <div class="tabs"><button id="tBench" class="on">Histoire du banc</button><button id="tFree">Votre texte</button></div></div>
+    <div id="benchBox" class="sec">
+      <div class="controls">
+        <label class="f">Histoire n°<input id="group" type="number" min="10000" value="10000"></label>
+        <button id="dice">Une autre</button>
+        <label class="f">Longueur<select id="P"></select></label>
+        <label class="f">Version des faits<span class="seg" id="variants"></span></label>
+      </div>
+      <p class="note">Histoires synthétiques jamais vues à l'entraînement. Les 4 versions d'une même histoire ont exactement le même texte,
+        sauf les faits interrogés.</p>
+      <div class="tl" id="tl" hidden><div class="bar" id="tlbar"></div><div class="scale"><span>début</span><span id="tlwin">fenêtre de Qwen</span></div></div>
+      <div id="story" class="story" hidden></div>
+      <div id="legend" class="legend" hidden></div>
+    </div>
+    <div id="freeBox" hidden>
+      <textarea id="text" rows="12" placeholder="Collez une histoire en anglais, assez longue (plusieurs centaines de mots). Les 256 derniers jetons forment la fenêtre de Qwen."></textarea>
+      <p class="note">La mémoire n'a appris que sur nos histoires synthétiques : sur un texte réel, attendez vous à des réponses faibles.</p>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sechead"><span class="num">02</span><h2>La question</h2></div>
+    <div class="qgroups" id="qgroups"></div>
+    <div class="qbox">
+      <input id="question" type="text" placeholder="Question, en anglais">
+      <div id="opts" style="display:grid;gap:6px"></div>
+      <p class="note" style="margin:0">Options facultatives. La bonne réponse est cochée pour les questions du banc.</p>
+    </div>
+    <div class="go"><button id="go">Lire l'histoire et répondre</button><span id="err" class="err"></span></div>
+  </section>
+
+  <section class="sec">
+    <div class="sechead"><span class="num">03</span><h2>Les réponses</h2></div>
+    <div id="out"><div class="empty">Choisissez une histoire et une question, puis lancez la lecture.</div></div>
+    <div class="tip"><b>À essayer.</b> Gardez la même histoire et la même question, et changez seulement la version des faits.
+      Qwen seul répond toujours la même chose : il ne voit pas les faits. Avec la mémoire, la réponse suit la version.
+      Les questions en pointillés n'ont jamais été entraînées : elles montrent les limites actuelles.</div>
+  </section>
+
+  <footer id="foot"></footer>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const FAM = { count_start: "Combien de personnes au début", order: "Ordre des événements", main_object: "Objet principal",
+  place: "Lieu", colour: "Couleur", number: "Nombre", object_name: "Nom d'un objet", presence: "Présence",
+  count_arrivals: "Compter les arrivées", majority: "Couleur majoritaire", last_state: "Dernière position" };
+const TRAINED = ["count_start", "order", "main_object"];
+const HIDE = ["presence"];
+let META = null, STORY = null, variant = 0, mode = "bench", qi = 0;
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fcol = f => `var(--f-${f}, #E8E2D6)`;
+
+async function api(path, body) {
+  const r = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
+  const j = await r.json();
+  if (j.error) throw new Error(j.error);
+  return j;
+}
+
+function buildOpts(opts = ["", "", "", ""], gold = -1) {
+  $("opts").innerHTML = opts.map((o, i) => `<div class="opt"><b>${"ABCD"[i]}</b>
+    <input type="text" value="${esc(o)}" placeholder="option ${"ABCD"[i]}">
+    <label><input type="radio" name="gold" value="${i}" ${i === gold ? "checked" : ""}>bonne réponse</label></div>`).join("");
+}
+
+async function loadStory() {
+  if (mode !== "bench") return;
+  $("err").textContent = "";
+  try {
+    STORY = await api("/story", { bench: META.benches_shown[0], group: +$("group").value, variant, P: +$("P").value, D: 300 });
+  } catch (e) { $("err").textContent = e.message; return; }
+  const N = STORY.n_tokens, segs = STORY.segments;
+  const win = segs[segs.length - 1];
+  $("tlbar").innerHTML = `<div class="w" style="width:${((win.b - win.a) / N * 100).toFixed(2)}%"></div>` +
+    segs.filter(s => s.kind !== "scen" && s.kind !== "window").map(s =>
+      `<div class="m" style="left:${((s.a + s.b) / 2 / N * 100).toFixed(2)}%;background:${fcol(s.kind)}" title="${FAM[s.kind] || s.kind}"></div>`).join("");
+  $("tlwin").textContent = `fenêtre de Qwen : ${win.b - win.a} jetons sur ${N}`;
+  $("story").innerHTML = segs.map(s => s.kind === "window" ? `<span class="window">${esc(s.text)}</span>`
+    : s.kind === "scen" ? `<span class="scen">${esc(s.text)}</span>`
+    : `<span class="fact" style="background:${fcol(s.kind)}" title="${FAM[s.kind] || s.kind}">${esc(s.text)}</span>`).join("");
+  const fams = [...new Set(segs.map(s => s.kind).filter(k => k !== "scen" && k !== "window" && !HIDE.includes(k)))];
+  $("legend").innerHTML = fams.map(f => `<span><i style="background:${fcol(f)}"></i>${FAM[f] || f}</span>`).join("") +
+    `<span><i style="background:#9AA3B2"></i>Décor sans importance</span><span><i style="background:var(--winbg);box-shadow:0 0 0 2px var(--win)"></i>Fenêtre de Qwen</span>`;
+  ["tl", "story", "legend"].forEach(id => $(id).hidden = false);
+  const first = $("story").querySelector(".fact"); if (first) $("story").scrollTop = Math.max(0, first.offsetTop - 80);
+  const qs = STORY.questions.map((q, i) => ({ ...q, i })).filter(q => !HIDE.includes(q.family));
+  const tr = qs.filter(q => TRAINED.includes(q.family)), un = qs.filter(q => !TRAINED.includes(q.family));
+  const grp = (lab, arr, cls) => arr.length ? `<div class="qg ${cls}"><span class="lab">${lab}</span>${arr.map(q =>
+    `<button data-i="${q.i}">${FAM[q.family] || q.family}</button>`).join("")}</div>` : "";
+  $("qgroups").innerHTML = grp("Apprises par la mémoire", tr, "") + grp("Jamais entraînées", un, "untrained");
+  $("qgroups").querySelectorAll("button").forEach(b => b.onclick = () => pickQ(+b.dataset.i));
+  pickQ(STORY.questions[qi] ? qi : tr[0].i);
+}
+
+function pickQ(i) {
+  qi = i; const q = STORY.questions[i];
+  $("qgroups").querySelectorAll("button").forEach(b => b.classList.toggle("on", +b.dataset.i === i));
+  $("question").value = q.question; buildOpts(q.options, q.answer);
+}
+
+function card(cls, who, sees, res, opts, gold) {
+  let ans = esc(res.free || "…"), badge = "";
+  if (res.probs) {
+    const best = res.probs.indexOf(Math.max(...res.probs));
+    ans = esc(opts[best]);
+    if (gold >= 0) badge = best === gold ? `<span class="badge ok">juste</span>` : `<span class="badge ko">faux</span>`;
+  }
+  const bars = res.probs ? res.probs.map((p, i) => `<div class="pbar ${i === gold ? "gold" : ""}"><div class="t">
+    <i style="width:${(p * 100).toFixed(1)}%"></i><span>${"ABCD"[i]}. ${esc(opts[i])}</span></div><div class="p">${Math.round(p * 100)} %</div></div>`).join("") : "";
+  return `<div class="card ${cls}"><div class="who">${who}</div><div class="sees">${sees}</div>
+    <div class="ans">${ans}${badge}</div>${bars}<div class="free">Réponse rédigée : <q>${esc(res.free || "")}</q></div></div>`;
+}
+
+async function run() {
+  $("err").textContent = "";
+  const opts = [...$("opts").querySelectorAll("input[type=text]")].map(x => x.value.trim());
+  const keep = opts.map((o, i) => [o, i]).filter(x => x[0]);
+  const g = document.querySelector("input[name=gold]:checked");
+  const gold = g ? keep.findIndex(x => x[1] === +g.value) : -1;
+  const text = mode === "free" ? $("text").value : (STORY ? STORY.segments.map(s => s.text).join("") : "");
+  const body = { text, question: $("question").value, options: keep.map(x => x[0]), mem: 0 };
+  if (mode === "bench" && STORY) body.spec = { bench: STORY.bench, group: STORY.group, variant: STORY.variant, P: STORY.P, D: 300, text };
+  if (!text.trim() || !body.question.trim()) { $("err").textContent = "Il faut une histoire et une question."; return; }
+  $("go").disabled = true; $("go").textContent = "Lecture en cours…";
+  try {
+    const r = await api("/run", body), o = r.options;
+    $("out").innerHTML = `<div class="res">` +
+      card("", "Qwen seul", `ne voit que la fenêtre (${r.n_window} jetons)`, r.base, o, gold) +
+      card("mem", "Qwen + mémoire", `la même fenêtre, plus la mémoire des ${r.n_past} jetons d'avant`, r.memory, o, gold) +
+      (r.full ? card("", "Qwen voit tout", "toute l'histoire d'un coup : la référence, impossible en flux infini", r.full, o, gold) : "") +
+      `</div><div class="stats" style="margin-top:12px"><span>Morceaux écrits dans la mémoire : <b>${r.writes}</b></span>
+       <span>Taille de la mémoire : <b>${r.mem.state_kib} Ko</b></span><span>Lecture du passé : <b>${r.write_s} s</b></span>
+       <span>Temps total : <b>${r.seconds} s</b></span></div>`;
+  } catch (e) { $("err").textContent = e.message; }
+  $("go").disabled = false; $("go").textContent = "Lire l'histoire et répondre";
+}
+
+function setMode(m) {
+  mode = m; $("tBench").classList.toggle("on", m === "bench"); $("tFree").classList.toggle("on", m === "free");
+  $("benchBox").hidden = m !== "bench"; $("freeBox").hidden = m !== "free";
+  if (m === "free") { $("qgroups").innerHTML = ""; if (!$("text").value && STORY) $("text").value = STORY.segments.map(s => s.text).join(""); buildOpts(); }
+  else loadStory();
+}
+
+(async () => {
+  META = await api("/meta");
+  const m = META.mems[0], b = META.benches[META.benches_shown[0]];
+  $("memSummary").textContent = `Chaque morceau est écrit dans la mémoire : ${m.state_kib} Ko d'état, ${(m.params / 1e6).toFixed(1).replace(".", ",")} millions de paramètres appris.`;
+  $("foot").innerHTML = `Mémoire : ${esc(m.label)}, ${esc(m.kind)}. Lecture ${esc(m.stream)}. Écriture : ${esc(m.write)}.
+    Checkpoint <code>${esc(m.file)}</code>, pas ${m.step}. Le score des options est la vraisemblance de chaque réponse, normalisée.`;
+  $("P").innerHTML = b.P.map((p, i) => `<option value="${p}" ${i === 1 ? "selected" : ""}>${p} jetons</option>`).join("");
+  $("variants").innerHTML = [0, 1, 2, 3].map(v => `<button data-v="${v}" class="${v ? "" : "on"}">${v + 1}</button>`).join("");
+  $("variants").querySelectorAll("button").forEach(bt => bt.onclick = () => {
+    variant = +bt.dataset.v; $("variants").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === bt)); loadStory(); });
+  $("P").onchange = $("group").onchange = loadStory;
+  $("dice").onclick = () => { $("group").value = 10000 + Math.floor(Math.random() * 5000); loadStory(); };
+  $("go").onclick = run; $("tBench").onclick = () => setMode("bench"); $("tFree").onclick = () => setMode("free");
+  buildOpts(); loadStory();
+})().catch(e => $("err").textContent = e.message);
+</script>
+</body>
+</html>
