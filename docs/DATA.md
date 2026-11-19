@@ -8,12 +8,8 @@ Nothing below is in git. Paths are relative to the repository root unless stated
 | `cache/enwik8_emb128`, WikiText-103 BPE cache | `paper_a/scripts/build_text_cache.py`, `build_bpe_cache.py` | the text arm of paper A and the external check |
 | `frozen_muon/*.pt` | trained bench models, `docs/FROZEN.md` | every replay probe and figure of paper A |
 | `results/` | outputs of the probes and campaigns | the figure scripts |
-| `cache/qwen_l24_pca128.pt` | `titans.graft.fit_basis` on FineVideo, layer 24 | every video graft |
-| `data/finevideo/` | `paper_b/video/fetch_finevideo.py` (150 h, purged of LongVideoBench) | video tracks |
+| `cache/qwen_l24_pca128.pt` | `titans.graft.fit_basis` on FineVideo, layer 24 | the heavy-load task and the gaussian horizon |
 | `runs/load/bank.pt` | `titans.graft.train_load --build-bank` | heavy-load task, gaussian horizon |
-| `runs/ctx/targets_*.pt` | `titans.graft.ctx_targets` (four shards, about 7 h each on an A5000) | amputated-past training |
-| `paper_b/text/bl_data/`, `basis_l24_blf_pca*.pt`, `evalsets/` | see `paper_b/text/README.md` | text track |
-| `paper_b/baselines/hf/`, `src_dl/AHN-main` | Hugging Face modules of AHN and Qwen2.5-3B, the official repository | AHN baseline |
 
 ## Where the originals are (November 2026)
 
