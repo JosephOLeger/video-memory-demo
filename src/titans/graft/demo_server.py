@@ -17,7 +17,6 @@ modele : les inferences sont serialisees par un verrou.
     PYTHONPATH=src CUDA_VISIBLE_DEVICES=3 python -m titans.graft.demo_server \\
         --ckpt runs/cf_lvb_lr3e3.pt --basis cache/qwen_l24_pca128.pt \\
         --data data/longvideobench --port 8765
-    # en local : ssh -N -L 8765:127.0.0.1:8765 josephleger@172.31.4.135
     # puis http://localhost:8765
 """
 from __future__ import annotations

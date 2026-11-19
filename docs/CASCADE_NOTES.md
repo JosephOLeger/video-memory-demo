@@ -1,10 +1,7 @@
 # Cascade métaplastique : ce qu'on a appris (août 2026)
 
-Note pour la réimplémentation. Le code est retiré du dépôt depuis le 16/10. Il reste
-récupérable à deux endroits :
-- l'étiquette git `archive/cascade-2026-10-16` (ou le commit `6a044ea`) : `src/titans/metaplastic.py`
-  et le chemin cascade de `src/titans/memory.py` ;
-- la branche `cascade-benna-fusi`.
+Note pour la réimplémentation. Le code est retiré du dépôt depuis le 16/10 ; la dernière version qui le
+contient est le commit `6a044ea` (`src/titans/metaplastic.py` et le chemin cascade de `src/titans/memory.py`).
 
 Référence : Benna et Fusi, *Computational principles of synaptic memory consolidation*,
 Nat. Neurosci. 19(12), 2016 (`ASTAR/Biblio/cascade_synaptic_memory_2016.pdf`).

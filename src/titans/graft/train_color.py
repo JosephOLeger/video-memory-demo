@@ -2,8 +2,7 @@
 
 Le metre-etalon (``needle.py``) est pose : ``ceiling`` ~96 %, ``off``/``wrong`` au
 hasard, ``on`` au hasard tant que la lecture memoire n'est pas entrainee. Ce module
-ferme ce dernier ecart. C'est le JALON intermediaire de la Phase 2
-([[graft-sliding-window-needle]]) : une tache auto-generee, a reservoir de donnees
+ferme ce dernier ecart. C'est le JALON intermediaire de la Phase 2 : une tache auto-generee, a reservoir de donnees
 infini, qui verifie de bout en bout que la retropropagation-a-travers-l'ecriture
 sait faconner un contenu rappelable, AVANT de depenser du calcul sur la tache
 generale.
@@ -15,7 +14,7 @@ les cartes cle/valeur et les portes de la boucle interne (via ``memory.update``)
 la requete ``q_proj``, la norme de lecture et surtout ``up`` -- le chemin qui ecrit
 dans le flux residuel. C'est exactement la nuance du curriculum : la boucle interne
 STOCKE deja k->v toute seule ; l'entrainement exterieur faconne ces projections
-pour que le contenu stocke soit RAPPELABLE par la tache ([[graft-sliding-window-needle]]).
+pour que le contenu stocke soit RAPPELABLE par la tache.
 
 distill.py s'inquietait qu'une lettre = ~1.4 nats ne suffise pas a entrainer un
 demi-million de parametres : c'etait vrai parce qu'EgoLifeQA n'a que 101 questions.
@@ -43,7 +42,7 @@ entrainee, pas seulement la branche.
 
 Les videos d'entrainement sont DISJOINTES des videos d'evaluation (``--eval-videos``
 en tete de la tranche, entrainement sur le reste) : le banc mesure une competence
-generale de lecture memoire, pas la memorisation d'un flux ([[embargo-at-the-seam]]).
+generale de lecture memoire, pas la memorisation d'un flux.
 
     PYTHONPATH=src CUDA_VISIBLE_DEVICES=1 python -m titans.graft.train_color \\
         --data data/longvideobench --duration-group 600 \\

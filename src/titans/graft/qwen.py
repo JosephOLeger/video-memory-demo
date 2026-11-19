@@ -109,6 +109,14 @@ class GraftedLayer(nn.Module):
         d, state, S = self.branch.delta(h.to(self.branch_dtype), state, S,
                                         token_offset=self.token_offset,
                                         write_mask=mask)
+        if getattr(self, "sub_base", False):
+            # 16/11 (eval only): baseline-subtracted read. Remove what the branch adds with an EMPTY memory, i.e. the
+            # constant bias of the read path, and keep only the part of the read that depends on the carried state.
+            # With state == init this makes the layer an exact no-op (d - d0 == 0), so `init` must equal `off`.
+            st0, S0 = self.branch.init_carry(h.shape[0])
+            d0, _, _ = self.branch.delta(h.to(self.branch_dtype), st0, S0, token_offset=self.token_offset,
+                                         write_mask=torch.zeros(h.shape[1], dtype=torch.bool, device=h.device))
+            d = d - d0
         self.carry = (state, S)
         self.token_offset += h.shape[1]
         # Added in the host's dtype: a zero delta must leave `h` untouched bit for

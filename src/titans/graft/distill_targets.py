@@ -4,7 +4,7 @@ Ce que la premiere distillation (``distill.py``) a appris, et ce qu'on corrige
 -------------------------------------------------------------------------------
 Une question fixe, des cibles dures (la reponse gloutonne du professeur) : le gain
 etait a 61 % de la projection (l'eleve imite le STYLE), 32 % "ecrire n'importe
-quoi", 7 % le bon contenu ([[distillation-gain-is-mostly-not-content]]). Ici :
+quoi", 7 % le bon contenu. Ici :
 
   * trois passes de l'hote gele, toutes precalculees :
       complet : Qwen voit la video jusqu'a la fin de la fenetre   -> p_complet
@@ -18,7 +18,7 @@ quoi", 7 % le bon contenu ([[distillation-gain-is-mostly-not-content]]). Ici :
   * des questions VARIEES et ANCREES : les scenes annotees de FineVideo (titre +
     horodatage) dont la fin precede la fenetre, tirees UNIFORMEMENT sur le passe
     (pas de prime a la recence -> pas de pression "cache",
-    [[collapse-is-horizon-retreat]]) ; + questions generiques + QA FineVideo.
+    collapse-is-horizon-retreat) ; + questions generiques + QA FineVideo.
     ``dist_s`` (fin de scene -> debut de fenetre) est garde pour verifier que les
     poids ne se concentrent pas sur le recent (biais de recence du professeur).
 
@@ -28,7 +28,7 @@ dernier clip, le passe = les clips d'avant. Fins de fenetre : ``--ends`` (en cli
 
     PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 python -m titans.graft.distill_targets \\
         --data data/finevideo --basis cache/qwen_l24_pca128.pt \\
-        --shard 0 --nshards 5 --out ~/work/iclr/distill/targets
+        --shard 0 --nshards 5 --out runs/distill/targets
 """
 from __future__ import annotations
 

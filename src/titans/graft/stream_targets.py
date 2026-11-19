@@ -26,7 +26,7 @@ reponse forcee ; on garde ses etats de derniere couche aux positions de la repon
 l'enseignant (plafond) et de Qwen sur la fenetre seule (plancher).
 
     PYTHONPATH=src python -m titans.graft.stream_targets --data data/finevideo \\
-        --out ~/work/iclr/stream/tg --shard 0 --nshards 3
+        --out runs/stream/tg --shard 0 --nshards 3
 """
 from __future__ import annotations
 

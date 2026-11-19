@@ -11,14 +11,13 @@ Mesures a l'eval (memes echantillons a chaque fois, videos tenues a l'ecart) :
   mauvaise  = KL ponderee de l'eleve lisant la memoire d'une AUTRE video
   recupere  = (plancher - memoire) / plancher        -> part de l'ecart comblee
   contenu   = (mauvaise - memoire) / plancher        -> part due au BON contenu
-              ([[distillation-gain-is-mostly-not-content]] : 7 % la derniere fois)
   + recupere par type de question et, pour les scenes, par distance a la fenetre
     (la portee de la memoire, en secondes).
 Portes (eta, alpha, theta) et pr(W1) loguees : on surveille la derive "cache".
 
     PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 python -m titans.graft.train_distill \\
-        --targets '~/work/iclr/distill/targets_*.pt' --basis cache/qwen_l24_pca128.pt \\
-        --muon unit --steps 8000 --out ~/work/iclr/distill/unit_s0
+        --targets 'runs/distill/targets_*.pt' --basis cache/qwen_l24_pca128.pt \\
+        --muon unit --steps 8000 --out runs/distill/unit_s0
 """
 from __future__ import annotations
 

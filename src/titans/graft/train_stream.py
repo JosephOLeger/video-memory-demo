@@ -19,7 +19,7 @@ Eval (videos tenues a l'ecart) : precision de la lettre avec la memoire, avec la
 autre video (part du contenu = difference), fenetre seule et enseignant (precalcules) ; par
 type, par distance, et sous-ensemble « dur » (la fenetre seule se trompe).
 
-    PYTHONPATH=src python -m titans.graft.train_stream --targets '~/work/iclr/stream/tg/*.pt' \\
+    PYTHONPATH=src python -m titans.graft.train_stream --targets 'runs/stream/tg/*.pt' \\
         --basis cache/qwen_l24_pca128.pt --out run
 """
 from __future__ import annotations

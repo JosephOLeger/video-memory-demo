@@ -3,29 +3,28 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .venv/
-venv/
 build/
 dist/
+.DS_Store
+
+# outputs and data: never in git
 *.pt
 *.pth
-.DS_Store
-results/smoke_results.json
-results/*_smoke*.json
-.claude/
-
-# Sweep artefacts on the workstation. These are outputs, not sources: the caches and
-# checkpoints are large (the encoded corpus alone is 19 GB) and the box holds the only
-# copy, so a checkout there must never touch them. Keeping them ignored is what makes
-# `git reset --hard` safe on the box.
+*.safetensors
+*.jsonl
+!results/**/*.jsonl
+*.parquet
+*.mp4
+*.mkv
+*.webm
+*.log
+runs/
 cache/
-ckpt/
-logs/
-archive/
-jobs_*.txt
-jobs_*.txt.lock
-echo_*.json
-ablation_*.json
-nan_diag*/
-mkjobs_*.sh
-mqar_*.json
+data/
 results/box/
+results/**/*.pt
+hf/
+paper_b/text/bl_data/
+paper_b/text/evalsets/
+paper_b/text/rich/
+paper_b/baselines/src_dl/

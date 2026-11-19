@@ -23,13 +23,13 @@ Loss
 ``L = CE(lettre) + lambda * L_dense``. ``L_dense`` : a chaque ecriture t, la lecture
 ``M_t(q*)`` (apres ecriture, requete constante apprise) doit predire le latent suivant
 ``z_{t+1}`` via une tete lineaire. C'est l'objectif du world model, qui recompense la recence et y fait
-collapser ``unit`` ([[collapse-is-horizon-retreat]]). Les deux bras ``--muon unit`` /
+collapser ``unit``. Les deux bras ``--muon unit`` /
 ``unit_squash`` partagent l'objectif : seule la regle d'ecriture differe.
 
     PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 python -m titans.graft.train_load \\
         --data data/finevideo --basis cache/qwen_l24_pca128.pt \\
-        --bank ~/work/iclr/load/bank.pt --muon unit --dense-lambda 1.0 \\
-        --steps 4000 --out ~/work/iclr/load/unit_l1_s0
+        --bank runs/load/bank.pt --muon unit --dense-lambda 1.0 \\
+        --steps 4000 --out runs/load/unit_l1_s0
 """
 from __future__ import annotations
 
@@ -224,15 +224,21 @@ def write_stream(branch, z, chunk, dense_head=None, delta=1, noise=0.0):
         Y = torch.stack(ys, 1)                                  # [1, N, d]
         if branch.norm_r is not None:
             Y = branch.norm_r(Y)
-        if delta > 0:                       # cible future z_{t+delta}
-            pred, tgt = dense_head(Y[:, :-delta]), z[:, delta:].detach()
-        else:                               # cible passee z_{t-D} (controle "lointain")
-            D = -delta
-            pred, tgt = dense_head(Y[:, D:]), z[:, :-D].detach()
-        if noise > 0:                       # controle de previsibilite (revue du 13/10) :
-            # cible bruitee, R^2 atteignable <= 1 / (1 + noise^2)
-            tgt = tgt + noise * tgt.std() * torch.randn_like(tgt)
-        ld = F.mse_loss(pred, tgt) / tgt.var().clamp_min(1e-6)
+        # ``delta`` may be a list, one horizon per element of the batch (drawn from a
+        # gaussian by --dense-delta-sigma); the loss is the mean over the elements.
+        deltas = list(delta) if isinstance(delta, (list, tuple)) else [int(delta)] * z.shape[0]
+        lds = []
+        for b, d in enumerate(deltas):
+            if d > 0:                       # cible future z_{t+delta}
+                pred, tgt = dense_head(Y[b:b + 1, :-d]), z[b:b + 1, d:].detach()
+            else:                           # cible passee z_{t-D} (controle "lointain")
+                D = -d
+                pred, tgt = dense_head(Y[b:b + 1, D:]), z[b:b + 1, :-D].detach()
+            if noise > 0:                   # controle de previsibilite (revue du 13/10) :
+                # cible bruitee, R^2 atteignable <= 1 / (1 + noise^2)
+                tgt = tgt + noise * tgt.std() * torch.randn_like(tgt)
+            lds.append(F.mse_loss(pred, tgt) / tgt.var().clamp_min(1e-6))
+        ld = torch.stack(lds).mean()
     gates = (al.detach(), et.detach(), th.detach())
     return state, S, ld, gates
 
@@ -357,6 +363,11 @@ def main() -> None:
     ap.add_argument("--dense-lambda", type=float, default=0.0, dest="dense_lambda")
     ap.add_argument("--dense-delta", type=int, default=1, dest="dense_delta",
                     help="horizon de la cible dense, en ecritures : predit z_{t+delta} ; negatif = z_{t-D} (rappel)")
+    ap.add_argument("--dense-delta-sigma", type=float, default=0.0, dest="dense_delta_sigma",
+                    help="> 0 : horizon tire par element du lot dans N(dense_delta, sigma^2), arrondi, "
+                         "tronque a [dense-delta-lo, dense-delta-hi], 0 remplace par +-1")
+    ap.add_argument("--dense-delta-lo", type=int, default=-48, dest="dense_delta_lo")
+    ap.add_argument("--dense-delta-hi", type=int, default=48, dest="dense_delta_hi")
     ap.add_argument("--dense-gate-sg", action="store_true", dest="dense_gate_sg",
                     help="la loss dense n'entraine PAS les portes (alpha, eta, theta) : elles "
                          "ne recoivent que le gradient de la tache (remede a l'extinction)")
@@ -467,7 +478,8 @@ def main() -> None:
                                 branch.memory.theta_head) for p in h.parameters()}
     non_gate = [p for p in params + hparams if id(p) not in gate_ids]
     print(f"greffe couche {site} : {sum(p.numel() for p in params)} params, "
-          f"muon={mem_kw['orthogonalize_momentum']} lambda={a.dense_lambda} delta={a.dense_delta}", flush=True)
+          f"muon={mem_kw['orthogonalize_momentum']} lambda={a.dense_lambda} delta={a.dense_delta}"
+          f" sigma={a.dense_delta_sigma} [{a.dense_delta_lo},{a.dense_delta_hi}]", flush=True)
 
     def lr_scale(step):
         if a.warmup and step < a.warmup:
@@ -489,6 +501,7 @@ def main() -> None:
     hist, t0, last_gn = [], time.time(), float("nan")
     run_ce = run_d = 0.0
     gate_log = []
+    delta_hist = []
     n_oom = 0
     for step in range(a.steps):
         for g in opt.param_groups:
@@ -508,8 +521,19 @@ def main() -> None:
             ce, ld_sum, hits = 0.0, None, []
             for m0 in range(0, a.batch, mb):
                 z = z_all[m0:m0 + mb].to(a.device)
+                if a.dense_delta_sigma > 0:
+                    dl = []
+                    for _ in range(z.shape[0]):
+                        d = int(round(rng.gauss(a.dense_delta, a.dense_delta_sigma)))
+                        d = max(a.dense_delta_lo, min(a.dense_delta_hi, d))
+                        if d == 0:
+                            d = rng.choice([-1, 1])
+                        dl.append(d)
+                    delta_hist.extend(dl)
+                else:
+                    dl = a.dense_delta
                 state, S, ld, (al, et, th) = write_stream(branch, z, a.chunk, dense_head,
-                                                          a.dense_delta, a.dense_noise)
+                                                          dl, a.dense_noise)
                 ce_m = 0.0
                 for j, (_, _, key, col) in enumerate(smp[m0:m0 + mb]):
                     wrapper.carry, wrapper.token_offset = (take(state, j), take(S, j)), 0
@@ -583,6 +607,7 @@ def main() -> None:
         if a.out and (step % 50 == 0 or last or (step + 1) % a.eval_every == 0):
             with open(a.out + ".json", "w") as f:
                 json.dump({"args": vars(a), "history": hist, "gates": gate_log,
+                           "delta_hist": delta_hist[-50000:],
                            "elapsed_s": time.time() - t0}, f, indent=1)
         if a.stop_after and step + 1 >= a.stop_after:
             break

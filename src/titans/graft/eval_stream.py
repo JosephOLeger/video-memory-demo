@@ -15,7 +15,7 @@ on ne tient jamais que la fenetre, le reste vit dans la memoire.
 
 Controle ``--memory-source mismatched`` : le passe d'une AUTRE video (meme cout,
 meme nombre d'ecritures, mauvais contenu) -> isole ce que la memoire RETIENT du
-contenu, pas l'apport de la branche en plus ([[lvb-gain-is-not-memory-content]]).
+contenu, pas l'apport de la branche en plus.
 
 Score par logit de la lettre (comme eval_lvb), pas par generation.
 

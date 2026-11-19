@@ -16,7 +16,7 @@ Mesures a l'eval (videos tenues a l'ecart, memes QCM a chaque fois) :
              apprend sans contenu (a priori, style des options) ; memoire - mauvaise
              est la part due au CONTENU.
 
-    PYTHONPATH=src python -m titans.graft.train_mcq --targets '~/work/iclr/distill/targets_*.pt' \\
+    PYTHONPATH=src python -m titans.graft.train_mcq --targets 'runs/distill/targets_*.pt' \\
         --mcq mcq3.jsonl --basis cache/qwen_l24_pca128.pt --init dist_unit_s0_at2000.pt --out run
 """
 from __future__ import annotations

@@ -4,32 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "titans-mac"
-version = "0.1.0"
-description = "Deep test-time memories (Titans, ATLAS) from scratch: divergence and silent collapse of bounded writes, a latent video world-model bench, and a memory graft on a frozen Qwen2.5-VL."
+version = "0.2.0"
+description = "Deep test-time memories: stability and collapse (paper A), and a memory branch grafted on a frozen Qwen2.5-VL (paper B)."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = [
-    "torch>=2.2",
-]
+dependencies = ["torch>=2.2"]
 
 [project.optional-dependencies]
 test = ["pytest>=7.0"]
-# Needed only to (re-)encode real video into latents (encoder + EgoLife loaders). The
-# sweeps themselves read a cached latent tensor and are pure torch, so day-to-day work
-# needs none of this. `decord`
-# is what actually works for video decoding in this environment; `torchcodec` (a
-# more modern alternative) failed to load here because the system has no `ffmpeg` /
-# `libavutil.so.56` -- with a working ffmpeg it may be a viable swap-in, but nothing
-# in this repo currently imports it.
-worldmodel = [
-    "transformers>=4.55",
-    "huggingface_hub",
-    "decord",
-]
+# the graft (paper B) and the video encoders; the memory itself needs torch only
+graft = ["transformers>=4.55", "huggingface_hub", "accelerate", "decord", "numpy", "matplotlib"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v"

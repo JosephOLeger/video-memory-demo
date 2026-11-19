@@ -8,11 +8,10 @@ nombre a deux chiffres en gros (la cle). La question nomme UNE cle :
     "What was the background color of the frame showing the number 37?"
 
 Le hasard reste 1/8 quel que soit ``K``, donc la courbe ``on(K)`` mesure directement
-combien d'associations la memoire tient. C'est l'analogue VLM du MQAR
-([[mqar-harness-exists]], [[echo-recall-load-dependent-0929]]) : a forte charge, une
+combien d'associations la memoire tient. C'est l'analogue VLM du MQAR : a forte charge, une
 memoire diverse devrait battre une memoire effondree. D'ou les deux bras a comparer,
 ``--muon unit`` (s'effondre sur les longs flux, pr 3-10) et ``--muon unit_squash``
-(reste divers, pr 31-37) ([[long-probe-corrects-step0-0929]]).
+(reste divers, pr 31-37).
 
 Controles, comme le banc aiguille :
   off   : fenetre seule                                   -> hasard

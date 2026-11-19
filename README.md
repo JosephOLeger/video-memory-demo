@@ -1,152 +1,106 @@
 # titans-mac
 
-Deep test-time memories (Titans, ATLAS) in PyTorch, written from scratch, and the
-experiments behind two papers:
+Deep test-time memories in PyTorch, written from scratch, and the experiments behind two papers.
 
-* **Paper A** (theory, ICLR 2027 submission): why a deep test-time memory diverges, and
-  why, once its write is bounded, it collapses silently. The outer loop learns to switch
-  off the momentum gate, and the memory state concentrates on a few directions while
-  the task loss does not notice.
-* **Paper B** (in progress): a memory branch grafted onto a frozen Qwen2.5-VL-3B, for
-  long video streams (fixed fps, sliding window, the memory keeps what leaves the
-  window).
+* **Paper A** (theory, ICLR 2027 submission): a deep test-time memory diverges, and once its write is bounded it
+  collapses silently. The outer loop learns to switch off the momentum gate and the state concentrates on a few
+  directions while the task loss does not notice.
+* **Paper B** (in progress): a small memory branch grafted onto a frozen Qwen2.5-VL-3B. It reads the layer-24
+  states that leave a 256-token window, writes them into 16.6k weights by gradient steps, and is read back by the
+  window. Content is measured against a memory written from another text or another video.
 
-The memory is the research object. The latent world model (paper A) and the VLM graft
-(paper B) are what stress it.
+The memory is the research object. The latent world model (paper A) and the Qwen graft (paper B) are what stress it.
 
 ## Install
 
 ```bash
-pip install -e '.[test]'          # torch only; add '.[worldmodel]' to encode video
-PYTHONPATH=src python -m pytest   # ~275 tests, under a minute on CPU
+pip install -e '.[test]'          # torch only
+pip install -e '.[graft]'         # adds transformers and the video decoders, for paper B
+PYTHONPATH=src python -m pytest   # 275 tests, under a minute on CPU
 ```
 
-Every command below assumes `PYTHONPATH=src` and runs from the repo root.
+Every command below runs from the repository root with `PYTHONPATH=src`. The data, checkpoints and run outputs are
+not in git; `docs/DATA.md` says what each experiment needs and where the originals are.
 
-## The memory (`src/titans/memory.py`)
+## Layout
 
-`NeuralMemory` is an MLP whose weights `M` are written at test time by gradient steps
-on an inner key/value loss. Per token `t`, with gates `alpha_t` (forget), `eta_t`
-(momentum) and `theta_t` (step):
+| path | what |
+|---|---|
+| `src/titans/memory.py` | `NeuralMemory`: the MLP written at test time, its gates and write rules |
+| `src/titans/mac.py`, `stability.py` | memory as context; curvature and spectral-radius measurements |
+| `src/titans/worldmodel/` | paper A bench: a two-block world model over EgoLife latents, echo task, retention probes |
+| `src/titans/graft/` | paper B: the branch, the Qwen hook, the training objectives, the video tools |
+| `tests/` | unit tests of all of the above |
+| `paper_a/` | probes, figure scripts, external check on the lucidrains stack, gaussian horizon queue |
+| `paper_b/text/` | the text track: BABILong-like data, thirty question types, trainer, scorers |
+| `paper_b/video/` | the video track: FineVideo fetch and audit, amputated-past queue, CG-Bench tools |
+| `paper_b/baselines/` | AHN (ByteDance) evaluated under our content control |
+| `docs/` | data layout, frozen models, notes on the removed cascade and on ATLAS |
+
+## The memory
+
+`NeuralMemory` is an MLP whose weights `M` are written at test time by gradient steps on an inner key/value loss.
+Per token `t`, with gates `alpha_t` (forget), `eta_t` (momentum) and `theta_t` (step):
 
 ```
-S_t = eta_t S_{t-1} - grad_t                  (momentum buffer, raw gradients)
+S_t = eta_t S_{t-1} - grad_t
 M_t = (1 - alpha_t) M_{t-1} + dM_t
 ```
 
-The write `dM_t` is the object of paper A. Three rules (`titans.memory.WRITE_RULES`):
+Two write rules remain (`titans.memory.WRITE_RULES`):
 
-| rule | write | role |
+| rule | write | behaviour |
 |---|---|---|
-| `False` | `dM = S_t` with `S_t = eta S - theta grad` | literal Titans; diverges |
-| `"unit"` (`--muon unit`, the `sane_ns` default) | `theta_t NS5(S_t)` with `S_t = eta S - grad` | ATLAS Eq 32; bounded, collapses |
-| `"unit_squash"` (`--muon unit_squash --muon-scale c`) | `theta_t psi_c(‖S_t‖) NS5(S_t)`, `psi_c(n) = (2/pi) arctan(pi n / 2c)` | "usq": same bound, amplitude grows with ‖S‖; does not collapse |
+| `unit` (default) | `theta_t NS5(S_t)` | ATLAS eq. 32; bounded, collapses |
+| `unit_squash` (`--muon unit_squash --muon-scale c`) | `theta_t psi_c(‖S_t‖) NS5(S_t)` | same bound, amplitude grows with ‖S‖; does not collapse |
 
-Writes happen at every token, with the gradient taken at the weights frozen at the
-start of each chunk (`memory_chunk_size`). Also in this file:
+The literal Titans rule (`orthogonalize_momentum=False`) is kept for the divergence measurements. Writes happen at
+every token with the gradient taken at the weights frozen at the start of each chunk. The file also holds the
+ATLAS additions (Omega sliding window, polynomial feature map), `rank_cap`, and the replay instruments
+`alpha_override`, `eta_override`, `theta_override`. The metaplastic cascade and the abandoned write rules were
+removed in October 2026 (last version with them: commit `6a044ea`); `docs/CASCADE_NOTES.md` says what was learned from them.
 
-* ATLAS additions: Omega sliding window (`omega_window`, `omega_stride`) and the
-  polynomial feature map (`feature_degree`).
-* `rank_cap`.
-* Replay instruments `alpha_override`, `eta_override` and `theta_override`, used by
-  the chimera and dose probes.
+## Paper A in short
 
-`mac.py` is Memory As Context, which reads the memory into the attention context.
-`stability.py` holds the curvature measurements. The metaplastic momentum cascade and
-the abandoned write rules (`rescale`, `clip`, `squash`, `softclip`) were removed on
-2026-10-16; the last version with them is the git tag `archive/cascade-2026-10-16`.
-
-## Paper A: the bench (`src/titans/worldmodel/`)
-
-A two-block MAC world model over PCA-128 EgoLife latents, trained on the `[V;V]` echo
-task: the second copy of a video can only be predicted well if the memory kept the
-first.
+A two-block world model over PCA-128 EgoLife latents is trained on the `[V;V]` echo task: the second copy of a video
+is predictable only if the memory kept the first.
 
 ```bash
-# train one bench model (10k steps, checkpoints every 2k in frozen_muon/)
 python -m titans.worldmodel.echo --label mu_unit10k_s0 \
   --train cache/egolife_pca128_train.pt --val cache/egolife_pca128_val.pt \
   --horizon 24 --steps 10000 --seed 0 --eta-init 0.995 --theta-scale 0.03 \
   --alpha-init 0.002 --muon unit --frozen-every 2000 \
   --out mu_unit10k_s0.json --frozen-out frozen_muon/mu_unit10k_s0.pt
-# usq: --muon unit_squash --muon-scale 350
 ```
 
-* `make_pca_cache` builds the PCA cache, which `echo` requires.
-* `frozen.py` saves and loads the trained models. Which frozen models exist, and what
-  each family is: `docs/FROZEN.md`.
-* `retention.py`, `margin.py` and `long_run.py` measure retention, margin and long
-  streams.
-* The replay probes live in `scripts/diag_*`. The main one is
-  `diag_pr_collapse_probe.py`, which replays a frozen model on long streams and
-  records the state participation ratio and the gates. `diag_eta_probe.py` and
-  `diag_swap_probe.py` wrap it to force eta, or to swap gate heads between models.
+The replay probes, the figure scripts and the external check are in `paper_a/` (its README has the figure table).
 
-### Reproducing the paper A figures
+## Paper B in short
 
-| figure | script | input |
-|---|---|---|
-| state law, pr vs gates | `scripts/fig_state_law.py` | `results/prlaw2`, `results/prlaw3`, `results/alpha_eff` |
-| state norm | `scripts/fig_state_norm.py` | `results/prlaw3`, `results/d2interne`, `results/titans_lit` |
-| interventions (chimeras, dose) | `scripts/fig_interventions.py` | `results/prlaw3`, `results/s5` |
-| step x window | `scripts/fig_theta_eff.py` | `results/theff2` |
-| mechanism, loss blind to the wall | `scripts/fig_mechanism.py`, `scripts/fig_loss_blind.py` | `results/d2interne` (trained under the removed `rescale` rule: the data is kept, the trainer is in the archive tag) |
-| retention protocol | `scripts/fig_protocol.py` | (schematic) |
-| pr law (simulation and predictor) | `scripts/sim_pr_law.py`, `scripts/fig_pr_law.py` | `results/sim_pr_law.json`, `results/prlaw` |
+`MemoryBranch` (`src/titans/graft/branch.py`) sits beside one high decoder layer of the frozen host. The host's
+attention is never replaced and the branch is the identity at initialisation. It projects the layer states to 128
+dimensions with a fixed PCA basis (`fit_basis.py`), writes them into a `NeuralMemory` (hidden 64, 16.6k weights,
+65 KB of state whatever the length read), and adds its read back to the layer output. 0.33M parameters train:
+the projections, the gate heads, the memory's initial weights.
 
-`scripts/figstyle.py` holds the shared style. The generators of the data behind
-these figures:
+Two tracks share this branch:
 
-* `run_prlaw2.sh`, which calls `diag_pr_collapse_probe.py`;
-* `diag_titans_train.py`, which writes `titans_lit`;
-* `diag_nons_train.py` and `diag_decouple_train.py`.
+* **text** (`paper_b/text/`): the past of a story is written in chunks of 256 tokens, the question is hidden at
+  write time. Training data are BABILong-like stories (bAbI facts hidden in PG19) and thirty classic memory question
+  types in seven surface forms. Evaluation on the official BABILong test, LongMemEval, LoCoMo, RULER, LongBench,
+  InfiniteBench En.Dia, plus the cost on the host (MMLU, TriviaQA, TextVQA, ...). Every table carries the window-only
+  and full-context host, a memory written from another text, and two untrained memories (sliding notes, BM25).
+* **video** (`paper_b/video/` and `titans.graft.train_ctx`): the memory replaces the clips that left the window,
+  trained by distillation towards the same Qwen seeing the whole video. The control is a memory written from another
+  video.
 
-The external check on the lucidrains reference stack is reproduced by `patch_psic.py`,
-`train_r_psic.py`, `probe_r_*.py`, `measure_r_gates.py` and `eval_r_bpc.py`.
+## Status of the results (November 2026)
 
-Most of `results/` is not tracked by git (only about 8 MB of it is). The trained
-models in `frozen_muon/` live on the lab machines.
+* Text, BABILong 8k to 32k: the own memory beats the window, the sliding notes and AHN; a memory from another
+  text is 15 to 25 points below, on three seeds. Full context and BM25 retrieval, which keeps the whole text or reads
+  the question, stay above.
+* Text, question types never trained: no gain.
+* Video: the gain over the window is answer style, not content; a memory from another video scores the same.
+* Host cost: 2 to 3 points on TriviaQA while a memory is carried.
 
-## Paper B: the graft (`src/titans/graft/`)
-
-A `MemoryBranch` sits at one high decoder layer of a frozen Qwen2.5-VL-3B. It is a
-lateral branch: Qwen's attention is never replaced, and the branch is the identity at
-init. It reads PCA-128 projections of the layer states (`fit_basis.py`, one token in
-8) and writes them into a `NeuralMemory`. Main pieces:
-
-* `branch.py`, `qwen.py`, `check_qwen.py`: the branch, the hook, and identity checks.
-* `train_color.py`: the first functional result, recall of a past colour flash
-  (`needle.py` builds the needle).
-* `train_load.py`: the heavy-load associative task (K pairs, assembled-past bank).
-  Paper A uses it to show that free gates kill the memory while blocked gates keep it,
-  with no difference on the task.
-* `stream_targets.py`, `stream_color_targets.py` and `train_stream.py`: the streaming
-  regime. Questions are about shapes, colours or objects that left the window; the
-  loss is CE plus an answer-latent distance to a teacher that sees the evidence.
-  `eval_stream.py` scores it with the right memory, a wrong-video memory, the window
-  alone, and the teacher.
-* `demo_server.py` and `demo.html`: the interactive colour demo.
-* `experiments/text/demo_text_server.py` and `demo_text.html`: the text demo. A story
-  (drawn from the v2 or v3 bench, or pasted), a question and up to 4 options; the past is
-  read in stream and written into the memory, then Qwen alone, Qwen with the memory and
-  Qwen with the full story answer. Run it from the text working directory (with `pylib/`):
-  `CUDA_VISIBLE_DEVICES=2 PYTHONPATH=pylib python demo_text_server.py --ckpt "Name=run.pt"`.
-
-```bash
-python -m titans.graft.stream_color_targets --reuse ~/work/iclr/stream/tg \
-  --data data/finevideo --out ~/work/iclr/stream/tgc
-python -m titans.graft.train_stream --targets '~/work/iclr/stream/tgc/*.pt' \
-  --basis cache/qwen_l24_pca128.pt --kinds color --max-past 8 \
-  --lam-lat 0 --lam-con 0 --lr 3e-3 --steps 4000 --out run
-```
-
-The training data is FineVideo (`scripts/fetch_finevideo.py`, `audit_finevideo.py`).
-It has no overlap with LongVideoBench.
-
-## Where things live
-
-* The lab journal is kept outside the repo. Long runs go on the lab machines, under
-  `~/work/iclr/` on each.
-* `scripts/nightly_report.sh`, `status_md.py` and `pull_report.sh` are called by a
-  cron job that mirrors the box into `results/box`. Do not delete them while that
-  job exists.
+The lab notebook with every run and decision is kept outside the repository.

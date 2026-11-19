@@ -13,7 +13,7 @@ Quatre conditions par echantillon (le metre-etalon) :
   wrong    : fenetre + memoire d'un passe a une AUTRE couleur -> CONTROLE (~hasard)
 
 on >> wrong ~= off ~= hasard, avec ceiling haut : "la memoire recupere un contenu
-passe precis" est demontre proprement ([[lvb-gain-is-not-memory-content]]). La bonne
+passe precis" est demontre proprement. La bonne
 couleur est equilibree (cycle sur la palette) pour qu'un a priori donne pile le
 hasard. On balaye la PROFONDEUR de l'aiguille -> courbe rappel vs distance.
 

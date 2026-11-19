@@ -10,8 +10,8 @@ version avec l'aiguille (``patch``), et l'enseignant voit [clip de preuve | fene
 fenetre et au plus ``max_gap`` clips (passe court d'abord : on veut d'abord savoir si le
 flux peut apprendre). Seuls les champs ``qs`` et ``windows`` changent.
 
-    PYTHONPATH=src python -m titans.graft.stream_color_targets --reuse ~/work/iclr/stream/tg \\
-        --data data/finevideo --out ~/work/iclr/stream/tgc --shard 0 --nshards 1
+    PYTHONPATH=src python -m titans.graft.stream_color_targets --reuse runs/stream/tg \\
+        --data data/finevideo --out runs/stream/tgc --shard 0 --nshards 1
 """
 from __future__ import annotations
 

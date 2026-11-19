@@ -7,8 +7,8 @@ l'aiguille dans CHACUNE des 6 couleurs, avec ses options et sa reponse. ``train_
 --variants`` tire une variante au hasard a chaque passage : la meme video donne des reponses
 differentes, l'identite de la video ne sert plus. Les questions d'eval ne changent pas.
 
-    PYTHONPATH=src python -m titans.graft.stream_color_variants --tgc ~/work/iclr/stream/tgc \\
-        --data data/finevideo --out ~/work/iclr/stream/tgv --shard 0 --nshards 2
+    PYTHONPATH=src python -m titans.graft.stream_color_variants --tgc runs/stream/tgc \\
+        --data data/finevideo --out runs/stream/tgv --shard 0 --nshards 2
 """
 from __future__ import annotations
 
